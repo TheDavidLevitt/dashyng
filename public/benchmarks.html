@@ -1,0 +1,38 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Benchmarks — APA knowledge base</title>
+<style>
+:root{color-scheme:dark;--bg:#0b0f14;--card:#131a22;--card2:#0f151c;--border:#243140;--text0:#fff;--text:#dbe4ee;--text2:#8fa1b3;--text3:#5c6f82;--accent:#4da3ff;--green:#34d399;--amber:#fbbf24}
+body{font-family:-apple-system,system-ui,sans-serif;background:var(--bg);color:var(--text);max-width:860px;margin:0 auto;padding:14px 12px 60px;font-size:13.5px;line-height:1.55}
+h1{font-size:18px;margin:6px 0 2px}a{color:var(--accent);text-decoration:none}
+.card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px 18px;margin-top:16px}
+.tiny{color:var(--text3);font-size:10.5px}.muted{color:var(--text2);font-size:12px}
+h3{font-size:15px;margin:0 0 8px;color:var(--text0)}
+h3 .bl{color:var(--accent);font-weight:400;font-size:11px;margin-left:8px}
+.kv{display:grid;grid-template-columns:96px 1fr;gap:2px 12px;margin:6px 0;font-size:13px}
+.kv b{color:var(--accent);font-weight:650;font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;padding-top:2px}
+.kv.alt b{color:var(--green)}
+.cq{background:var(--card2);border-left:3px solid var(--green);border-radius:6px;padding:7px 11px;margin-top:8px;font-size:12.5px}
+.notes{color:var(--text3);font-size:11.5px;margin-top:8px;border-top:1px solid var(--border);padding-top:6px}
+</style></head><body>
+<p style="margin:0"><a href="/agents.html">← agents</a> · <a href="/">dashboard</a></p>
+<h1>Benchmark knowledge base</h1>
+<div class="muted" id="meta">Loading… <span class="tiny">Compiled by the Agent Procurement Agent (APA), refined nightly by the CI from adoption outcomes — this page reads the live knowledge base, not a static doc.</span></div>
+<div id="list"></div>
+<script>
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+fetch('/api/apa/benchmarks').then(r=>r.json()).then(d=>{
+  const bs=d.benchmarks||[];
+  document.getElementById('meta').innerHTML=bs.length?`${bs.length} benchmarks · updated ${d.updated?new Date(d.updated).toLocaleDateString('en-GB',{day:'2-digit',month:'short'}):'—'} <span class="tiny">· APA-compiled, CI-refined nightly — live, not a static doc</span>`:'Knowledge base not compiled yet — it builds with the next APA scan (or POST /api/apa/benchmarks from the Mac).';
+  document.getElementById('list').innerHTML=bs.map(b=>{
+    const cq=Object.entries(b.cheapestQualified||{}).map(([role,c])=>`<div class="cq">💰 Cheapest meeting the <b>${esc(role)}</b> bar (≥${c.min}): <b>${esc(c.model)}</b> — $${c.priceOut}/1M out @ ${c.score}</div>`).join('');
+    return `<div class="card"><h3>${esc(b.name)}${b.boardTop?`<span class="bl">board leader: ${esc(b.boardTop.model)} @ ${b.boardTop.score}</span>`:''}</h3>`
+      +(b.measures?`<div class="kv"><b>Measures</b><span>${esc(b.measures)}</span></div>`:'')
+      +(b.goodFor?`<div class="kv alt"><b>Good for</b><span>${esc(b.goodFor)}</span></div>`:'')
+      +(b.cutoffs?`<div class="kv"><b>Cutoffs</b><span>${esc(b.cutoffs)}</span></div>`:'')
+      +(b.leader?`<div class="kv alt"><b>Leader</b><span>${esc(b.leader)}</span></div>`:'')
+      +cq
+      +(b.notes?`<div class="notes">${esc(b.notes)}</div>`:'')
+      +`</div>`;
+  }).join('');
+}).catch(()=>{document.getElementById('meta').textContent='unavailable';});
+</script></body></html>

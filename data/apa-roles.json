@@ -1,0 +1,100 @@
+{
+  "_doc": "Use cases (roles): primary = plot y-axis benchmark; min = quality threshold (user value overrides APA's hypothesis); winner = currently selected model; fallbacks = ordered stand-ins when the winner hits subscription limits or is unavailable; modules = which agent modules run under this role; special = capability note when no public benchmark applies. all_benchmarks = the well-known set the board compiler always tries to fill. CI refines everything from outcomes; manual edits win.",
+  "roles": {
+    "thoroughbred": {
+      "label": "Thoroughbred \u2014 top reasoning",
+      "primary": "AA Intelligence",
+      "benchmarks": [
+        "AA Intelligence",
+        "GPQA Diamond",
+        "HLE",
+        "ARC-AGI",
+        "SWE-bench Verified",
+        "AIME"
+      ],
+      "winner": "claude-opus-4-8",
+      "fallbacks": [
+        "gpt-5.5",
+        "gemini-3.1-pro"
+      ],
+      "modules": [
+        "orch-esc",
+        "ci-esc"
+      ]
+    },
+    "steeldust": {
+      "label": "Steeldust \u2014 daily driver",
+      "primary": "AA Intelligence",
+      "benchmarks": [
+        "AA Intelligence",
+        "LMArena",
+        "MMLU-Pro",
+        "HLE"
+      ],
+      "winner": "claude-sonnet-5",
+      "fallbacks": [
+        "gemini-2.5-pro",
+        "gemini-2.5-flash"
+      ],
+      "modules": [
+        "heartbeat",
+        "ci",
+        "summary",
+        "brief",
+        "apa-scan",
+        "news"
+      ]
+    },
+    "workhorse": {
+      "label": "Workhorse \u2014 cheapest adequate",
+      "primary": "AA Intelligence",
+      "benchmarks": [
+        "AA Intelligence",
+        "MMLU-Pro",
+        "LiveCodeBench"
+      ],
+      "winner": "claude-haiku-4-5",
+      "fallbacks": [
+        "gemini-2.5-flash"
+      ],
+      "modules": [
+        "extraction",
+        "dedup",
+        "following-substack",
+        "wiki",
+        "mobile"
+      ]
+    },
+    "x-access": {
+      "label": "X access",
+      "primary": "AA Intelligence",
+      "benchmarks": [
+        "AA Intelligence"
+      ],
+      "winner": "grok-4.3",
+      "fallbacks": [],
+      "modules": [
+        "grok"
+      ],
+      "special": "Capability stand-in, not a benchmark race: grok's x_search is the only live X API access \u2014 reserved for X per policy; no public benchmark measures this. Fallback is none (feature degrades gracefully)."
+    }
+  },
+  "all_benchmarks": [
+    "AA Intelligence",
+    "LMArena",
+    "MMLU-Pro",
+    "GPQA Diamond",
+    "HLE",
+    "ARC-AGI",
+    "ARC-AGI-2",
+    "SWE-bench Verified",
+    "AIME",
+    "LiveCodeBench",
+    "MATH-500",
+    "LMArena Image (t2i)",
+    "MMMU (image understanding)",
+    "TTS Arena ELO",
+    "STT WER (lower is better)"
+  ],
+  "track_non_us_os": 3
+}

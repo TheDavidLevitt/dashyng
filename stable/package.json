@@ -1,0 +1,15 @@
+{
+  "name": "agent-stable",
+  "version": "0.2.0",
+  "description": "Cost-performance management for a stable of AI models: meter every call by source-of-funds, benchmark the market by use case, and let a procurement agent test and adopt cheaper-or-better models — reversibly and fully logged.",
+  "main": "index.js",
+  "scripts": {
+    "demo": "node demo.js",
+    "test": "node test.js"
+  },
+  "keywords": ["llm", "cost", "benchmark", "model-selection", "procurement", "agents", "observability", "multi-model"],
+  "author": "David Levitt",
+  "repository": { "type": "git", "url": "git+https://github.com/TheDavidLevitt/agent-stable.git" },
+  "license": "MIT",
+  "engines": { "node": ">=18" }
+}

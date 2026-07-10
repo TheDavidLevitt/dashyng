@@ -1,0 +1,255 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Agents — Stable · Incoming · APA</title>
+<script>document.documentElement.dataset.theme = localStorage.getItem('theme') || 'dark';</script>
+<style>
+/* same palette as the dashboard (index.html) — this page ignored the theme toggle until now */
+:root[data-theme="dark"]{color-scheme:dark;--bg:#0b0f14;--card:#131a22;--card2:#0f151c;--border:#243140;--text0:#fff;--text:#dbe4ee;--text2:#8fa1b3;--text3:#5c6f82;
+--accent:#4da3ff;--green:#34d399;--red:#f87171;--amber:#fbbf24;--violet:#a78bfa}
+:root[data-theme="light"]{color-scheme:light;--bg:#f5f7fa;--card:#fff;--card2:#f9fafb;--border:#e5e7eb;--text0:#000;--text:#1f2937;--text2:#6b7280;--text3:#9ca3af;
+--accent:#2563eb;--green:#15803d;--red:#dc2626;--amber:#b45309;--violet:#6d28d9}
+body{font-family:-apple-system,system-ui,sans-serif;background:var(--bg);color:var(--text);max-width:900px;margin:0 auto;padding:14px 12px 60px;font-size:13.5px;line-height:1.45}
+h1{font-size:17px;margin:6px 0 2px}
+h2{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--text2);margin:18px 0 4px}
+a{color:var(--accent);text-decoration:none}
+.card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:8px 11px}
+.tiny{color:var(--text3);font-size:10.5px}.muted{color:var(--text2);font-size:12px}.empty{color:var(--text3);font-style:italic;font-size:12.5px}
+.err{color:var(--amber)}
+button{background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:5px;padding:3px 10px;font-size:12px;cursor:pointer}
+button:hover{border-color:var(--accent)}
+input,select{background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:5px;padding:3px 6px;font-size:12px}
+input[type=number]{width:64px}
+table{width:100%;border-collapse:collapse;font-size:11.5px}
+td,th{padding:3px 6px;border-bottom:1px solid var(--border);white-space:nowrap;text-align:left}
+th{font-weight:600;font-size:10px;text-transform:uppercase;color:var(--text3)}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
+.chip{display:inline-block;padding:0 7px;border-radius:9px;font-size:10.5px;border:1px solid var(--border)}
+details{margin-top:8px}summary{cursor:pointer;font-size:11px;text-transform:uppercase;font-weight:700;color:var(--text2);padding:3px 0}
+label.t{cursor:pointer;font-size:12px;margin-right:14px;color:var(--text2)}
+#theme-btn{float:right;background:var(--card);color:var(--text2);border:1px solid var(--border);border-radius:5px;padding:2px 9px;font-size:11px;cursor:pointer}
+</style></head><body>
+<p style="margin:0"><a href="/">← dashboard</a> · <a href="/procurement.html">policy</a> <button id="theme-btn"></button></p>
+<script>
+const themeBtn = document.getElementById('theme-btn');
+const setThemeBtn = () => themeBtn.textContent = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+themeBtn.onclick = () => { const t = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'; document.documentElement.dataset.theme = t; localStorage.setItem('theme', t); setThemeBtn(); };
+setThemeBtn();
+</script>
+<h1>Agents</h1>
+<div class="muted" id="sum-line">Loading…</div>
+
+<h2>Credits &amp; quotas <span class="muted" style="text-transform:none;font-weight:400">— pools the agents draw on; totals are your entries, usage is metered</span></h2>
+<div class="card" id="credits"><div class="empty">Loading…</div></div>
+<h2>Model use (7d)</h2><div class="card" id="model-use"><div class="empty">Loading…</div></div>
+<h2>Agent Procurement Agent <span class="muted" id="apa-meta" style="text-transform:none;font-weight:400"></span></h2>
+<div class="card" id="apa-body"><div class="empty">Loading…</div></div>
+<h2>Benchmark board <span class="muted" id="board-meta" style="text-transform:none;font-weight:400"></span></h2>
+<div class="card" id="board"><div class="empty">Loading…</div></div>
+<details open><summary>Use cases — benchmarks &amp; thresholds (editable; CI refines from outcomes + your edits)</summary>
+<div class="card" id="roles" style="margin-top:4px"><div class="empty">Loading…</div></div></details>
+<h2>Agent stable <span class="muted" id="stable-meta" style="text-transform:none;font-weight:400"></span></h2>
+<div class="card" id="stable-body"><div class="empty">Loading…</div></div>
+<h2>Agent incoming <span class="muted" id="inc-meta" style="text-transform:none;font-weight:400"></span></h2>
+<div class="card" id="inc-list"><div class="empty">Loading…</div></div>
+
+<script>
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function api(p,o){const r=await fetch(p,{headers:{'content-type':'application/json'},...(o||{})});return r.json();}
+function toast(m){const t=document.createElement('div');t.textContent=m;t.style.cssText='position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--card);border:1px solid var(--border);padding:6px 14px;border-radius:8px;font-size:12px;z-index:99';document.body.appendChild(t);setTimeout(()=>t.remove(),2200);}
+const CCOL={real:'var(--red)',credit:'var(--green)',included:'var(--text2)'};
+function COST(v,cls){if(typeof v==='number')return v>=0.005?`<span style="color:${CCOL[cls]||'var(--text2)'}">$${v.toFixed(2)}</span>`:'';
+  const parts=['real','credit','included'].filter(k=>(v[k]||0)>=0.005).map(k=>`<span style="color:${CCOL[k]}">$${v[k].toFixed(2)}</span>`);
+  const tot=(v.real||0)+(v.credit||0)+(v.included||0);
+  if(!parts.length)return '';if(parts.length===1)return parts[0];
+  return `<span style="color:var(--text2)">$${tot.toFixed(2)}</span> (${parts.join(' + ')})`;}
+const fmtTok=n=>n>=1e6?(n/1e6).toFixed(2)+'M':n>=1e3?Math.round(n/1e3)+'k':(n||0);
+
+// ---- summary line ----
+api('/api/agents/summary').then(d=>{
+  const mo=(d.month.real||0)+(d.month.credit||0)+(d.month.included||0);
+  $('sum-line').innerHTML=`24h: ${fmtTok(d.day.input)} in / ${fmtTok(d.day.output)} out · ${COST(d.day)||'$0'} — month to date <b>$${mo.toFixed(2)}</b> (${COST(d.month)||'$0'})`;
+}).catch(()=>{$('sum-line').textContent='summary unavailable';});
+
+// ---- funding-class coloring: which pool a model burns (subscription/credit vs out-of-pocket) ----
+function fundClass(m){const s=String(m||'').toLowerCase();
+  if(/gpt|openai|grok|together|openrouter|fireworks|deepseek|qwen|glm|llama|kimi|mistral/.test(s))return 'real';   // paid API / hosted
+  if(/gemini|vertex|imagen|claude|sonnet|haiku|opus|fable/.test(s))return 'credit';                                // subscription or credit pool
+  return 'real';}
+function fundSpan(m){return m?`<span style="color:${CCOL[fundClass(m)]}">${esc(m)}</span>`:'';}
+
+// ---- credits & quotas ----
+const BUILTIN_POOLS=['claude-pool','gcp-credits','grok-free','claude-sub'];
+function loadCredits(){
+  api('/api/credits').then(d=>{
+    $('credits').innerHTML=(d.credits||[]).map(c=>{
+      const left=c.total!=null&&c.used!=null?Math.max(0,c.total-c.used):null;
+      const pct=c.total&&c.used!=null?Math.min(100,Math.round(c.used/c.total*100)):null;
+      const bar=pct!=null?`<div style="height:4px;background:var(--card2);border-radius:2px;margin:3px 0"><div style="height:4px;width:${pct}%;border-radius:2px;background:${pct>85?'var(--red)':pct>60?'var(--amber)':'var(--green)'}"></div></div>`:'';
+      const expSoon=c.until&&(new Date(c.until)-Date.now())<21*86400e3;
+      const amt=c.used!=null?`$${c.used.toFixed(2)} used${c.total?` of $${c.total}${left!=null?` — <b style="color:var(--green)">$${left.toFixed(2)} left</b>`:''}`:' (no cap entered)'}`:(c.total?`$${c.total} (not metered)`:'not metered');
+      const del=BUILTIN_POOLS.includes(c.key)?'':` · <a class="tiny" href="#" onclick="delCredit('${esc(c.key)}');return false">✕</a>`;
+      return `<div style="padding:4px 0;border-bottom:1px solid var(--border)"><div style="display:flex;gap:8px;align-items:baseline"><b style="font-size:12.5px">${esc(c.name)}</b><span class="muted" style="font-size:11.5px">${amt}${c.until?` · until <span style="color:${expSoon?'var(--amber)':'inherit'}">${esc(c.until)}</span>`:''}${c.period==='month'?' · resets monthly':''}</span><span style="margin-left:auto"><a class="tiny" href="#" onclick="editCredit('${esc(c.key)}');return false">edit</a>${del}</span></div>${bar}<div class="tiny">${esc(c.note||'')}${c.match?` · matches /${esc(c.match)}/`:''}</div></div>`;
+    }).join('')
+    +`<div style="margin-top:6px"><button onclick="addCredit()">＋ add credit pool</button></div>`
+    +`<div class="tiny" style="margin-top:4px">Usage is metered from the stable's Usage log; totals/expiries APIs can't report are your entries. <b>The APA reads this panel</b> — pools with money left and an expiry are treated as near-free in its arbitrage math, so entering "$X free until Y" steers procurement toward burning them.</div>`;
+  }).catch(()=>{$('credits').innerHTML='<div class="err">unavailable</div>';});
+}
+function creditForm(preset){
+  const name=prompt('Pool name (e.g. "Together.AI promo credits")',preset.name||'');if(name==null)return null;
+  const total=prompt('Total allowance in $ (blank = unknown)',preset.total??'');if(total==null)return null;
+  const until=prompt('Expires (YYYY-MM-DD, blank = no expiry)',preset.until||'');if(until==null)return null;
+  const period=prompt('Resets monthly? (y/n)',preset.period==='month'?'y':'n');if(period==null)return null;
+  const match=prompt('Model/module match pattern (regex over model or module name, e.g. "together|llama") — how metered usage is attributed',preset.match||'');if(match==null)return null;
+  const note=prompt('Assumption note (optional)',preset.note||'')||'';
+  return {name,total:total===''?null:+total,until,period:/^y/i.test(period)?'month':'all',match,note};
+}
+function addCredit(){const f=creditForm({});if(!f)return;api('/api/credits',{method:'POST',body:JSON.stringify(f)}).then(r=>{if(r&&r.error)return toast(r.error);toast('Pool added');loadCredits();});}
+function editCredit(k){
+  api('/api/credits').then(d=>{const c=(d.credits||[]).find(x=>x.key===k)||{};const f=creditForm(c);if(!f)return;
+    api('/api/credits',{method:'POST',body:JSON.stringify({key:k,...f})}).then(()=>{toast('Saved');loadCredits();});});
+}
+function delCredit(k){if(!confirm('Remove pool "'+k+'"?'))return;api('/api/credits',{method:'POST',body:JSON.stringify({key:k,del:true})}).then(r=>{if(r&&r.error)return toast(r.error);toast('Removed');loadCredits();});}
+loadCredits();
+
+// ---- model use ----
+api('/api/model-usage').then(d=>{
+  $('model-use').innerHTML=`<div class="tiny" style="font-weight:700;text-transform:uppercase;margin-bottom:2px">${fmtTok(d.tokIn||0)} in / ${fmtTok(d.tokOut||0)} out · ${COST(d.totals)}</div>`+
+    d.models.map(m=>`<div class="tiny" style="padding:1px 0;font-size:11.5px;color:var(--text2)"><b>${esc(m.model)}</b> — in ${fmtTok(m.input)} / out ${fmtTok(m.output)} · ${COST({real:m.real,credit:m.credit,included:m.included})}</div>`).join('')+
+    `<div class="tiny" style="margin-top:3px"><span style="color:var(--red)">red</span>=charged · <span style="color:var(--green)">green</span>=credit · grey=subscription</div>`;
+}).catch(()=>{$('model-use').innerHTML='<div class="err">unavailable</div>';});
+
+// ---- APA status/config/findings ----
+const APA_ACT={test:'🧪',adopt:'✅',arbitrage:'💱',watch:'👁','':'·'};
+api('/api/apa/status').then(d=>{
+  const ov=Object.keys(d.overrides||{}).filter(k=>!k.startsWith('_')&&!['autoAdopt','crossProvider'].includes(k));
+  const scan=d.lastScan?new Date(d.lastScan).toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}):'never';
+  $('apa-meta').textContent=`— scanned ${scan}`;
+  const tg=(n,on,l)=>`<label class="t"><input type="checkbox" ${on?'checked':''} onchange="apaConfig('${n}',this.checked)" style="vertical-align:-2px"> ${l}</label>`;
+  const adopted=ov.map(k=>`<div class="tiny" style="color:var(--green);font-size:11.5px">✅ ${esc(k)} → <b>${esc(d.overrides[k])}</b> (<a href="#" onclick="apaRevert('${esc(k)}');return false">revert</a>)</div>`).join('');
+  const list=(d.recent||[]).map(r=>`<div class="tiny" style="padding:1px 0;font-size:11.5px">${APA_ACT[r.action]||'·'} <a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.headline)}</a> <span class="muted">${esc(r.lab||r.kind||'')}</span></div>`).join('')||'<div class="empty">No findings yet.</div>';
+  $('apa-body').innerHTML=`<div style="margin-bottom:5px">${tg('autoAdopt',d.autoAdopt,'auto-adopt')}${tg('crossProvider',d.crossProvider,'cross-provider (US)')}<a class="tiny" href="#" onclick="apaScan();return false">scan now</a></div>`+adopted+list;
+}).catch(()=>{$('apa-body').innerHTML='<div class="empty">APA idle.</div>';});
+function apaConfig(k,v){const b={};b[k]=v;api('/api/apa/config',{method:'POST',body:JSON.stringify(b)}).then(()=>toast(k+' '+(v?'on':'off')));}
+function apaScan(){toast('APA scanning…');api('/api/apa/scan',{method:'POST',body:'{}'});}
+function apaRevert(m){api('/api/apa/revert',{method:'POST',body:JSON.stringify({module:m})}).then(()=>{toast('Reverted '+m);location.reload();});}
+
+// ---- benchmark board: plots grouped by each role's chosen benchmark ----
+const LAB_COLOR={anthropic:'#d97757',openai:'#10a37f',google:'#4285f4',xai:'#8fa1b3',meta:'#0668e1'};
+const labColor=l=>{const k=String(l||'').toLowerCase();for(const n in LAB_COLOR)if(k.includes(n))return LAB_COLOR[n];return 'var(--violet)';};
+const CUT_COLOR={reasoning:'#f1948a',daily:'#e9b949',cheap:'#6fcf97'};
+const cutColor=(r,i)=>CUT_COLOR[r]||['#7fb0ff','#e879b4','#b39ddb'][i%3];
+const shortName=m=>String(m||'').replace(/-(preview|latest|instruct)$/i,'').slice(0,14);
+let BOARD=null,boardMode='plots';
+function loadBoard(){api('/api/apa/models').then(d=>{BOARD=d;renderBoard();renderRoles();}).catch(()=>{$('board').innerHTML='<div class="empty">board unavailable</div>';});}
+// Models always plot at their MARKET price (closed = lab API; open-weight = cheapest major host).
+// Self-hosting is a single reference point on the x-axis (^ + dotted line), NOT a per-model
+// reposition — the electricity estimate uses one fixed rig assumption, and per-token energy
+// really varies with model size/throughput, so pretending it prices each model would be false.
+function osPrice(m,d){return m.priceOut;}
+function renderBoard(){
+  const d=BOARD;if(!d)return;const models=d.models||[];
+  if(!models.length){$('board').innerHTML='<div class="empty">empty — <a href="#" onclick="apaBoardCompile();return false">compile now</a> (Mac/VM)</div>';return;}
+  $('board-meta').textContent=`— ${models.length} models · ${d.updated?new Date(d.updated).toLocaleDateString('en-GB',{day:'2-digit',month:'short'}):''}`;
+  const seen={},uniq=models.filter(m=>{const k=(m.model||'').toLowerCase();if(seen[k])return false;seen[k]=1;return true;});
+  const head=`<div style="display:flex;gap:10px;align-items:center;margin-bottom:4px"><a class="tiny" href="#" onclick="boardMode=boardMode==='plots'?'table':'plots';renderBoard();return false">${boardMode==='plots'?'as table':'as plots'}</a><a class="tiny" href="#" onclick="apaBoardCompile();return false">refresh data</a></div>`;
+  const assume=`<div class="tiny" style="margin-top:4px">⚑ open-weight, plotted at cheapest major host's price (host named per model). ^ marks the <b>self-host reference</b>: <b>${d.selfHost.watts}W</b> rig @ <b>${d.selfHost.tokPerSec}</b> tok/s × <b>$${d.selfHost.kwhPrice}/kWh</b> ⇒ <b>$${d.selfHost.perMTokOut}/1M out</b> — a single-rig electricity-only estimate (per-token energy varies with model size/throughput, so it's an axis marker, not a per-model price) — <a href="#" onclick="editSelfHost();return false">edit assumptions</a></div>`;
+  if(boardMode==='table'){
+    const benches=[...new Set(uniq.flatMap(m=>Object.keys(m.benchmarks||{})))].slice(0,6);
+    $('board').innerHTML=head+`<table><tr><th>Model</th><th>Lab</th><th class="n">$/1M in/out</th><th>host</th><th>role</th>${benches.map(b=>`<th class="n" title="${esc(b)}">${esc(b.split(' ')[0].slice(0,8))}</th>`).join('')}</tr>`+
+      uniq.sort((a,b)=>(b.priceOut||0)-(a.priceOut||0)).map(m=>`<tr><td>${m.os?'⚑ ':''}${esc(m.model)}</td><td class="muted">${esc(m.lab||'')}</td><td class="n">${m.priceIn!=null?'$'+m.priceIn+' / '+m.priceOut:'—'}</td><td class="muted">${esc(m.os?(m.host||'?'):'API')}</td><td class="muted">${esc(m.role)}</td>${benches.map(b=>`<td class="n">${m.benchmarks&&m.benchmarks[b]!=null?esc(m.benchmarks[b]):'·'}</td>`).join('')}</tr>`).join('')+`</table>`+assume;
+    return;
+  }
+  // group roles by their primary benchmark → one plot per benchmark, with that group's thresholds
+  const roleKeys=Object.keys(d.roles||{});
+  const groups={};
+  roleKeys.forEach((r,i)=>{const p=(d.roles[r]||{}).primary||'AA Intelligence';(groups[p]=groups[p]||[]).push(r);});
+  $('board').innerHTML=head+Object.entries(groups).map(([primary,rs])=>{
+    const cuts=rs.map((r,i)=>({role:r,min:(d.roles[r]||{}).min??((d.cutoffs||{})[r]||{}).min,by:(d.roles[r]||{}).min!=null?'you':'APA',color:cutColor(r,i)})).filter(c=>c.min!=null);
+    return `<div style="margin-top:6px"><div class="tiny" style="font-weight:650;color:var(--text2);font-size:11px">${esc(primary)} <span style="font-weight:400">— tasks: ${rs.map(r=>esc((d.roles[r]||{}).label||r)).join(' · ')}</span></div>${scatter(uniq,primary,cuts,d)}</div>`;
+  }).join('')+`<div class="tiny" style="margin-top:3px">dashed = task minimum (labeled who set it: you vs APA's hypothesis) · dots colored by lab · ⚑ = open-weight</div>`+assume
+    +Object.entries(d.cutoffs||{}).map(([r,c])=>c&&c.why?`<div class="tiny" style="margin-top:1px"><b style="color:${cutColor(r,0)}">${esc(r)}</b> — APA: ${esc(c.why)}</div>`:'').join('');
+}
+function scatter(models,primary,cuts,d){
+  const pts=models.filter(m=>osPrice(m,d)!=null&&m.benchmarks&&m.benchmarks[primary]!=null).map(m=>({x:Math.max(0.01,osPrice(m,d)),y:+m.benchmarks[primary],m}));
+  if(pts.length<2)return '<div class="empty">not enough priced + benchmarked models for this benchmark</div>';
+  const W=430,H=280,L=30,R=12,T=14,B=32;
+  const lx=v=>Math.log10(v);
+  const sh=d.selfHost&&d.selfHost.perMTokOut>0?d.selfHost.perMTokOut:null; // self-host reference point
+  let xmin=lx(Math.min(...pts.map(p=>p.x).concat(sh?[sh]:[]))),xmax=lx(Math.max(...pts.map(p=>p.x)));
+  xmin-=0.15;xmax+=0.25;
+  const px=v=>L+(lx(v)-xmin)/((xmax-xmin)||1)*(W-L-R);
+  const py=v=>H-B-(v/100)*(H-T-B);
+  let s=`<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;background:var(--card2);border-radius:6px;margin-top:2px">`;
+  for(const yv of [0,25,50,75,100]){const y=py(yv).toFixed(1);s+=`<line x1="${L}" y1="${y}" x2="${W-R}" y2="${y}" stroke="var(--border)" stroke-width="0.5"/><text x="${L-4}" y="${(+y+3).toFixed(1)}" text-anchor="end" font-size="9" fill="var(--text3)">${yv}</text>`;}
+  for(const xv of [0.01,0.03,0.1,0.3,1,3,10,30,100]){if(lx(xv)<xmin-0.02||lx(xv)>xmax+0.02)continue;const x=px(xv).toFixed(1);s+=`<line x1="${x}" y1="${T}" x2="${x}" y2="${H-B}" stroke="var(--border)" stroke-width="0.4"/><text x="${x}" y="${H-B+12}" text-anchor="middle" font-size="9" fill="var(--text3)">$${xv<1?xv:Math.round(xv)}</text>`;}
+  s+=`<text x="${L-2}" y="${T-4}" font-size="9" fill="var(--text2)">${esc(primary)} ↑</text><text x="${W-R}" y="${H-2}" text-anchor="end" font-size="9" fill="var(--text2)">$/1M out (log) →</text>`;
+  if(sh){const x=px(sh).toFixed(1); // self-host electricity reference: ^ on the axis + light dotted line
+    s+=`<line x1="${x}" y1="${T}" x2="${x}" y2="${H-B}" stroke="var(--text3)" stroke-dasharray="1.5 3" stroke-width="0.8" opacity="0.7"/>`;
+    s+=`<text x="${x}" y="${H-B+11}" text-anchor="middle" font-size="10" fill="var(--text2)">^</text><text x="${x}" y="${H-B+20}" text-anchor="middle" font-size="7" fill="var(--text3)">self-host $${sh}</text>`;}
+  for(const c of cuts){const y=py(c.min).toFixed(1);s+=`<line x1="${L}" y1="${y}" x2="${W-R}" y2="${y}" stroke="${c.color}" stroke-dasharray="4 2" stroke-width="1"/><text x="${W-R-2}" y="${(+y-2).toFixed(1)}" text-anchor="end" font-size="8" fill="${c.color}">${esc(c.role)} ≥${c.min} (${c.by})</text>`;}
+  for(const p of pts){const cx=px(p.x),cy=py(p.y),right=cx>W-90;
+    s+=`<circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="2.8" fill="${p.m.os?'var(--text3)':labColor(p.m.lab)}"><title>${esc(p.m.model)} (${esc(p.m.lab||'')}${p.m.os?' · hosted @ '+esc(p.m.host||'cheapest host'):''}) — $${p.x}/1M out · ${esc(primary)} ${p.y}</title></circle>`;
+    s+=`<text x="${(right?cx-4:cx+4).toFixed(1)}" y="${(cy+2.4).toFixed(1)}" ${right?'text-anchor="end"':''} font-size="5.5" fill="var(--text3)">${esc((p.m.os?'⚑':'')+shortName(p.m.model))}</text>`;}
+  return s+'</svg>';
+}
+function editSelfHost(){
+  const d=BOARD.selfHost;
+  const kwh=prompt('Electricity price $/kWh',d.kwhPrice);if(kwh==null)return;
+  const watts=prompt('Rig power draw (watts)',d.watts);if(watts==null)return;
+  const tps=prompt('Sustained output tok/s',d.tokPerSec);if(tps==null)return;
+  api('/api/apa/roles',{method:'POST',body:JSON.stringify({selfHost:{kwhPrice:+kwh,watts:+watts,tokPerSec:+tps}})}).then(()=>{toast('Self-host assumptions saved');loadBoard();});
+}
+function apaBoardCompile(){toast('Compiling board…');api('/api/apa/board',{method:'POST',body:'{}'});}
+
+// ---- roles / use-cases editor ----
+function renderRoles(){
+  const d=BOARD;if(!d)return;
+  const allB=[...new Set([...(d.models||[]).flatMap(m=>Object.keys(m.benchmarks||{})),...Object.values(d.roles||{}).map(r=>r.primary).filter(Boolean)])];
+  const row=(k,r)=>{const cut=(d.cutoffs||{})[k]||{};
+    return `<tr data-role="${esc(k)}"><td><b>${esc(r.label||k)}</b><div class="tiny">${esc(k)}${r.setBy?' · edited by '+esc(r.setBy):''}</div></td>`+
+    `<td><select class="rb">${allB.map(b=>`<option ${b===(r.primary||'')?'selected':''}>${esc(b)}</option>`).join('')}</select></td>`+
+    `<td class="n"><input type="number" class="rm" value="${r.min!=null?r.min:''}" placeholder="${cut.min!=null?cut.min+' (APA)':'—'}"></td>`+
+    `<td><input class="rw" value="${esc(r.winner||'')}" placeholder="winner" style="width:120px"><div class="tiny" style="margin-top:2px"><input class="rf" value="${esc((r.fallbacks||[]).join(', '))}" placeholder="fallbacks, comma-sep" style="width:120px;font-size:10px"></div></td>`+
+    `<td class="tiny">${esc((r.modules||[]).join(', ')||'—')}${r.special?`<div style="color:var(--amber);margin-top:2px">★ ${esc(r.special)}</div>`:''}</td>`+
+    `<td><button onclick="saveRole('${esc(k)}',this)">save</button> <a class="tiny" href="#" onclick="delRole('${esc(k)}');return false">✕</a></td></tr>`;};
+  $('roles').innerHTML=`<table><tr><th>Use case</th><th><a href="/benchmarks.html" title="What each benchmark measures, suggested cutoffs, current leaders — live APA/CI knowledge">Benchmark ↗</a></th><th class="n">Min score</th><th>Winner + fallbacks</th><th>Agents/modules</th><th></th></tr>`+
+    Object.entries(d.roles||{}).map(([k,r])=>row(k,r)).join('')+`</table>`+
+    `<div style="margin-top:6px"><input id="nr-key" placeholder="new use case, e.g. coding" style="width:150px"> <button onclick="addRole()">+ add use case</button></div>`+
+    `<div class="tiny" style="margin-top:4px">Min score blank = APA's hypothesis (greyed). Winner = current selection; fallbacks kick in on subscription limits / unavailability. ★ = capability stand-in (no public benchmark). Edits are logged as strong CI feedback, never silently overridden.</div>`+
+    `<div class="tiny" style="margin-top:3px"><b>Funding logic:</b> <span style="color:var(--green)">green</span> = inside a pool you already pay for — Claude (subscription interactive / $100 agent pool headless) and Gemini/Imagen (GCP credits); <span style="color:var(--red)">red</span> = out-of-pocket per call (GPT, grok, hosted OS). So Claude wins a role while pool budget lasts; when headless credit runs dry or a model is down, fallbacks walk the list (typically → Gemini on credits → paid API last). Pool status: Credits &amp; quotas above.</div>`;
+}
+function saveRole(k,btn){
+  const tr=btn.closest('tr');const min=tr.querySelector('.rm').value;
+  api('/api/apa/roles',{method:'POST',body:JSON.stringify({role:k,primary:tr.querySelector('.rb').value,min:min===''?null:+min,
+    winner:tr.querySelector('.rw').value.trim(),fallbacks:tr.querySelector('.rf').value.split(',').map(s=>s.trim()).filter(Boolean)})}).then(()=>{toast('Saved '+k);loadBoard();});
+}
+function delRole(k){if(!confirm('Remove use case "'+k+'" from the board?'))return;api('/api/apa/roles',{method:'POST',body:JSON.stringify({role:k,delete:true})}).then(()=>{toast('Removed '+k);loadBoard();});}
+function addRole(){const k=$('nr-key').value.trim();if(!k)return;
+  api('/api/apa/roles',{method:'POST',body:JSON.stringify({role:k,label:k[0].toUpperCase()+k.slice(1),primary:'AA Intelligence',benchmarks:['AA Intelligence']})}).then(()=>{toast('Added '+k);loadBoard();});}
+loadBoard();
+
+// ---- stable + incoming ----
+api('/api/agent-stable').then(d=>{
+  $('stable-meta').textContent=`— ${d.active} active, ${d.standby} on standby`;
+  $('stable-body').innerHTML=d.agents.map(a=>{
+    const badge=a.status==='active'?'':` <span class="tiny">[${a.status}]</span>`;
+    // tie to the use case: "Orchestrator (Daily driver: claude-sonnet-5)" + fallbacks; flag drift
+    // if the agent's effective model isn't the role's declared winner.
+    const uc=a.useCaseLabel?` <span class="muted">(${esc(a.useCaseLabel)}: ${fundSpan(a.model)}${a.winner&&a.winner!==a.model?` <span style="color:var(--amber)" title="role winner is ${esc(a.winner)}">≠winner ${esc(a.winner)}</span>`:''})</span>`:` (${fundSpan(a.model)})`;
+    const head=`${esc(a.name)}${uc}${badge} — ${a.tasks} task${a.tasks===1?'':'s'}`+(a.input?` · ${fmtTok(a.input)}/${fmtTok(a.output)} tok · ${COST(a.costUsd,a.costClass)}`:'');
+    const fb=(a.fallbacks||[]).length?`<div class="tiny" style="padding:0 0 2px 16px">fallbacks: ${a.fallbacks.map(fundSpan).join(' → ')}</div>`:'';
+    const sp=a.special?`<div class="tiny" style="padding:0 0 2px 16px;color:var(--amber)">★ ${esc(a.special)}</div>`:'';
+    const jd=a.jd?`<details style="margin:0 0 2px 16px;padding:0"><summary class="tiny" style="text-transform:none;font-weight:400;padding:0">job description</summary><div class="tiny" style="font-size:11px;color:var(--text2);padding:2px 0 2px 10px">${esc(a.jd)}</div></details>`:'';
+    return `<details style="padding:1px 0;margin:0"><summary style="font-size:12px;text-transform:none;font-weight:400;color:var(--text)">${head}</summary><div class="tiny" style="padding:0 0 2px 16px">${esc(a.role)}</div>${fb}${sp}${jd}`+a.activities.map(x=>`<div class="tiny" style="padding:0 0 0 16px;font-size:11px">• ${esc(x)}</div>`).join('')+'</details>';
+  }).join('');
+}).catch(()=>{$('stable-body').innerHTML='<div class="err">stable unreachable</div>';});
+api('/api/agent-incoming').then(d=>{
+  const gs=d.groups||[];const active=gs.filter(x=>x.activities.length);
+  $('inc-meta').textContent=`— ${active.length} agent${active.length===1?'':'s'} active (48h)`;
+  $('inc-list').innerHTML=gs.map(grp=>{
+    const cost=grp.costUsd>=0.01?` — $${grp.costUsd.toFixed(2)}`:'';
+    if(!grp.activities.length)return `<div class="tiny" style="padding:2px 0">${esc(grp.agent)} (no activity)</div>`;
+    return `<details style="padding:1px 0;margin:0"><summary style="font-size:12px;text-transform:none;font-weight:400;color:var(--text)">${esc(grp.agent)} (${grp.activities.length})${cost}</summary>`+grp.activities.map(a=>`<div class="tiny" style="padding:1px 0 1px 16px;font-size:11px">• ${esc(a.line)}</div>`).join('')+'</details>';
+  }).join('')||'<div class="empty">quiet</div>';
+}).catch(()=>{$('inc-list').innerHTML='<div class="err">unavailable</div>';});
+</script></body></html>

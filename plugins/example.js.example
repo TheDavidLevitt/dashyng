@@ -1,0 +1,11 @@
+// Example plugin — copy to e.g. uptime.js to activate.
+module.exports = {
+  key: 'uptime',
+  title: 'Server uptime',
+  async data() {
+    return { startedAt: new Date(Date.now() - process.uptime() * 1000).toISOString(), uptimeMin: Math.round(process.uptime() / 60) };
+  },
+  client: `(el, data) => {
+    el.innerHTML = '<div class="card">Up ' + data.uptimeMin + ' min (since ' + new Date(data.startedAt).toLocaleTimeString() + ')</div>';
+  }`,
+};

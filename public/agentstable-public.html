@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>agent-stable — live board</title>
+<meta name="description" content="Live public board of the agent-stable reference deployment: model market, tier winners, aggregate usage, and the procurement agent's decision feed.">
+<style>
+  :root {
+    --bg:#0b0f14; --panel:#131a22; --panel2:#1a222c; --line:#263140; --line2:#1a222c;
+    --ink:#dbe4ee; --ink2:#8fa1b3; --ink3:#5c6f82; --blue:#7fb0ff; --gold:#e9b949;
+    --real:#d2654d; --credit:#1f9a80; --included:#6f8ede;
+  }
+  * { box-sizing:border-box }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:15px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+  a { color:var(--blue); text-decoration:none } a:hover { text-decoration:underline }
+  a:focus-visible, button:focus-visible { outline:2px solid var(--blue); outline-offset:2px }
+  .wrap { max-width:1160px; margin:0 auto; padding:20px 16px 48px }
+  header { display:flex; flex-wrap:wrap; gap:12px 20px; align-items:center; margin-bottom:18px }
+  .brand { display:flex; align-items:center; gap:12px }
+  .brand h1 { font-size:22px; margin:0; font-weight:700 }
+  .brand h1 .dash { color:var(--gold) }
+  .sub { color:var(--ink2); font-size:13px }
+  .spacer { flex:1 }
+  .btn { display:inline-block; border:1px solid var(--line); border-radius:8px;
+         padding:7px 14px; color:var(--ink); font-size:13px; background:var(--panel) }
+  .btn:hover { border-color:var(--ink3); text-decoration:none }
+  .btn.owner { border-color:#2b4a37; color:#7ecf9f }
+  .links { font-size:13px; color:var(--ink3) }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+            padding:16px 18px; margin-bottom:16px }
+  section h2 { margin:0 0 4px; font-size:15px; font-weight:600; color:var(--ink) }
+  .note { color:var(--ink3); font-size:12.5px; margin:0 0 12px }
+  .tiers { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:10px }
+  .tier { background:var(--panel2); border:1px solid var(--line2); border-radius:8px; padding:12px 14px }
+  .tier .k { color:var(--ink2); font-size:12px; letter-spacing:.06em; text-transform:uppercase }
+  .tier .w { font-size:16px; margin:6px 0 2px; word-break:break-all }
+  .tier .meta { color:var(--ink3); font-size:12px }
+  table { width:100%; border-collapse:collapse; font-size:13.5px }
+  th { text-align:left; color:var(--ink3); font-weight:500; font-size:12px; letter-spacing:.06em;
+       padding:6px 10px 6px 0; border-bottom:1px solid var(--line) }
+  td { padding:7px 10px 7px 0; border-bottom:1px solid var(--line2); vertical-align:top }
+  tr:last-child td { border-bottom:0 }
+  .num { text-align:right; font-variant-numeric:tabular-nums }
+  th.num { text-align:right }
+  .dim { color:var(--ink3) } .muted { color:var(--ink2) }
+  .scroll { overflow-x:auto }
+  .legend { display:flex; gap:16px; flex-wrap:wrap; font-size:12.5px; color:var(--ink2); margin:0 0 10px }
+  .legend i { display:inline-block; width:10px; height:10px; border-radius:3px; margin-right:6px; vertical-align:-1px }
+  .urow { display:flex; align-items:center; gap:10px; margin:6px 0 }
+  .urow .lbl { flex:0 0 200px; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+  .urow .bar { flex:1; display:flex; gap:2px; height:16px; align-items:stretch }
+  .urow .seg { border-radius:2px; min-width:2px; cursor:default }
+  .urow .seg.first { border-radius:4px 2px 2px 4px } .urow .seg.last { border-radius:2px 4px 4px 2px }
+  .urow .tot { flex:0 0 84px; text-align:right; font-size:13px; font-variant-numeric:tabular-nums }
+  .feed li { margin:0 0 10px; list-style:none }
+  .feed { padding:0; margin:0 }
+  .feed li .body { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; cursor:pointer }
+  .feed li .body.open { -webkit-line-clamp:unset }
+  .chip { display:inline-block; font-size:11px; border-radius:9px; padding:1px 8px;
+          border:1px solid var(--line); color:var(--ink2); margin-right:8px; vertical-align:1px }
+  .chip.adopt { border-color:#2b4a37; color:#7ecf9f }
+  .chip.propose { border-color:#4a412b; color:var(--gold) }
+  .when { color:var(--ink3); font-size:12px }
+  .empty { color:var(--ink3); font-size:13px; padding:8px 0 }
+  details summary { cursor:pointer; color:var(--ink2); font-size:12.5px; margin-top:10px }
+  #tip { position:fixed; pointer-events:none; background:#060a0e; border:1px solid var(--line);
+         border-radius:6px; padding:6px 10px; font-size:12.5px; color:var(--ink); display:none; z-index:9;
+         max-width:280px }
+  footer { color:var(--ink3); font-size:12.5px; line-height:1.7; margin-top:24px }
+  @media (max-width:640px){ .urow .lbl { flex-basis:110px } .urow .tot { flex-basis:64px } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <svg width="40" height="40" viewBox="0 0 300 300" aria-hidden="true">
+        <path d="M 199.8 110.2 A 65 65 0 1 1 100.2 110.2" fill="none" stroke="#c99b4e" stroke-width="24" stroke-linecap="round"/>
+      </svg>
+      <div>
+        <h1>agent<span class="dash">-</span>stable</h1>
+        <div class="sub">live board of the reference deployment — refreshed continuously from the same feed the private dashboard runs on</div>
+      </div>
+    </div>
+    <div class="spacer"></div>
+    <div class="links">
+      <a href="https://github.com/TheDavidLevitt/agent-stable">github</a> ·
+      <a href="https://www.npmjs.com/package/agent-stable">npm</a>
+    </div>
+    <a class="btn" id="authBtn" href="/auth/login">owner sign-in</a>
+  </header>
+
+  <section aria-labelledby="h-tiers">
+    <h2 id="h-tiers">The stable — tier winners</h2>
+    <p class="note">Downstream agents request a tier, not a model. Each tier owns a benchmark and a quality threshold; the procurement agent keeps the cheapest adequate model in the saddle.</p>
+    <div class="tiers" id="tiers"><div class="empty">loading…</div></div>
+  </section>
+
+  <section aria-labelledby="h-usage">
+    <h2 id="h-usage">Usage — last 30 days, by model</h2>
+    <p class="note">Aggregate spend split by <b>source of funds</b> — agent-stable's core idea: a dollar of expiring credit is not a dollar of cash. Pool balances and expiries are private.</p>
+    <div class="legend" id="legend" role="list">
+      <span role="listitem"><i style="background:var(--real)"></i>charged (real $)</span>
+      <span role="listitem"><i style="background:var(--credit)"></i>credit drawdown</span>
+      <span role="listitem"><i style="background:var(--included)"></i>subscription-included</span>
+    </div>
+    <div id="usage"><div class="empty">loading…</div></div>
+    <details><summary>as a table</summary><div class="scroll"><table id="usageTable"></table></div></details>
+  </section>
+
+  <section aria-labelledby="h-board">
+    <h2 id="h-board">Market board</h2>
+    <p class="note">Compiled by the procurement agent: models × list price × benchmark scores. Hover a row's score for the full benchmark set.</p>
+    <div class="scroll"><table id="board"><tbody><tr><td class="empty">loading…</td></tr></tbody></table></div>
+  </section>
+
+  <section aria-labelledby="h-feed">
+    <h2 id="h-feed">Procurement feed</h2>
+    <p class="note">What the agent noticed and did: releases, price moves, head-to-head evaluations, adoptions (each reversible in one click — by the owner).</p>
+    <ul class="feed" id="feed"><li class="empty">loading…</li></ul>
+  </section>
+
+  <section aria-labelledby="h-bench">
+    <h2 id="h-bench">Benchmark knowledge</h2>
+    <p class="note">Which benchmark predicts quality for which job — compiled and refreshed by the agent, thresholds owned by the human.</p>
+    <div class="scroll"><table id="bench"><tbody><tr><td class="empty">loading…</td></tr></tbody></table></div>
+  </section>
+
+  <footer>
+    This is a read-only public view: no personal data, agent roster, or credit-pool balances are exposed,
+    and every mutating control on this deployment requires the owner's Google sign-in.
+    Powered by <a href="https://github.com/TheDavidLevitt/agent-stable">agent-stable</a> (MIT) on
+    <a href="https://github.com/TheDavidLevitt/dashyng">dashyng</a>.
+    <span id="stamp"></span>
+  </footer>
+</div>
+<div id="tip" role="tooltip"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmt$ = n => n >= 100 ? '$' + Math.round(n) : '$' + (+n).toFixed(2);
+const fmtTok = n => n >= 1e9 ? (n/1e9).toFixed(1)+'B' : n >= 1e6 ? (n/1e6).toFixed(1)+'M' : n >= 1e3 ? (n/1e3).toFixed(0)+'k' : String(n);
+const ago = iso => { const d = (Date.now() - new Date(iso).getTime())/864e5; return d < 1 ? 'today' : d < 2 ? 'yesterday' : Math.round(d) + 'd ago'; };
+
+const tip = $('tip');
+let tipPinned = null; // tap-to-toggle so tooltips exist on touch (hover may enhance, never gate)
+function showTip(html, x, y) { tip.innerHTML = html; tip.style.display = 'block';
+  tip.style.left = Math.min(x + 14, innerWidth - 300) + 'px'; tip.style.top = Math.min(y + 14, innerHeight - 80) + 'px'; }
+function bindTip(el, html) {
+  el.addEventListener('mousemove', e => { if (!tipPinned) showTip(html, e.clientX, e.clientY); });
+  el.addEventListener('mouseleave', () => { if (!tipPinned) tip.style.display = 'none'; });
+  el.addEventListener('click', e => { e.stopPropagation();
+    if (tipPinned === el) { tipPinned = null; tip.style.display = 'none'; }
+    else { tipPinned = el; showTip(html, e.clientX, e.clientY); } });
+}
+document.addEventListener('click', () => { if (tipPinned) { tipPinned = null; tip.style.display = 'none'; } });
+
+async function load() {
+  let d;
+  try {
+    const r = await fetch('/api/public/agentstable');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    d = await r.json();
+  } catch (e) {
+    for (const id of ['tiers','usage','feed']) $(id).innerHTML = '<div class="empty">feed unavailable — try again in a minute</div>';
+    return;
+  }
+
+  // tiers
+  const tiers = Object.entries(d.tiers || {});
+  $('tiers').innerHTML = tiers.length ? tiers.map(([k, t]) => `
+    <div class="tier">
+      <div class="k">${esc(t.label || k)}</div>
+      <div class="w">${esc(t.winner || '—')}</div>
+      <div class="meta">${esc(t.primary || 'no benchmark')}${t.min != null ? ' ≥ ' + esc(t.min) : ''}</div>
+      ${t.fallbacks && t.fallbacks.length ? `<div class="meta dim">fallbacks: ${t.fallbacks.map(esc).join(' · ')}</div>` : ''}
+    </div>`).join('') : '<div class="empty">no tiers configured yet</div>';
+
+  // usage — stacked horizontal bars (charged / credit / included)
+  const um = (d.usage && d.usage.models || []).filter(m => m.total > 0 || m.input + m.output > 0);
+  const max = Math.max(1, ...um.map(m => m.total));
+  const CLS = [['real','charged'],['credit','credit'],['included','included']];
+  $('usage').innerHTML = um.length ? um.map(m => {
+    const segs = CLS.filter(([k]) => m[k] > 0);
+    return `<div class="urow">
+      <div class="lbl" title="${esc(m.model)}">${esc(m.model)}</div>
+      <div class="bar" role="img" aria-label="${esc(m.model)}: ${fmt$(m.total)} total">` +
+      segs.map(([k, label], i) =>
+        `<span class="seg ${i === 0 ? 'first' : ''} ${i === segs.length - 1 ? 'last' : ''}"
+           style="width:${Math.max(0.8, m[k] / max * 100)}%;background:var(--${k})"
+           data-tip="${esc(m.model)} — ${label}: ${fmt$(m[k])} · ${fmtTok(m.input)} in / ${fmtTok(m.output)} out"></span>`).join('') +
+      `</div><div class="tot">${fmt$(m.total)}</div></div>`;
+  }).join('') : '<div class="empty">no usage in the window yet</div>';
+  document.querySelectorAll('.seg').forEach(el => bindTip(el, esc(el.dataset.tip)));
+  $('usageTable').innerHTML = '<thead><tr><th>model</th><th class="num">tok in</th><th class="num">tok out</th><th class="num">charged</th><th class="num">credit</th><th class="num">included</th><th class="num">total</th></tr></thead><tbody>' +
+    um.map(m => `<tr><td>${esc(m.model)}</td><td class="num">${fmtTok(m.input)}</td><td class="num">${fmtTok(m.output)}</td><td class="num">${fmt$(m.real)}</td><td class="num">${fmt$(m.credit)}</td><td class="num">${fmt$(m.included)}</td><td class="num">${fmt$(m.total)}</td></tr>`).join('') + '</tbody>';
+
+  // market board — sorted priciest output first, like the private board
+  const models = (d.board && d.board.models || []).slice()
+    .sort((a, b) => (b.priceOut ?? -1) - (a.priceOut ?? -1));
+  const primaries = [...new Set(tiers.map(([, t]) => t.primary).filter(Boolean))];
+  const benchCol = primaries[0] || 'AA Intelligence';
+  $('board').innerHTML = models.length ? '<thead><tr><th>model</th><th>lab</th><th class="num">$/1M in</th><th class="num">$/1M out</th>' +
+    `<th class="num">${esc(benchCol)}</th><th>notes</th></tr></thead><tbody>` +
+    models.map(m => {
+      const all = Object.entries(m.benchmarks || {}).map(([k, v]) => `${esc(k)}: ${esc(v)}`).join('<br>') || 'no scores yet';
+      return `<tr><td>${esc(m.model)}</td><td class="muted">${esc(m.lab || '')}</td>
+        <td class="num">${m.priceIn != null ? m.priceIn : '<span class="dim">—</span>'}</td>
+        <td class="num">${m.priceOut != null ? m.priceOut : '<span class="dim">—</span>'}</td>
+        <td class="num bscore" data-tip="${esc(all).replace(/"/g,'&quot;')}">${m.benchmarks && m.benchmarks[benchCol] != null ? esc(m.benchmarks[benchCol]) : '<span class="dim">—</span>'}</td>
+        <td class="dim">${m.os ? 'open-weight' + (m.host ? ' @ ' + esc(m.host) : '') : ''}</td></tr>`;
+    }).join('') + '</tbody>' : '<tbody><tr><td class="empty">board not compiled yet</td></tr></tbody>';
+  document.querySelectorAll('.bscore').forEach(el => bindTip(el, el.dataset.tip));
+  if (d.board && d.board.selfHostPerMTokOut != null)
+    $('board').insertAdjacentHTML('afterend', `<p class="note" style="margin-top:10px">self-host reference: ~$${(+d.board.selfHostPerMTokOut).toFixed(2)}/1M out — an electricity-only estimate from an editable watts × tok/s × $/kWh formula, never dressed up as per-model truth.</p>`);
+
+  // feed
+  const evs = d.events || [];
+  $('feed').innerHTML = evs.length ? evs.map(e => `
+    <li><div class="body" title="tap to expand"><span class="chip ${/adopt/i.test(e.action) ? 'adopt' : /propose/i.test(e.action) ? 'propose' : ''}">${esc(e.kind || 'event')}</span>
+      <b>${esc(e.model || e.lab || '')}</b> <span class="muted">${esc(e.headline || '')}</span>
+      ${e.action ? `<span class="dim">→ ${esc(e.action)}</span>` : ''}
+      <span class="when"> · ${ago(e.at)}</span></div></li>`).join('')
+    : '<li class="empty">no recent events</li>';
+  document.querySelectorAll('.feed .body').forEach(el => el.addEventListener('click', () => el.classList.toggle('open')));
+
+  // benchmarks
+  const bn = d.benchmarks || [];
+  $('bench').innerHTML = bn.length ? '<thead><tr><th>benchmark</th><th>measures</th><th>good for</th><th>leader</th></tr></thead><tbody>' +
+    bn.map(b => `<tr><td>${esc(b.name)}</td><td class="muted">${esc(b.measures || '')}</td><td class="muted">${esc(b.goodFor || '')}</td><td>${esc(b.leader || '')}</td></tr>`).join('') + '</tbody>'
+    : '<tbody><tr><td class="empty">not compiled yet</td></tr></tbody>';
+
+  $('stamp').textContent = 'Updated ' + new Date(d.generatedAt).toLocaleString() + '.';
+}
+
+// owner probe: any valid session upgrades the button into links to the interactive pages
+fetch('/api/capabilities').then(r => {
+  if (!r.ok) return;
+  const b = $('authBtn');
+  b.textContent = 'open the full board →';
+  b.href = '/procurement.html';
+  b.classList.add('owner');
+}).catch(() => {});
+
+load();
+</script>
+</body>
+</html>

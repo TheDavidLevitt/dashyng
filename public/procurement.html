@@ -1,0 +1,83 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Model Procurement Policy</title>
+<script>document.documentElement.dataset.theme = localStorage.getItem('theme') || 'dark';</script>
+<style>
+/* same palette as the dashboard (index.html) — this page ignored the theme toggle until now */
+:root[data-theme="dark"]{color-scheme:dark;--bg:#0b0f14;--card:#131a22;--card2:#1a222c;--border:#243140;--text:#dbe4ee;--text2:#8fa1b3;--text3:#5c6f82;--accent:#4da3ff}
+:root[data-theme="light"]{color-scheme:light;--bg:#f5f7fa;--card:#fff;--card2:#f9fafb;--border:#e5e7eb;--text:#1f2937;--text2:#6b7280;--text3:#9ca3af;--accent:#2563eb}
+body{font-family:-apple-system,system-ui,sans-serif;background:var(--bg);color:var(--text);max-width:820px;margin:0 auto;padding:20px 16px 60px;font-size:14px;line-height:1.5}
+h1{font-size:20px}h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--text2);margin-top:24px}
+a{color:var(--accent)}table{width:100%;border-collapse:collapse;font-size:12.5px;margin:8px 0}
+th,td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--border)}th{color:var(--text2);font-size:10.5px;text-transform:uppercase}
+td.n{font-variant-numeric:tabular-nums;text-align:right}
+.tier{font-size:10px;padding:1px 6px;border-radius:9px}.opus{background:#3a1d1d;color:#f1948a}.sonnet{background:#1d2a3a;color:#7fb0ff}
+.haiku{background:#16271c;color:#6fcf97}.gemini{background:#2a2416;color:#e9b949}.grok{background:#2a1622;color:#e879b4}
+.policy{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px 16px;margin:8px 0}
+.foot{color:var(--text3);font-size:11px;margin-top:30px;border-top:1px solid var(--border);padding-top:10px}
+code{background:var(--card2);padding:1px 5px;border-radius:3px;font-size:12px}
+#theme-btn{float:right;background:var(--card);color:var(--text2);border:1px solid var(--border);border-radius:5px;padding:2px 9px;font-size:11px;cursor:pointer}
+</style></head><body>
+<p><a href="/">← dashboard</a> <button id="theme-btn"></button></p>
+<script>
+const themeBtn = document.getElementById('theme-btn');
+const setThemeBtn = () => themeBtn.textContent = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+themeBtn.onclick = () => { const t = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'; document.documentElement.dataset.theme = t; localStorage.setItem('theme', t); setThemeBtn(); };
+setThemeBtn();
+</script>
+<h1>Model Procurement Policy</h1>
+<p class="muted">How agents pick a model: <strong>cheapest model that clears the task's quality bar</strong>, escalate only on evidence. Logged to the Decisions tab so every escalation is auditable ("was it worth $0.50?").</p>
+
+<h2>Stable — highest → lowest cost per output token</h2>
+<table>
+<tr><th>Model</th><th>Tier</th><th class="n">$/1M in</th><th class="n">$/1M out</th><th>Used by (policy)</th></tr>
+<tr><td>Claude Opus 4.8</td><td><span class="tier opus">opus</span></td><td class="n">5</td><td class="n">25</td><td>escalation only — hard judgment calls; via API key (off-subscription)</td></tr>
+<tr><td>Claude Sonnet 5</td><td><span class="tier sonnet">sonnet</span></td><td class="n">3</td><td class="n">15</td><td><strong>default for orchestration</strong> — heartbeat, CI, news ranking, summaries, failover ($2/$10 intro through 2026-08-31)</td></tr>
+<tr><td>Gemini 2.5 Pro</td><td><span class="tier gemini">gemini</span></td><td class="n">1.25</td><td class="n">10</td><td>Vertex fallback / eval comparator for sonnet-class work</td></tr>
+<tr><td>Claude Haiku 4.5</td><td><span class="tier haiku">haiku</span></td><td class="n">1</td><td class="n">5</td><td><strong>default for simple tasks</strong> — brief, extraction, dedup, Substack discovery</td></tr>
+<tr><td>Gemini 2.5 Flash</td><td><span class="tier gemini">gemini</span></td><td class="n">0.30</td><td class="n">2.50</td><td>cheapest — hard-stop fallback when Claude credit is exhausted; image gen</td></tr>
+<tr><td>Grok (xAI)</td><td><span class="tier grok">grok</span></td><td class="n">~0.20</td><td class="n">~0.50</td><td><strong>X only</strong> — proprietary x_search for the Following feed; out-of-pocket. Reserved for X; never used where a cheaper qualified model works</td></tr>
+</table>
+<p class="muted" style="font-size:11.5px">Note: there is no "Haiku 4.6" — 4.6 is the Sonnet generation. Haiku 4.5 is the current cheap-tier Claude. For simple jobs Haiku is ~5× cheaper than Sonnet at equal-or-better quality on those jobs, which is why summaries/brief stay on Haiku and only orchestration uses Sonnet.</p>
+
+<h2>Agent Procurement Agent (APA)</h2>
+<div class="policy">APA is the stable's procurement brain. It scrapes model-release, pricing, and benchmark news on its own dedicated feed (cheapest qualified Claude model — never grok, which is reserved for X), and acts:
+<ul style="margin:6px 0">
+<li><strong>Top-5 US labs</strong> (Anthropic, OpenAI, Google, xAI, Meta) — a new release is <strong>auto-tested</strong> against the current default on a fixed benchmark, <strong>cross-provider</strong> (each model runs on its own lab's API; a model that can't be run is never adopted blind). If it's equal-or-better <em>and</em> cheaper, APA <strong>auto-adopts</strong> it for that module and flags the owner with the projected $/month saving. Toggles + the benchmark board live on <a href="/agents.html">the agents dashboard</a>.</li>
+<li><strong>Hosting</strong> (Together.AI, Fireworks, Groq, …) <strong>and non-US labs</strong> (DeepSeek, Qwen, Mistral, …) — surfaced as <strong>arbitrage proposals</strong> for the owner's review, not auto-adopted.</li>
+</ul>
+Architectural boundary: APA writes every finding + decision to the <code>APA Feed</code> tab; the news feed is a read-only consumer (the "Model Watch" lane) — so APA works standalone and the news feed never double-searches for model news. The nightly CI back-propagates realized savings into a per-source scoreboard, upweighting whatever surfaced an adopted change. Auto-adopt is reversible per module (dashboard → APA → revert).</div>
+
+<h2>Spend totals</h2>
+<div id="totals" class="policy">loading…</div>
+<script>
+const CCOL={real:'#f1948a',credit:'#6fcf97',included:'#9fb0c2'};
+async function load(days){const r=await fetch('/api/model-usage?days='+days);return r.json();}
+function fmt(t){const tot=(t.real||0)+(t.credit||0)+(t.included||0);
+  return `<span style="color:${CCOL.included}">$${tot.toFixed(2)} total</span> = `+
+    `<span style="color:${CCOL.real}">$${(t.real||0).toFixed(2)} charged</span> + `+
+    `<span style="color:${CCOL.credit}">$${(t.credit||0).toFixed(2)} credit</span> + `+
+    `<span style="color:${CCOL.included}">$${(t.included||0).toFixed(2)} subscription</span>`;}
+Promise.all([load(1),load(30)]).then(([d1,d30])=>{
+  const tok=m=>m.reduce((n,x)=>[n[0]+x.input,n[1]+x.output],[0,0]);
+  const [i1,o1]=tok(d1.models),[i30,o30]=tok(d30.models);
+  document.getElementById('totals').innerHTML=
+    `<div><strong>Past 24h:</strong> ${(i1/1e6).toFixed(2)}M in / ${(o1/1e3).toFixed(0)}k out · ${fmt(d1.totals)}</div>`+
+    `<div style="margin-top:6px"><strong>Past 30 days:</strong> ${(i30/1e6).toFixed(2)}M in / ${(o30/1e3).toFixed(0)}k out · ${fmt(d30.totals)}</div>`;
+}).catch(e=>document.getElementById('totals').textContent='totals unavailable');
+</script>
+<h2>Selection policy (implemented)</h2>
+<div class="policy"><strong>1. Route by task complexity.</strong> Simple/mechanical (summarize, extract, dedup, format) → Haiku. Multi-step reasoning, planning, judgment over the day → Sonnet. Both default to Claude on subscription (pre-2026-06-15) or the $100 agent credit (after).</div>
+<div class="policy"><strong>2. Escalate on evidence, not by default.</strong> An agent escalates Sonnet→Opus only when it flags genuine ambiguity or stakes (e.g. a high-stakes reply draft). Every escalation writes a Decisions-tab row: actor, decision, why, cost. Opus runs on the <strong>API key</strong> (escalation is rare; not worth a quota request).</div>
+<div class="policy"><strong>3. Hard-stop resilience.</strong> If the Claude agent-credit pool is exhausted (post-June-15 behavior), text generation falls over to <strong>Vertex Gemini</strong> automatically and logs the fallback. The dashboard health panel surfaces it.</div>
+<div class="policy"><strong>4. CI tunes the routing.</strong> The nightly CI agent reads Decisions + Usage and proposes re-routing (e.g. "this class of task ran fine on Haiku 12× — demote from Sonnet"). The owner validates material changes.</div>
+<div class="policy"><strong>5. Cost coloring.</strong> <span style="color:#f1948a">Red</span> = charged (out-of-pocket: claw / Opus-esc on the API key). <span style="color:#6fcf97">Green</span> = credit drawdown (GCP credits for Vertex/VM; the $100 Claude agent pool after June 15). <span style="color:#9fb0c2">Grey</span> = subscription-included (Claude headless before June 15) and totals. Mixed amounts show grey total + colored parts.</div>
+
+<h2>Open levers (not yet automated)</h2>
+<ul>
+<li>Prompt caching on the heartbeat — its ~1M-token input is the biggest single cost; caching the static spec/journal context could cut it 5–10×.</li>
+<li>An API-purchasing agent that proposes provider/model swaps for the owner to validate (roadmap).</li>
+<li>Gemini-vs-Haiku/Sonnet head-to-head eval, using the claw as the bed.</li>
+</ul>
+
+<p class="foot" id="foot">Last updated: 2026-06-13 · prices are API list, per 1M tokens · edit <code>MODEL_PRICES</code> in server.js + this page when they change.</p>
+</body></html>

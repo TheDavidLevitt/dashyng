@@ -1,0 +1,20 @@
+{
+  "name": "dashyng",
+  "version": "0.1.0",
+  "description": "Personal command-center dashboard — task lists, habits, calendar, markets, agent-curated news; pairs with agent-stable",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node location-resolve.test.js"
+  },
+  "dependencies": {
+    "express": "^4.19.0",
+    "googleapis": "^144.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TheDavidLevitt/dashyng.git"
+  },
+  "license": "MIT",
+  "author": "David Levitt"
+}

@@ -1,0 +1,13 @@
+node_modules/
+data/*
+!data/apa-roles.json
+!data/apa-sources.json
+!data/news-feeds.json
+!data/feeds.json
+!data/stable-sheet.json
+.git/
+.claude/
+*.md
+.gitignore
+.DS_Store
+!public/ARCHITECTURE.md

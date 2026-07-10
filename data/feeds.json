@@ -1,0 +1,47 @@
+{
+ "Huberman Lab": {
+  "feedUrl": "https://feeds.megaphone.fm/hubermanlab",
+  "collectionId": 1545953110,
+  "showUrl": "https://podcasts.apple.com/us/podcast/huberman-lab/id1545953110?uo=4"
+ },
+ "Against the Rules": {
+  "feedUrl": "https://www.omnycontent.com/d/playlist/e73c998e-6e60-432f-8610-ae210140c5b1/f4e26994-3ddb-4ec7-b855-ae32006cd5de/ea4fae0c-3282-4cfd-b315-ae32006cd5ec/podcast.rss",
+  "collectionId": 1455379351,
+  "showUrl": "https://podcasts.apple.com/us/podcast/against-the-rules-with-michael-lewis/id1455379351?uo=4"
+ },
+ "Radiolab": {
+  "feedUrl": "https://feeds.simplecast.com/EmVW7VGp",
+  "collectionId": 152249110,
+  "showUrl": "https://podcasts.apple.com/us/podcast/radiolab/id152249110?uo=4"
+ },
+ "Esther Perel": {
+  "feedUrl": "https://feeds.megaphone.fm/ep-wswb",
+  "collectionId": 1237931798,
+  "showUrl": "https://podcasts.apple.com/us/podcast/where-should-we-begin-with-esther-perel/id1237931798?uo=4"
+ },
+ "Dwarkesh": {
+  "feedUrl": "https://apple.dwarkesh-podcast.workers.dev/feed.rss",
+  "collectionId": 1516093381,
+  "showUrl": "https://podcasts.apple.com/us/podcast/dwarkesh-podcast/id1516093381?uo=4"
+ },
+ "Catalyst": {
+  "feedUrl": "https://feeds.megaphone.fm/catalyst",
+  "collectionId": 1593204897,
+  "showUrl": "https://podcasts.apple.com/us/podcast/catalyst-with-shayle-kann/id1593204897?uo=4"
+ },
+ "Real Dictators": {
+  "feedUrl": "https://feeds.megaphone.fm/NSR6187882468",
+  "collectionId": 1516194847,
+  "showUrl": "https://podcasts.apple.com/us/podcast/real-dictators/id1516194847?uo=4"
+ },
+ "A16Z": {
+  "feedUrl": "https://feeds.simplecast.com/JGE3yC0V",
+  "collectionId": 842818711,
+  "showUrl": "https://podcasts.apple.com/us/podcast/the-a16z-show/id842818711?uo=4"
+ },
+ "Perform": {
+  "feedUrl": "https://feeds.megaphone.fm/perform",
+  "collectionId": 1725022545,
+  "showUrl": "https://podcasts.apple.com/us/podcast/perform-with-dr-andy-galpin/id1725022545?uo=4"
+ }
+}

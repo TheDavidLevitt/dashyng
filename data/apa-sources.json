@@ -1,0 +1,18 @@
+{
+  "_doc": "Agent Procurement Agent (APA) config. us_labs => auto-test on new release. hosting/other_labs/local => arbitrage proposals for review. sources carry a weight the APA CI tunes from realized-savings back-propagation.",
+  "us_labs": ["Anthropic", "OpenAI", "Google", "xAI", "Meta"],
+  "other_labs": ["DeepSeek", "Alibaba/Qwen", "Mistral", "Moonshot/Kimi", "Z.ai/GLM", "Cohere"],
+  "hosting": ["Together.AI", "Fireworks", "Groq", "Baseten", "DeepInfra", "OpenRouter"],
+  "local": ["Ollama", "LM Studio"],
+  "sources": [
+    { "name": "Anthropic News", "url": "https://www.anthropic.com/news", "w": 2 },
+    { "name": "OpenAI News", "url": "https://openai.com/news/", "w": 2 },
+    { "name": "Google DeepMind Blog", "url": "https://deepmind.google/discover/blog/", "w": 2 },
+    { "name": "xAI News", "url": "https://x.ai/news", "w": 2 },
+    { "name": "Meta AI Blog", "url": "https://ai.meta.com/blog/", "w": 2 },
+    { "name": "Artificial Analysis", "url": "https://artificialanalysis.ai/", "w": 3 },
+    { "name": "LMArena leaderboard", "url": "https://lmarena.ai/leaderboard", "w": 2 },
+    { "name": "OpenRouter models", "url": "https://openrouter.ai/models", "w": 2 },
+    { "name": "Together pricing", "url": "https://www.together.ai/pricing", "w": 1 }
+  ]
+}

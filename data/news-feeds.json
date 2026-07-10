@@ -1,0 +1,59 @@
+{
+  "_blocked_sources": [
+    "Nomad Lawyer",
+    "iTnews",
+    "Radiolab",
+    "Fox News"
+  ],
+  "Asia Times": {
+    "url": "https://asiatimes.com/feed/",
+    "top": 3,
+    "windowH": 48,
+    "scan": true
+  },
+  "The Economist": {
+    "url": "https://www.economist.com/latest/rss.xml",
+    "top": 2,
+    "windowH": 48,
+    "scan": true
+  },
+  "Al Jazeera": {
+    "url": "https://www.aljazeera.com/xml/rss/all.xml",
+    "top": 3,
+    "windowH": 24,
+    "scan": true
+  },
+  "LessWrong": {
+    "url": "https://www.lesswrong.com/feed.xml",
+    "top": 10,
+    "windowH": 168
+  },
+  "Works in Progress": {
+    "url": "https://www.worksinprogress.news/feed",
+    "windowH": 336,
+    "all": true
+  },
+  "Karpathy Substack": {
+    "url": "https://karpathy.substack.com/feed",
+    "top": 5,
+    "windowH": 336
+  },
+  "Dwarkesh Patel": {
+    "url": "https://www.dwarkesh.com/feed",
+    "top": 5,
+    "windowH": 336
+  },
+  "The Atlantic": {
+    "url": "https://www.theatlantic.com/feed/all/",
+    "topics": [
+      "AI",
+      "artificial intelligence",
+      "energy",
+      "climate",
+      "politics",
+      "election",
+      "geopolitics"
+    ],
+    "windowH": 168
+  }
+}

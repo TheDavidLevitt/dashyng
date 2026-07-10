@@ -1,0 +1,33 @@
+node_modules/
+.env
+*.json.key
+# service-account keys — never commit credentials
+*service-account*.json
+service-account*.json
+*-sa-key.json
+.DS_Store
+
+# runtime caches (regenerate at runtime; avoid diff noise in shared dev)
+data/agent-queue.json
+data/agent-summaries.json
+data/brief.json
+data/cds-history.json
+data/following-cache.json
+data/youtube-feeds.json
+data/apa-state.json
+data/model-overrides.json
+data/apa-roles-local.json
+data/credits.json
+data/markets-local.json
+data/settings-local.json
+plugins/*.js
+data/webhook-retry.json
+data/config-local.json
+data/location-bars-local.json
+data/gmail-token.json
+data/gmail-processed.json
+
+# private regeneration-pack deltas
+spec/LESSONS-local.md
+data/store/
+data/feedback.jsonl

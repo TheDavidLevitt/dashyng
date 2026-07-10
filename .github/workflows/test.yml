@@ -1,0 +1,25 @@
+name: test
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: npm ci
+      - name: syntax
+        run: node -c server.js && node -c config.js && node -c providers.js && node -c store/index.js && node -c store/local.js
+      - name: page script parses
+        run: |
+          node -e "const m=require('fs').readFileSync('public/index.html','utf8').match(/<script>([\s\S]*)<\/script>/); new Function(m[1]);"
+      - name: blank-canvas boot smoke
+        run: |
+          DASHBOARD_STORE=local CLAUDE_BIN=none node server.js & SRV=$!
+          for i in $(seq 1 30); do curl -sf localhost:3000/api/health >/dev/null && break; sleep 1; done
+          curl -sf localhost:3000/api/health
+          curl -sf -X POST localhost:3000/api/tasks -H 'Content-Type: application/json' -d '{"task":"ci probe","quadrant":"Q1"}'
+          curl -sf localhost:3000/api/tasks | grep -q 'ci probe'
+          kill $SRV
+      - name: stable module tests
+        run: node stable/test.js
