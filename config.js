@@ -49,4 +49,9 @@ module.exports = {
   feedbackFile: pick('feedbackFile', 'DASHBOARD_FEEDBACK_FILE', ''),
   learningsFile: pick('learningsFile', 'DASHBOARD_LEARNINGS_FILE', ''),
   heartbeatLog: pick('heartbeatLog', 'DASHBOARD_HEARTBEAT_LOG', ''), // '' = heartbeat health row off
+  // IMAP fallback for travel-email evidence — an app password never expires, unlike a
+  // Testing-mode OAuth grant. The owner pastes the app password here themselves.
+  imapHost: pick('imapHost', 'DASHBOARD_IMAP_HOST', 'imap.gmail.com'),
+  imapUser: pick('imapUser', 'DASHBOARD_IMAP_USER', ''),
+  imapAppPassword: pick('imapAppPassword', 'DASHBOARD_IMAP_APP_PASSWORD', ''),
 };

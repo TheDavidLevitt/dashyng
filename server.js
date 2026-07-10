@@ -213,6 +213,7 @@ const HAS_LLM = HAS_CLAUDE || !!process.env.ANTHROPIC_API_KEY;
 // runs on calendar + Location-of-Interest evidence alone. See /auth/gmail/connect.
 const GMAIL_TOKEN_FILE = path.join(__dirname, 'data', 'gmail-token.json');
 const hasGmail = () => { try { return !!JSON.parse(fs.readFileSync(GMAIL_TOKEN_FILE, 'utf8')).refresh_token; } catch (e) { return false; } };
+const hasImap = () => !!(CFG.imapUser && CFG.imapAppPassword);
 // Journal vault (optional; config-local/env). '' = journal features off — the frontend
 // hides those panels and habit logs fall back to the durable queue.
 const VAULT_DIR = CFG.journalVault;
@@ -2806,9 +2807,52 @@ async function gmailAuthClient() {
   c.setCredentials({ refresh_token });
   return c;
 }
+// One extraction pipeline, two transports. extractTravelSignal is the shared LLM stage.
+async function extractTravelSignal(subject, bodyText, sourceUrl) {
+  const raw = await runClaude(
+    `This is a confirmation email. Extract travel evidence if present.\nSUBJECT: ${subject}\nBODY (may include HTML/tracking noise — ignore it):\n${String(bodyText).slice(0, 4000)}\n\n` +
+    `If this is a flight, train, car rental, or hotel/Airbnb confirmation with clear dates and places, return EVERY leg/stay it contains — a round-trip itinerary yields BOTH the outbound AND the return leg as separate entries. Each entry's date/endDate must cover ONLY that single leg or stay (a flight leg is one day, or two for an overnight arrival) — NEVER the whole itinerary's span. If none, return {"signals":[]}.\n` +
+    `Return STRICT JSON only: {"signals":[{"type":"flight|train|car|hotel","date":"YYYY-MM-DD","endDate":"YYYY-MM-DD or same as date","location":"the destination/place name — for a flight/train use the ARRIVAL city, for a car rental the DROP-OFF/destination city (NOT the pickup city), for a hotel the stay city","note":"one short line"}]}`,
+    { timeoutMs: 60000, module: 'location', model: 'claude-haiku-4-5' });
+  const block = (String(raw).replace(/```json?/gi, '').replace(/```/g, '').match(/\{[\s\S]*\}/) || [])[0];
+  let j = null; try { j = JSON.parse(block); } catch (e) {}
+  const sigs = (j && Array.isArray(j.signals)) ? j.signals : (j && j.signal ? [j.signal] : []);
+  for (const sig of sigs)
+    if (sig && sig.type && /^\d{4}-\d{2}-\d{2}$/.test(sig.date || '') && sig.location)
+      await addLocationSignal({ ...sig, sourceUrl });
+}
+// IMAP fallback: an app password never expires, unlike a Testing-mode OAuth grant.
+// Configured by the OWNER ONLY (config-local imapUser/imapAppPassword) — never written here.
+async function harvestImapSignals() {
+  const { ImapFlow } = require('imapflow');
+  const client = new ImapFlow({ host: CFG.imapHost, port: 993, secure: true, logger: false,
+    auth: { user: CFG.imapUser, pass: CFG.imapAppPassword } });
+  const processed = gmailProcessedIds();
+  const newlyProcessed = [];
+  await client.connect();
+  try {
+    await client.mailboxOpen('INBOX');
+    const since = new Date(Date.now() - 75 * 86400000);
+    const uids = new Set();
+    for (const term of ['flight', 'itinerary', 'e-ticket', 'booking', 'reservation', 'hotel', 'car rental', 'your trip'])
+      for (const uid of (await client.search({ since, or: [{ subject: term }, { body: term }] }, { uid: true }).catch(() => [])) || [])
+        uids.add(uid);
+    const recent = [...uids].sort((a, b) => b - a).slice(0, 60).filter(u => !processed.has('imap:' + u));
+    for (const uid of recent) {
+      newlyProcessed.push('imap:' + uid);
+      try {
+        const msg = await client.fetchOne(String(uid), { uid: true, envelope: true, bodyParts: ['text'] });
+        const subject = msg.envelope?.subject || '';
+        const bodyText = String(msg.bodyParts?.get('text') || '').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+        await extractTravelSignal(subject, bodyText, '');
+      } catch (e) { /* one bad email never aborts the batch */ }
+    }
+  } finally { await client.logout().catch(() => {}); }
+  markGmailProcessed(newlyProcessed);
+}
 async function harvestGmailSignals() {
   const auth = await gmailAuthClient();
-  if (!auth) return;
+  if (!auth) { if (hasImap()) await harvestImapSignals(); return; }
   const gmail = google.gmail({ version: 'v1', auth });
   const processed = gmailProcessedIds();
   const q = '(flight OR itinerary OR "e-ticket" OR eticket OR "booking confirmation" OR "reservation confirmation" OR "your trip" OR "hotel confirmation" OR "car rental") newer_than:75d';
@@ -2829,17 +2873,7 @@ async function harvestGmailSignals() {
       const html = flat.filter(p => p.mimeType === 'text/html').map(p => decode(p.body?.data)).join('\n')
         .replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ');
       const bodyText = (plain.trim().length > 80 ? plain : html) || plain || decode(msg.data.payload?.body?.data) || msg.data.snippet || '';
-      const raw = await runClaude(
-        `This is a confirmation email. Extract travel evidence if present.\nSUBJECT: ${subject}\nBODY (may include HTML/tracking noise — ignore it):\n${bodyText.slice(0, 4000)}\n\n` +
-        `If this is a flight, train, car rental, or hotel/Airbnb confirmation with clear dates and places, return EVERY leg/stay it contains — a round-trip itinerary yields BOTH the outbound AND the return leg as separate entries. If none, return {"signals":[]}.\n` +
-        `Return STRICT JSON only: {"signals":[{"type":"flight|train|car|hotel","date":"YYYY-MM-DD","endDate":"YYYY-MM-DD or same as date","location":"the destination/place name — for a flight/train use the ARRIVAL city, for a car rental the DROP-OFF/destination city (NOT the pickup city), for a hotel the stay city","note":"one short line"}]}`,
-        { timeoutMs: 60000, module: 'location', model: 'claude-haiku-4-5' });
-      const block = (String(raw).replace(/```json?/gi, '').replace(/```/g, '').match(/\{[\s\S]*\}/) || [])[0];
-      let j = null; try { j = JSON.parse(block); } catch (e) {}
-      const sigs = (j && Array.isArray(j.signals)) ? j.signals : (j && j.signal ? [j.signal] : []);
-      for (const sig of sigs)
-        if (sig && sig.type && /^\d{4}-\d{2}-\d{2}$/.test(sig.date || '') && sig.location)
-          await addLocationSignal({ ...sig, sourceUrl: `https://mail.google.com/mail/u/0/#all/${id}` });
+      await extractTravelSignal(subject, bodyText, `https://mail.google.com/mail/u/0/#all/${id}`);
     } catch (e) { /* one bad email never aborts the batch */ }
   }
   markGmailProcessed(newlyProcessed);
@@ -2889,7 +2923,7 @@ async function scanLocation() {
   locScanBusy = true;
   try {
     await harvestCalendarSignals().catch(e => track('location', false, 'calendar harvest: ' + e.message));
-    if (hasGmail()) await harvestGmailSignals().catch(e => track('location', false, 'gmail harvest: ' + e.message));
+    if (hasGmail() || hasImap()) await harvestGmailSignals().catch(e => track('location', false, 'gmail harvest: ' + e.message));
     const rs = today(), re = addDays(rs, 14);
     await resolveLocationBars(rs, re);
     track('location', true, `resolved ${rs}..${re}`);

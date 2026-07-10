@@ -9,7 +9,8 @@
   },
   "dependencies": {
     "express": "^4.19.0",
-    "googleapis": "^144.0.0"
+    "googleapis": "^144.0.0",
+    "imapflow": "^1.4.7"
   },
   "repository": {
     "type": "git",
