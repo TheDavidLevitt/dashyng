@@ -168,7 +168,7 @@ app.use((req, res, next) => {
   // Public read-only carve-out: the sanitized agent-stable showcase. Exact GET paths only —
   // everything else (all POSTs, all other pages/APIs) stays behind the gate. The payload is
   // allowlist-built in /api/public/agentstable; never widen this to a prefix match.
-  if (req.method === 'GET' && (req.path === '/public/agentstable' || req.path === '/api/public/agentstable')) return next();
+  if (req.method === 'GET' && (req.path === '/public/agentstable' || req.path === '/api/public/agentstable' || req.path === '/api/public/agentstable/tiers')) return next();
   if (OAUTH_ID && process.env.OAUTH_REDIRECT_BASE) {
     if (verifySession(cookieOf(req, 'dash_session'))) return next();
     if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'login required', login: '/auth/login' });
@@ -2888,7 +2888,11 @@ async function resolveLocationBars(rangeStart, rangeEnd) {
   const pinnedOn = d => pinned.find(b => d >= b.start && d <= b.end);
 
   const lookback = addDays(rangeStart, -60);
-  const sigRows = (await readTab(TODO_SHEET_ID, LOCSIG_TAB, LOCSIG_HEADERS).catch(() => ({ rows: [] }))).rows
+  // A failed signals read must ABORT the pass (throw), never resolve from zero evidence:
+  // a swallowed read error here once turned every unpinned day into "Location?"/home and
+  // the sheet-cell sync replicated the damage to every tier. (A successful read of a
+  // genuinely empty tab still resolves — that's real "no evidence", not a failure.)
+  const sigRows = (await readTab(TODO_SHEET_ID, LOCSIG_TAB, LOCSIG_HEADERS)).rows
     .filter(r => r.EndDate >= lookback && r.Date <= rangeEnd)
     .map(r => ({ type: r.Type, date: r.Date, endDate: r.EndDate || r.Date, location: r.Location, weight: +r.Confidence || 0, sourceUrl: r.URL || r.SourceURL, note: r.Note, createdAt: r.CreatedAt }));
 
@@ -2925,8 +2929,8 @@ async function scanLocation() {
     await harvestCalendarSignals().catch(e => track('location', false, 'calendar harvest: ' + e.message));
     if (hasGmail() || hasImap()) await harvestGmailSignals().catch(e => track('location', false, 'gmail harvest: ' + e.message));
     const rs = today(), re = addDays(rs, 14);
-    await resolveLocationBars(rs, re);
-    track('location', true, `resolved ${rs}..${re}`);
+    try { await resolveLocationBars(rs, re); track('location', true, `resolved ${rs}..${re}`); }
+    catch (e) { track('location', false, 'resolve aborted (bars kept): ' + e.message); }
   } finally { locScanBusy = false; }
 }
 setTimeout(() => scanLocation().catch(() => {}), 120e3);
@@ -4735,14 +4739,15 @@ app.get('/api/model-usage', asyncRoute(async (req, res) => {
 }));
 
 // ---------- public showcase: sanitized agent-stable board ----------
-// Feeds /public/agentstable (the only unauthenticated surface — carved out in the gate).
-// Reads the SAME sheet tabs the private board uses, but the payload is allowlist-built:
-// market data, tier config, aggregate usage, headline-level APA events. NEVER include:
-// credit pools/balances/expiries, the agent roster/jds, module names, event Detail/URL,
-// or any identity/calendar/location config.
+// Feeds /public/agentstable (unauthenticated, carved out in the gate). Reads the SAME
+// sheet tabs the private board uses, but the payload is allowlist-built: market data,
+// tier config, headline-level APA events. NEVER include: usage history, credit pools/
+// balances/expiries, the agent roster/jds, module names, event Detail/URL, any identity/
+// calendar/location config, or wording that ties the board to a private deployment.
 let pubStableCache = { at: 0, body: null };
 app.get('/api/public/agentstable', asyncRoute(async (req, res) => {
   res.setHeader('Cache-Control', 'public, max-age=60');
+  res.setHeader('Access-Control-Allow-Origin', '*');
   if (Date.now() - pubStableCache.at < 60000 && pubStableCache.body) return res.json(pubStableCache.body);
   const roles = loadApaRoles();
   const cutoffs = apaState().cutoffs || {};
@@ -4777,36 +4782,47 @@ app.get('/api/public/agentstable', asyncRoute(async (req, res) => {
     benchmarks = (await readTabCached(STABLE_SHEET_ID, APA_BENCH_TAB, APA_BENCH_HEADERS, 300000)).rows
       .map(r => ({ name: r.Benchmark, measures: r.Measures, goodFor: r.GoodFor, leader: r.Leader, updated: r.Updated }));
   } catch (e) {}
-  // aggregate usage — per-model token + funding-class sums only; no hosts, no modules,
-  // no pool balances/expiries (those stay in the gated /api/credits)
-  const cutoff = Date.now() - 30 * 86400000;
-  const usage = { windowDays: 30, models: [], totals: { real: 0, credit: 0, included: 0 } };
-  try {
-    const byModel = {};
-    for (const r of (await usageRows()).filter(r => new Date(r.at).getTime() >= cutoff)) {
-      const k = String(r.model || 'unknown').replace(/-20\d{6}$/, '');
-      const m = byModel[k] = byModel[k] || { model: k, input: 0, output: 0, real: 0, credit: 0, included: 0 };
-      m.input += r.input; m.output += r.output;
-      let cost = r.costUsd;
-      if (!cost) { const p = priceOf(r.model); if (p) cost = (r.input * p.in + r.output * p.out) / 1e6; }
-      m[costClass(r.model, r.module, r.at)] += cost;
-    }
-    const rnd = n => Math.round(n * 100) / 100;
-    usage.models = Object.values(byModel).map(m => ({ ...m, real: rnd(m.real), credit: rnd(m.credit), included: rnd(m.included), total: rnd(m.real + m.credit + m.included) }))
-      .sort((a, b) => b.total - a.total);
-    for (const k of ['real', 'credit', 'included']) usage.totals[k] = rnd(usage.models.reduce((n, m) => n + m[k], 0));
-  } catch (e) {}
   const body = { generatedAt: nowIso(), tiers,
     board: { models, selfHostPerMTokOut: selfHostPerMTok(roles.selfHost), osCostBasis: roles.osCostBasis },
-    usage, events, benchmarks };
+    events, benchmarks };
   pubStableCache = { at: Date.now(), body };
   res.json(body);
+}));
+
+// Machine-readable tier recommendations — what external apps poll to learn the current
+// workhorse/steeldust/thoroughbred/etc winner. CORS-open, read-only, no identity: just
+// tier → model + list price + fallbacks. Consumers: resolve at config/startup time,
+// cache ~1h, walk fallbacks in order when the winner errors.
+app.get('/api/public/agentstable/tiers', asyncRoute(async (req, res) => {
+  res.setHeader('Cache-Control', 'public, max-age=60');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  const roles = loadApaRoles();
+  const cutoffs = apaState().cutoffs || {};
+  let board = [];
+  try { board = (await readTabCached(STABLE_SHEET_ID, APA_MODELS_TAB, APA_MODELS_HEADERS, 300000)).rows; } catch (e) {}
+  const priceRow = m => board.find(r => r.Model === m);
+  const tiers = {};
+  for (const [k, rc] of Object.entries(roles.roles || {})) {
+    const p = rc.winner ? priceRow(rc.winner) : null;
+    const pt = !p && rc.winner ? priceOf(rc.winner) : null; // board row first, price table as fallback
+    tiers[k] = { model: rc.winner || null,
+      priceIn: p && p.PriceIn !== '' ? +p.PriceIn : (pt ? pt.in : null),
+      priceOut: p && p.PriceOut !== '' ? +p.PriceOut : (pt ? pt.out : null),
+      fallbacks: rc.fallbacks || [], benchmark: rc.primary || null, min: rc.min ?? (cutoffs[k] || {}).min ?? null,
+      label: rc.label || k };
+  }
+  res.json({ generatedAt: nowIso(), tiers });
 }));
 
 // Agent stable — declared roster (active + standby) joined with 7d usage by module.
 // useCase ties each agent to a board role (winner/fallbacks come from the roles config);
 // jd = collapsed job description shown on the agents page.
-let AGENT_STABLE = []; // roster is instance config (data/agents-roster.json)
+// Agent roster — instance-specific, loaded from data/agents-roster.json (NOT in the
+// public export whitelist and NOT hardcoded here: the roster describes a person's
+// actual agent fleet, schedules, and escalation paths — exactly what must never ship
+// in the stub or its git history). Fresh installs get an empty stable with a hint.
+let AGENT_STABLE = [];
+try { AGENT_STABLE = JSON.parse(fs.readFileSync(path.join(__dirname, 'data', 'agents-roster.json'), 'utf8')); } catch (e) {}
 
 app.get('/api/agent-stable', asyncRoute(async (req, res) => {
   const cutoff = Date.now() - 7 * 86400000;

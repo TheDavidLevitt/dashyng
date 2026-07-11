@@ -94,19 +94,42 @@ function loadCredits(){
     +`<div class="tiny" style="margin-top:4px">Usage is metered from the stable's Usage log; totals/expiries APIs can't report are your entries. <b>The APA reads this panel</b> — pools with money left and an expiry are treated as near-free in its arbitrage math, so entering "$X free until Y" steers procurement toward burning them.</div>`;
   }).catch(()=>{$('credits').innerHTML='<div class="err">unavailable</div>';});
 }
+// One modal, all fields at once (was 6 sequential prompt()s). Resolves the pool object,
+// or null on cancel (backdrop click / Esc / Cancel).
 function creditForm(preset){
-  const name=prompt('Pool name (e.g. "Together.AI promo credits")',preset.name||'');if(name==null)return null;
-  const total=prompt('Total allowance in $ (blank = unknown)',preset.total??'');if(total==null)return null;
-  const until=prompt('Expires (YYYY-MM-DD, blank = no expiry)',preset.until||'');if(until==null)return null;
-  const period=prompt('Resets monthly? (y/n)',preset.period==='month'?'y':'n');if(period==null)return null;
-  const match=prompt('Model/module match pattern (regex over model or module name, e.g. "together|llama") — how metered usage is attributed',preset.match||'');if(match==null)return null;
-  const note=prompt('Assumption note (optional)',preset.note||'')||'';
-  return {name,total:total===''?null:+total,until,period:/^y/i.test(period)?'month':'all',match,note};
+  return new Promise(resolve=>{
+    document.getElementById('pool-dlg')?.remove();
+    const wrap=document.createElement('div');wrap.id='pool-dlg';
+    wrap.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:50';
+    wrap.innerHTML=`<form class="card" style="width:min(430px,92vw);display:flex;flex-direction:column;gap:9px;padding:14px 16px" role="dialog" aria-label="credit pool">
+      <b style="font-size:13px">${preset.key?'Edit':'Add'} credit pool</b>
+      <label class="tiny">Pool name<input name="name" required placeholder='e.g. "Together.AI promo credits"' style="width:100%;margin-top:2px"></label>
+      <label class="tiny">Total allowance $ (blank = unknown)<input name="total" type="number" step="any" min="0" style="width:100%;margin-top:2px"></label>
+      <label class="tiny">Expires YYYY-MM-DD (blank = no expiry)<input name="until" placeholder="2026-09-30" style="width:100%;margin-top:2px"></label>
+      <label class="t" style="margin:0;font-size:11.5px"><input name="period" type="checkbox" style="vertical-align:-2px"> resets monthly</label>
+      <label class="tiny">Usage match — regex over model/module, attributes metered usage<input name="match" placeholder="together|llama" style="width:100%;margin-top:2px"></label>
+      <label class="tiny">Assumption note (optional)<input name="note" style="width:100%;margin-top:2px"></label>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:2px"><button type="button" data-x>Cancel</button><button type="submit" style="border-color:var(--accent)">Save</button></div>
+    </form>`;
+    const form=wrap.firstElementChild,F=form.elements;
+    F.name.value=preset.name||'';if(preset.total!=null)F.total.value=preset.total;F.until.value=preset.until||'';
+    F.period.checked=preset.period==='month';F.match.value=preset.match||'';F.note.value=preset.note||'';
+    const done=v=>{wrap.remove();resolve(v);};
+    wrap.addEventListener('click',e=>{if(e.target===wrap)done(null);});
+    wrap.addEventListener('keydown',e=>{if(e.key==='Escape')done(null);});
+    form.querySelector('[data-x]').onclick=()=>done(null);
+    form.addEventListener('submit',e=>{e.preventDefault();
+      const until=F.until.value.trim();
+      if(until&&!/^\d{4}-\d{2}-\d{2}$/.test(until))return toast('Expiry must be YYYY-MM-DD');
+      done({name:F.name.value.trim(),total:F.total.value===''?null:+F.total.value,until,
+        period:F.period.checked?'month':'all',match:F.match.value.trim(),note:F.note.value.trim()});});
+    document.body.appendChild(wrap);F.name.focus();
+  });
 }
-function addCredit(){const f=creditForm({});if(!f)return;api('/api/credits',{method:'POST',body:JSON.stringify(f)}).then(r=>{if(r&&r.error)return toast(r.error);toast('Pool added');loadCredits();});}
+function addCredit(){creditForm({}).then(f=>{if(!f)return;api('/api/credits',{method:'POST',body:JSON.stringify(f)}).then(r=>{if(r&&r.error)return toast(r.error);toast('Pool added');loadCredits();});});}
 function editCredit(k){
-  api('/api/credits').then(d=>{const c=(d.credits||[]).find(x=>x.key===k)||{};const f=creditForm(c);if(!f)return;
-    api('/api/credits',{method:'POST',body:JSON.stringify({key:k,...f})}).then(()=>{toast('Saved');loadCredits();});});
+  api('/api/credits').then(d=>{const c=(d.credits||[]).find(x=>x.key===k)||{};creditForm(c).then(f=>{if(!f)return;
+    api('/api/credits',{method:'POST',body:JSON.stringify({key:k,...f})}).then(()=>{toast('Saved');loadCredits();});});});
 }
 function delCredit(k){if(!confirm('Remove pool "'+k+'"?'))return;api('/api/credits',{method:'POST',body:JSON.stringify({key:k,del:true})}).then(r=>{if(r&&r.error)return toast(r.error);toast('Removed');loadCredits();});}
 loadCredits();
@@ -231,6 +254,7 @@ loadBoard();
 // ---- stable + incoming ----
 api('/api/agent-stable').then(d=>{
   $('stable-meta').textContent=`— ${d.active} active, ${d.standby} on standby`;
+  if(!d.agents.length){$('stable-body').innerHTML='<div class="empty">No agents declared yet — describe your fleet in data/agents-roster.json (name, model, modules, useCase, role, jd) and it renders here joined with live usage.</div>';return;}
   $('stable-body').innerHTML=d.agents.map(a=>{
     const badge=a.status==='active'?'':` <span class="tiny">[${a.status}]</span>`;
     // tie to the use case: "Orchestrator (Daily driver: claude-sonnet-5)" + fallbacks; flag drift

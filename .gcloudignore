@@ -1,6 +1,7 @@
 node_modules/
 data/*
 !data/apa-roles.json
+!data/agents-roster.json
 !data/apa-sources.json
 !data/news-feeds.json
 !data/feeds.json

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>agent-stable — live board</title>
-<meta name="description" content="Live public board of the agent-stable reference deployment: model market, tier winners, aggregate usage, and the procurement agent's decision feed.">
+<meta name="description" content="agent-stable's live board: current tier winners (workhorse, steeldust, thoroughbred), the model market, and the procurement agent's decision feed — plus a machine-readable recommendation endpoint.">
 <style>
   :root {
     --bg:#0b0f14; --panel:#131a22; --panel2:#1a222c; --line:#263140; --line2:#1a222c;
@@ -17,10 +17,10 @@
   a { color:var(--blue); text-decoration:none } a:hover { text-decoration:underline }
   a:focus-visible, button:focus-visible { outline:2px solid var(--blue); outline-offset:2px }
   .wrap { max-width:1160px; margin:0 auto; padding:20px 16px 48px }
-  header { display:flex; flex-wrap:wrap; gap:12px 20px; align-items:center; margin-bottom:18px }
-  .brand { display:flex; align-items:center; gap:12px }
-  .brand h1 { font-size:22px; margin:0; font-weight:700 }
-  .brand h1 .dash { color:var(--gold) }
+  header { margin-bottom:18px }
+  .hero { display:block; width:100%; height:auto; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace }
+  .sr { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); margin:-1px }
+  .topbar { display:flex; flex-wrap:wrap; gap:10px 20px; align-items:center; margin-top:12px }
   .sub { color:var(--ink2); font-size:13px }
   .spacer { flex:1 }
   .btn { display:inline-block; border:1px solid var(--line); border-radius:8px;
@@ -46,14 +46,10 @@
   th.num { text-align:right }
   .dim { color:var(--ink3) } .muted { color:var(--ink2) }
   .scroll { overflow-x:auto }
-  .legend { display:flex; gap:16px; flex-wrap:wrap; font-size:12.5px; color:var(--ink2); margin:0 0 10px }
-  .legend i { display:inline-block; width:10px; height:10px; border-radius:3px; margin-right:6px; vertical-align:-1px }
-  .urow { display:flex; align-items:center; gap:10px; margin:6px 0 }
-  .urow .lbl { flex:0 0 200px; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
-  .urow .bar { flex:1; display:flex; gap:2px; height:16px; align-items:stretch }
-  .urow .seg { border-radius:2px; min-width:2px; cursor:default }
-  .urow .seg.first { border-radius:4px 2px 2px 4px } .urow .seg.last { border-radius:2px 4px 4px 2px }
-  .urow .tot { flex:0 0 84px; text-align:right; font-size:13px; font-variant-numeric:tabular-nums }
+  pre.api { background:var(--panel2); border:1px solid var(--line2); border-radius:8px;
+            padding:10px 14px; font-size:13px; overflow-x:auto; margin:0 0 8px }
+  pre.api.dim { color:var(--ink2) }
+  code { color:var(--gold) }
   .feed li { margin:0 0 10px; list-style:none }
   .feed { padding:0; margin:0 }
   .feed li .body { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; cursor:pointer }
@@ -75,21 +71,50 @@
 <body>
 <div class="wrap">
   <header>
-    <div class="brand">
-      <svg width="40" height="40" viewBox="0 0 300 300" aria-hidden="true">
-        <path d="M 199.8 110.2 A 65 65 0 1 1 100.2 110.2" fill="none" stroke="#c99b4e" stroke-width="24" stroke-linecap="round"/>
-      </svg>
-      <div>
-        <h1>agent<span class="dash">-</span>stable</h1>
-        <div class="sub">live board of the reference deployment — refreshed continuously from the same feed the private dashboard runs on</div>
+    <h1 class="sr">agent-stable — live board</h1>
+    <svg class="hero" viewBox="0 0 1200 300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="agent-stable: cost-performance management for a stable of AI models">
+      <defs>
+        <linearGradient id="hbg" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stop-color="#10151d"/><stop offset="1" stop-color="#1a2230"/>
+        </linearGradient>
+        <linearGradient id="hshoe" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#e8c07a"/><stop offset="1" stop-color="#b8863d"/>
+        </linearGradient>
+      </defs>
+      <rect x="1" y="1" width="1198" height="298" rx="16" fill="url(#hbg)" stroke="#2c3646" stroke-width="2"/>
+      <path d="M 620 90 C 760 100, 820 150, 900 180 S 1080 225, 1160 235" fill="none" stroke="#7da7c9"
+            stroke-width="2" stroke-dasharray="1 9" stroke-linecap="round" opacity="0.35"/>
+      <circle cx="1160" cy="235" r="5" fill="#7da7c9" opacity="0.5"/>
+      <text x="1052" y="262" font-size="13" fill="#7da7c9" opacity="0.55">$ / month</text>
+      <g>
+        <path d="M 199.8 110.2 A 65 65 0 1 1 100.2 110.2" fill="none" stroke="url(#hshoe)" stroke-width="24" stroke-linecap="round"/>
+        <circle cx="199.8" cy="110.2" r="4.5" fill="#141a24"/><circle cx="215" cy="152" r="4.5" fill="#141a24"/>
+        <circle cx="196" cy="198" r="4.5" fill="#141a24"/><circle cx="150" cy="217" r="4.5" fill="#141a24"/>
+        <circle cx="104" cy="198" r="4.5" fill="#141a24"/><circle cx="85" cy="152" r="4.5" fill="#141a24"/>
+        <circle cx="100.2" cy="110.2" r="4.5" fill="#141a24"/>
+      </g>
+      <text x="290" y="128" font-size="58" font-weight="700" fill="#e6edf3">agent<tspan fill="#d4a24e">-</tspan>stable</text>
+      <text x="292" y="170" font-size="19" fill="#9aa7b8">cost-performance management for a stable of AI models</text>
+      <g font-size="16">
+        <rect x="292" y="200" width="152" height="36" rx="18" fill="none" stroke="#3a4658" stroke-width="1.5"/>
+        <circle cx="314" cy="218" r="6" fill="#b0785a"/><text x="328" y="224" fill="#c9d4e0">workhorse</text>
+        <rect x="456" y="200" width="152" height="36" rx="18" fill="none" stroke="#3a4658" stroke-width="1.5"/>
+        <circle cx="478" cy="218" r="6" fill="#7da7c9"/><text x="492" y="224" fill="#c9d4e0">steeldust</text>
+        <rect x="620" y="200" width="184" height="36" rx="18" fill="none" stroke="#3a4658" stroke-width="1.5"/>
+        <circle cx="642" cy="218" r="6" fill="#d4a24e"/><text x="656" y="224" fill="#c9d4e0">thoroughbred</text>
+        <text x="446" y="224" fill="#5a6878" font-size="15">&#8594;</text>
+        <text x="610" y="224" fill="#5a6878" font-size="15">&#8594;</text>
+      </g>
+    </svg>
+    <div class="topbar">
+      <div class="sub">the live board — tier winners, market prices, and the procurement agent's decision feed</div>
+      <div class="spacer"></div>
+      <div class="links">
+        <a href="https://github.com/TheDavidLevitt/agent-stable">github</a> ·
+        <a href="https://www.npmjs.com/package/agent-stable">npm</a>
       </div>
+      <a class="btn" id="authBtn" href="/auth/login">sign in</a>
     </div>
-    <div class="spacer"></div>
-    <div class="links">
-      <a href="https://github.com/TheDavidLevitt/agent-stable">github</a> ·
-      <a href="https://www.npmjs.com/package/agent-stable">npm</a>
-    </div>
-    <a class="btn" id="authBtn" href="/auth/login">owner sign-in</a>
   </header>
 
   <section aria-labelledby="h-tiers">
@@ -98,16 +123,11 @@
     <div class="tiers" id="tiers"><div class="empty">loading…</div></div>
   </section>
 
-  <section aria-labelledby="h-usage">
-    <h2 id="h-usage">Usage — last 30 days, by model</h2>
-    <p class="note">Aggregate spend split by <b>source of funds</b> — agent-stable's core idea: a dollar of expiring credit is not a dollar of cash. Pool balances and expiries are private.</p>
-    <div class="legend" id="legend" role="list">
-      <span role="listitem"><i style="background:var(--real)"></i>charged (real $)</span>
-      <span role="listitem"><i style="background:var(--credit)"></i>credit drawdown</span>
-      <span role="listitem"><i style="background:var(--included)"></i>subscription-included</span>
-    </div>
-    <div id="usage"><div class="empty">loading…</div></div>
-    <details><summary>as a table</summary><div class="scroll"><table id="usageTable"></table></div></details>
+  <section aria-labelledby="h-api">
+    <h2 id="h-api">For apps — the recommendation endpoint</h2>
+    <p class="note">Any app or agent can resolve a tier to the currently recommended model. CORS-open, read-only, cached 60s server-side; cache ~1h on your side and walk <code>fallbacks</code> in order when the winner errors.</p>
+    <pre class="api">curl -s https://dashyng.com/api/public/agentstable/tiers</pre>
+    <pre class="api dim" id="apiSample">{ "tiers": { "workhorse": { "model": "…", "fallbacks": ["…"], "priceIn": 1, "priceOut": 5 }, … } }</pre>
   </section>
 
   <section aria-labelledby="h-board">
@@ -129,10 +149,9 @@
   </section>
 
   <footer>
-    This is a read-only public view: no personal data, agent roster, or credit-pool balances are exposed,
-    and every mutating control on this deployment requires the owner's Google sign-in.
-    Powered by <a href="https://github.com/TheDavidLevitt/agent-stable">agent-stable</a> (MIT) on
-    <a href="https://github.com/TheDavidLevitt/dashyng">dashyng</a>.
+    Read-only live board, compiled and refreshed continuously by
+    <a href="https://github.com/TheDavidLevitt/agent-stable">agent-stable</a>'s procurement agent (MIT).
+    Mutating the board requires sign-in.
     <span id="stamp"></span>
   </footer>
 </div>
@@ -165,7 +184,7 @@ async function load() {
     if (!r.ok) throw new Error('HTTP ' + r.status);
     d = await r.json();
   } catch (e) {
-    for (const id of ['tiers','usage','feed']) $(id).innerHTML = '<div class="empty">feed unavailable — try again in a minute</div>';
+    for (const id of ['tiers','feed']) $(id).innerHTML = '<div class="empty">feed unavailable — try again in a minute</div>';
     return;
   }
 
@@ -179,26 +198,7 @@ async function load() {
       ${t.fallbacks && t.fallbacks.length ? `<div class="meta dim">fallbacks: ${t.fallbacks.map(esc).join(' · ')}</div>` : ''}
     </div>`).join('') : '<div class="empty">no tiers configured yet</div>';
 
-  // usage — stacked horizontal bars (charged / credit / included)
-  const um = (d.usage && d.usage.models || []).filter(m => m.total > 0 || m.input + m.output > 0);
-  const max = Math.max(1, ...um.map(m => m.total));
-  const CLS = [['real','charged'],['credit','credit'],['included','included']];
-  $('usage').innerHTML = um.length ? um.map(m => {
-    const segs = CLS.filter(([k]) => m[k] > 0);
-    return `<div class="urow">
-      <div class="lbl" title="${esc(m.model)}">${esc(m.model)}</div>
-      <div class="bar" role="img" aria-label="${esc(m.model)}: ${fmt$(m.total)} total">` +
-      segs.map(([k, label], i) =>
-        `<span class="seg ${i === 0 ? 'first' : ''} ${i === segs.length - 1 ? 'last' : ''}"
-           style="width:${Math.max(0.8, m[k] / max * 100)}%;background:var(--${k})"
-           data-tip="${esc(m.model)} — ${label}: ${fmt$(m[k])} · ${fmtTok(m.input)} in / ${fmtTok(m.output)} out"></span>`).join('') +
-      `</div><div class="tot">${fmt$(m.total)}</div></div>`;
-  }).join('') : '<div class="empty">no usage in the window yet</div>';
-  document.querySelectorAll('.seg').forEach(el => bindTip(el, esc(el.dataset.tip)));
-  $('usageTable').innerHTML = '<thead><tr><th>model</th><th class="num">tok in</th><th class="num">tok out</th><th class="num">charged</th><th class="num">credit</th><th class="num">included</th><th class="num">total</th></tr></thead><tbody>' +
-    um.map(m => `<tr><td>${esc(m.model)}</td><td class="num">${fmtTok(m.input)}</td><td class="num">${fmtTok(m.output)}</td><td class="num">${fmt$(m.real)}</td><td class="num">${fmt$(m.credit)}</td><td class="num">${fmt$(m.included)}</td><td class="num">${fmt$(m.total)}</td></tr>`).join('') + '</tbody>';
-
-  // market board — sorted priciest output first, like the private board
+  // market board — sorted priciest output first
   const models = (d.board && d.board.models || []).slice()
     .sort((a, b) => (b.priceOut ?? -1) - (a.priceOut ?? -1));
   const primaries = [...new Set(tiers.map(([, t]) => t.primary).filter(Boolean))];
@@ -235,6 +235,11 @@ async function load() {
 
   $('stamp').textContent = 'Updated ' + new Date(d.generatedAt).toLocaleString() + '.';
 }
+
+// live sample for the API section — show the endpoint's actual current answer
+fetch('/api/public/agentstable/tiers').then(r => r.ok ? r.json() : null).then(t => {
+  if (t) $('apiSample').textContent = JSON.stringify(t, null, 1);
+}).catch(() => {});
 
 // owner probe: any valid session upgrades the button into links to the interactive pages
 fetch('/api/capabilities').then(r => {
