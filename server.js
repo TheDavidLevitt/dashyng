@@ -2648,7 +2648,7 @@ app.post('/api/location/parse', asyncRoute(async (req, res) => {
   const raw = await runClaude(
     `Today is ${today()}. Parse this travel/location note into structured entries. It may contain MULTIPLE legs/stays (commas/newlines/spaces between them). Airport codes become city names (JFK=New York, LHR=London, CDG=Paris…). "JFK->LHR 25/7" is a flight ARRIVING London on July 25. Dates without a year mean the next occurrence. "Lisbon 15-19/7" is a stay.\n` +
     `INPUT: ${String(text).slice(0, 500)}\n` +
-    `Return STRICT JSON only: {"entries":[{"kind":"flight|train|car|hotel|stay","date":"YYYY-MM-DD arrival/start","endDate":"YYYY-MM-DD (= date for a one-day leg)","location":"destination/stay city","label":"short display label, e.g. 'TLS → DOH' or 'Porto'"}]}`,
+    `Return STRICT JSON only: {"entries":[{"kind":"flight|train|car|hotel|stay","date":"YYYY-MM-DD arrival/start","endDate":"YYYY-MM-DD (= date for a one-day leg)","location":"destination/stay city","label":"short display label, e.g. 'TLS → DOH' or 'Pau'"}]}`,
     { timeoutMs: 60000, module: 'location', model: 'claude-haiku-4-5' });
   const block = (String(raw).replace(/```json?/gi, '').replace(/```/g, '').match(/\{[\s\S]*\}/) || [])[0];
   let j = null; try { j = JSON.parse(block); } catch (e) {}
@@ -2744,7 +2744,7 @@ async function addLocationSignal(sig) {
 
 // Calendar signals: multi-day or out-of-home events are the ONE evidence source that needs
 // no external OAuth (the dashboard already reads the configured calendars). An LLM pass
-// extracts a clean location from messy titles ("Porto (car pickup)", "Family — France");
+// extracts a clean location from messy titles ("Pau (car pickup)", "Family — France");
 // without an LLM configured, falls back to the event's own `location` field verbatim.
 async function harvestCalendarSignals() {
   const { events } = await fetchCalendarEvents(45).catch(() => ({ events: [] }));
@@ -2762,7 +2762,7 @@ async function harvestCalendarSignals() {
     try {
       const lines = candidates.slice(0, 40).map((ev, i) => `${i}. ${ev.start?.dateTime || ev.start?.date} → ${ev.end?.dateTime || ev.end?.date || ''} | "${ev.summary || ''}"${ev.location ? ' @ ' + ev.location : ''}`);
       const raw = await runClaude(
-        `Calendar events. For each one that clearly indicates the OWNER WILL PHYSICALLY BE in a specific real-world PLACE (a real city/region/country — "France", "Porto", "London office"), extract it. ` +
+        `Calendar events. For each one that clearly indicates the OWNER WILL PHYSICALLY BE in a specific real-world PLACE (a real city/region/country — "France", "Pau", "London office"), extract it. ` +
         `Skip anything that ISN'T evidence of the owner's own location: generic meetings/reminders/birthdays, school-holiday zone labels ("Zone A/B/C"), academic-calendar terms, public-holiday names, or any event whose "place" is really a category/classification rather than somewhere a person travels to.\n` +
         `Events:\n${lines.join('\n')}\n\n` +
         `Return STRICT JSON only, no prose: {"locations":[{"i":<index>,"place":"short place name"}]}`,
