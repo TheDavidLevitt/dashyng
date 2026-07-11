@@ -2467,7 +2467,7 @@ app.post('/api/habits/log', asyncRoute(async (req, res) => {
   res.json({ ok: true, where });
 }));
 // LLM: free-text schedule ("every other Tuesday") → evaluable custom rule
-async function doHabitFreq({ text }) {
+async function resolveHabitFreq({ text }) {
   const prompt =
     `Convert this habit-schedule description into a JSON rule. Today is ${today()} (${new Date().toLocaleDateString('en-US', { weekday: 'long' })}).\n` +
     `DESCRIPTION: ${String(text || '').slice(0, 200)}\n` +
@@ -2483,7 +2483,7 @@ async function doHabitFreq({ text }) {
 app.post('/api/habits/resolve-freq', asyncRoute(async (req, res) => {
   const text = String((req.body || {}).text || '').trim();
   if (!text) return res.status(400).json({ error: 'text required' });
-  if (HAS_LLM) { try { return res.json(await doHabitFreq({ text })); } catch (e) { return res.status(500).json({ error: e.message }); } }
+  if (HAS_LLM) { try { return res.json(await resolveHabitFreq({ text })); } catch (e) { return res.status(500).json({ error: e.message }); } }
   if (STORE_MODE !== 'sheets') return res.status(400).json({ error: 'No LLM configured — set ANTHROPIC_API_KEY (or install the claude CLI)' });
   const id = await enqueueRpc('habit_freq', { text });
   res.json({ queued: true, id });
@@ -2646,14 +2646,14 @@ app.post('/api/location/parse', asyncRoute(async (req, res) => {
   if (!text || !String(text).trim()) return res.status(400).json({ error: 'text required' });
   if (!HAS_LLM) return res.status(400).json({ error: 'travel parsing needs an LLM tier' });
   const raw = await runClaude(
-    `Today is ${today()}. Parse this travel/location note into structured entries. It may contain MULTIPLE legs/stays (commas/newlines/spaces between them). Airport codes become city names (JFK=New York, LHR=London, CDG=Paris…). "JFK->LHR 25/7" is a flight ARRIVING London on July 25. Dates without a year mean the next occurrence. "Porto 15-19/7" is a stay.\n` +
+    `Today is ${today()}. Parse this travel/location note into structured entries. It may contain MULTIPLE legs/stays (commas/newlines/spaces between them). Airport codes become city names (JFK=New York, LHR=London, CDG=Paris…). "JFK->LHR 25/7" is a flight ARRIVING London on July 25. Dates without a year mean the next occurrence. "Lisbon 15-19/7" is a stay.\n` +
     `INPUT: ${String(text).slice(0, 500)}\n` +
     `Return STRICT JSON only: {"entries":[{"kind":"flight|train|car|hotel|stay","date":"YYYY-MM-DD arrival/start","endDate":"YYYY-MM-DD (= date for a one-day leg)","location":"destination/stay city","label":"short display label, e.g. 'TLS → DOH' or 'Porto'"}]}`,
     { timeoutMs: 60000, module: 'location', model: 'claude-haiku-4-5' });
   const block = (String(raw).replace(/```json?/gi, '').replace(/```/g, '').match(/\{[\s\S]*\}/) || [])[0];
   let j = null; try { j = JSON.parse(block); } catch (e) {}
   const entries = ((j && Array.isArray(j.entries)) ? j.entries : []).filter(e => /^\d{4}-\d{2}-\d{2}$/.test(e.date || '') && e.location);
-  if (!entries.length) return res.status(422).json({ error: 'could not parse — try e.g. "JFK->LHR 25/7" or "Porto 15-19/7"' });
+  if (!entries.length) return res.status(422).json({ error: 'could not parse — try e.g. "JFK->LHR 25/7" or "Lisbon 15-19/7"' });
   const results = [];
   for (const e of entries) {
     const end = /^\d{4}-\d{2}-\d{2}$/.test(e.endDate || '') && e.endDate >= e.date ? e.endDate : e.date;
@@ -3228,7 +3228,7 @@ const AGENTQ_HEADERS = ['Title', 'URL', 'Source', 'Added', 'Done'];
 // Same claim-based dedup as the Agent Queue so Mac + VM never double-run a job.
 const RPC_TAB = 'RPC Queue';
 const RPC_HEADERS = ['ID', 'Kind', 'Payload', 'Result', 'Error', 'Created', 'Done'];
-const RPC_HANDLERS = { reparse: (p) => doReparse(p), media_find: (p) => doMediaFind(p), market_resolve: (p) => doMarketResolve(p), habit_freq: (p) => doHabitFreq(p), news_describe: (p) => doNewsDescribe(p),
+const RPC_HANDLERS = { reparse: (p) => doReparse(p), media_find: (p) => doMediaFind(p), market_resolve: (p) => doMarketResolve(p), habit_freq: (p) => resolveHabitFreq(p), news_describe: (p) => doNewsDescribe(p),
   ...(HAS_JOURNAL ? { 'gmail-token': (p) => { // journal host only — the VM never holds the gmail grant
     if (!p || !p.refresh_token) throw new Error('no refresh_token in payload');
     fs.mkdirSync(path.dirname(GMAIL_TOKEN_FILE), { recursive: true });

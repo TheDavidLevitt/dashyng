@@ -1624,7 +1624,7 @@ async function upsertLocationBarRaw(id, start, end, location, sourceUrl, pinned)
 // lead-window alerts: activities with a Lead-days value surface here before the event
 // ("alert me ~2 weeks before the tournament")
 function laToolbar() {
-  return `<div class="la-toolbar"><button class="ib la-add-travel" title='Add travel / location — free text, LLM-parsed. e.g. "JFK->LHR 25/7", "Porto 15-19/7", several at once'>＋ travel</button><span class="la-travel-slot"></span></div>`;
+  return `<div class="la-toolbar"><button class="ib la-add-travel" title='Add travel / location — free text, LLM-parsed. e.g. "JFK->LHR 25/7", "Lisbon 15-19/7", several at once'>＋ travel</button><span class="la-travel-slot"></span></div>`;
 }
 function bindTravelInput(root) {
   const btn = root.querySelector('.la-add-travel'); if (!btn) return;
@@ -1632,7 +1632,7 @@ function bindTravelInput(root) {
   btn.onclick = () => {
     if (slot.querySelector('input')) { slot.innerHTML = ''; return; }
     const sync0 = appSettings.locInputSync === true; // sticky: last used state is the default
-    slot.innerHTML = `<input class="q-input la-travel-in" placeholder="JFK->LHR 25/7 · Porto 15-19/7 · …" style="width:min(280px,60vw);display:inline-block">
+    slot.innerHTML = `<input class="q-input la-travel-in" placeholder="JFK->LHR 25/7 · Lisbon 15-19/7 · …" style="width:min(280px,60vw);display:inline-block">
       <label class="tiny" style="white-space:nowrap"><input type="checkbox" class="la-travel-sync"${sync0 ? ' checked' : ''}> sync to calendar</label>
       <button class="ib la-travel-go">Go</button>`;
     const inp = slot.querySelector('.la-travel-in'); inp.focus();
@@ -3322,7 +3322,7 @@ function openNewsDescribe() {
   const el = intBox(); el.style.display = 'block';
   el.innerHTML = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px"><strong style="font-size:12px">✨ Describe your news</strong><button class="int-close ib" title="Close" style="margin-left:auto;cursor:pointer">✕</button></div>
     <div class="muted tiny" style="margin-bottom:4px">Say what you want your feed to cover — publications, standing topics, people to follow, places that matter, stories you're tracking right now. The agent turns it into the Sources / Subjects / Following / Geographies / Top-of-mind config (merging with what's already there) and shows you the diff before anything is saved.</div>
-    <textarea class="nd-ta" style="width:100%;min-height:110px;font-size:12.5px;box-sizing:border-box" placeholder="e.g. I want the FT and The Economist top stories, everything on European energy markets and LNG, follow Zeihan and Matt Levine, local news for London and Boston, and track the OPEC quota talks until they resolve."></textarea>
+    <textarea class="nd-ta" style="width:100%;min-height:110px;font-size:12.5px;box-sizing:border-box" placeholder="e.g. I want the FT and The Economist top stories, everything on European energy markets and LNG, follow Zeihan and Matt Levine, local news for Zurich and Boston, and track the OPEC quota talks until they resolve."></textarea>
     <div style="display:flex;gap:6px;margin-top:4px"><button class="nd-go int-prev" style="cursor:pointer">Preview config →</button></div>
     <div class="nd-msg muted tiny" style="margin-top:4px"></div><div class="nd-out"></div>`;
   wireClose(el);

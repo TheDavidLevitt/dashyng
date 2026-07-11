@@ -1,0 +1,60 @@
+<svg width="900" height="430" viewBox="0 0 900 430" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="dashyng architecture: one Node process with a storage adapter, optional tiers converging on a shared store, layered LLM access, agent-stable procurement, and plugin hooks">
+  <style>
+    text { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fill: #dbe4ee }
+    .t { font-size: 15px; font-weight: 700 } .s { font-size: 12px; fill: #8fa1b3 } .k { font-size: 11px; fill: #5c6f82 }
+    .box { fill: #131a22; stroke: #263140; rx: 10 }
+    .arrow { stroke: #5c6f82; stroke-width: 1.5; fill: none; marker-end: url(#ah) }
+  </style>
+  <defs><marker id="ah" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8" fill="none" stroke="#5c6f82" stroke-width="1.2"/></marker></defs>
+  <rect x="1" y="1" width="898" height="428" rx="14" fill="#0b0f14" stroke="#2c3646" stroke-width="2"/>
+
+  <!-- the process -->
+  <rect class="box" x="330" y="30" width="240" height="96" rx="10"/>
+  <text class="t" x="352" y="60">server.js</text>
+  <text class="s" x="352" y="82">one Node process · no build</text>
+  <text class="s" x="352" y="100">one page + /api/*</text>
+
+  <!-- storage adapter -->
+  <rect class="box" x="330" y="170" width="240" height="82" rx="10"/>
+  <text class="t" x="352" y="198">store/ adapter</text>
+  <text class="s" x="352" y="220">local JSON (default) · Sheets</text>
+  <text class="k" x="352" y="238">versioned envelopes · queues</text>
+  <path class="arrow" d="M450 126 L450 170"/>
+
+  <!-- tiers -->
+  <rect class="box" x="40" y="60" width="220" height="192" rx="10"/>
+  <text class="t" x="60" y="90">tiers (optional)</text>
+  <text class="s" x="60" y="116">serverless web tier</text>
+  <text class="k" x="60" y="132">stateless · no keys</text>
+  <text class="s" x="60" y="158">your workstation</text>
+  <text class="k" x="60" y="174">trusted: keys, files, jobs</text>
+  <text class="s" x="60" y="200">always-on VM</text>
+  <text class="k" x="60" y="216">heartbeat failover</text>
+  <text class="k" x="60" y="240">converge via shared store</text>
+  <path class="arrow" d="M260 160 L330 205"/>
+
+  <!-- llm -->
+  <rect class="box" x="640" y="30" width="220" height="110" rx="10"/>
+  <text class="t" x="660" y="60">LLM access</text>
+  <text class="s" x="660" y="84">plugins → CLI → API key</text>
+  <text class="k" x="660" y="102">each optional · degrades</text>
+  <text class="k" x="660" y="118">feature-by-feature</text>
+  <path class="arrow" d="M640 90 L570 80"/>
+
+  <!-- agent-stable -->
+  <rect class="box" x="640" y="170" width="220" height="110" rx="10"/>
+  <text class="t" x="660" y="200">stable/ (agent-stable)</text>
+  <text class="s" x="660" y="224">meter by source-of-funds</text>
+  <text class="s" x="660" y="242">benchmark per tier</text>
+  <text class="k" x="660" y="260">adopt gate: better ∧ cheaper</text>
+  <path class="arrow" d="M640 210 L570 205"/>
+
+  <!-- plugins -->
+  <rect class="box" x="330" y="300" width="240" height="96" rx="10"/>
+  <text class="t" x="352" y="330">plugins/*.js</text>
+  <text class="s" x="352" y="352">sections · routes · jobs</text>
+  <text class="s" x="352" y="370">news sources · LLM routers</text>
+  <path class="arrow" d="M450 300 L450 252"/>
+
+  <text class="k" x="40" y="417">blank-canvas boot: every section renders an empty state with a setup hint · personalize via config + plugins, not forks</text>
+</svg>
