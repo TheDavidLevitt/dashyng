@@ -31,3 +31,6 @@ data/gmail-processed.json
 spec/LESSONS-local.md
 data/store/
 data/feedback.jsonl
+
+# Jungle Farm game — private (lives in ~/Code/JungleVine), deployed via working tree only
+public/junglefarm/
