@@ -223,6 +223,59 @@ app.use((req, res, next) => {
   }
   next();
 });
+// ---------- EchoChamber → private Cloud Run proxy ----------
+// Serves the EchoChamber debate GUI at /echochamber for signed-in users.
+// The EchoChamber Cloud Run service is private (--no-allow-unauthenticated);
+// this proxy signs every request with this service's ID token (from the
+// metadata server), so the OAuth gate above is the only door in. Everything
+// is streamed unbuffered — Gradio runs its UI over SSE. Express strips the
+// /echochamber mount prefix, matching ECHOCHAMBER_ROOT_PATH on the app side.
+const EC_URL = (process.env.ECHOCHAMBER_URL || '').replace(/\/$/, '');
+const ecTransport = { 'https:': require('https'), 'http:': require('http') };
+let ecIdTok = { v: '', exp: 0 };
+async function ecToken() {
+  if (!EC_URL || Date.now() < ecIdTok.exp) return ecIdTok.v;
+  try {
+    const r = await fetch('http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience=' + encodeURIComponent(EC_URL),
+      { headers: { 'Metadata-Flavor': 'Google' }, signal: AbortSignal.timeout(3000) });
+    if (!r.ok) throw new Error(`metadata ${r.status}`);
+    ecIdTok = { v: await r.text(), exp: Date.now() + 45 * 60 * 1000 };
+  } catch (e) { ecIdTok = { v: '', exp: Date.now() + 30 * 1000 }; } // local dev: no metadata server
+  return ecIdTok.v;
+}
+app.use('/echochamber', asyncRoute(async (req, res) => {
+  if (!EC_URL) return res.status(501).send('EchoChamber not configured (set ECHOCHAMBER_URL)');
+  const target = new URL(EC_URL);
+  const token = await ecToken();
+  const headers = { ...req.headers, host: target.host };
+  delete headers.cookie;        // the dash session cookie stays on this side
+  delete headers.authorization;
+  if (token) headers.authorization = `Bearer ${token}`;
+  // express.json() already consumed JSON bodies — re-serialize those;
+  // everything else (uploads, SSE handshakes) streams straight through.
+  let body = null;
+  if (req._body) {
+    body = Buffer.from(JSON.stringify(req.body ?? {}));
+    headers['content-length'] = body.length;
+  }
+  const upstream = ecTransport[target.protocol].request({
+    host: target.hostname,
+    port: target.port || (target.protocol === 'https:' ? 443 : 80),
+    path: req.url,
+    method: req.method,
+    headers,
+  }, (up) => {
+    res.writeHead(up.statusCode, up.headers);
+    up.pipe(res);
+  });
+  upstream.on('error', (e) => {
+    if (!res.headersSent) res.status(502).send('EchoChamber upstream error: ' + e.message);
+    else res.end();
+  });
+  if (body) upstream.end(body);
+  else req.pipe(upstream);
+}));
+
 // ---------- Jungle Farm → learning-graph proxy ----------
 // The game (static files under /junglefarm) reads/writes Jack's knowledge state
 // through here, so it works from any signed-in device. Session-gated by the
