@@ -159,6 +159,12 @@ async function gmailConsentReturn(req, res) {
 }
 app.get('/auth/gmail/disconnect', (req, res) => { try { fs.unlinkSync(GMAIL_TOKEN_FILE); } catch (e) {} res.redirect('/'); });
 
+// The ONLY unauthenticated paths: exact-match read-only GETs (no writes, no LLM in any
+// of their request paths). Additions here are a REVIEW event — never widen to a prefix.
+const PUBLIC_GETS = new Set([
+  '/public/agentstable', '/api/public/agentstable', '/api/public/agentstable/tiers',
+  '/agentstable', '/api/public/formguide', '/api/public/formguide/recommend',
+]);
 // gate: OAuth session (public tier) → basic-auth (if password set) → open.
 // Login is enforced only when OAUTH_REDIRECT_BASE marks this instance as publicly
 // reachable — merely POSSESSING the OAuth client creds (the Mac holds them for the
@@ -168,7 +174,7 @@ app.use((req, res, next) => {
   // Public read-only carve-out: the sanitized agent-stable showcase. Exact GET paths only —
   // everything else (all POSTs, all other pages/APIs) stays behind the gate. The payload is
   // allowlist-built in /api/public/agentstable; never widen this to a prefix match.
-  if (req.method === 'GET' && (req.path === '/public/agentstable' || req.path === '/api/public/agentstable' || req.path === '/api/public/agentstable/tiers')) return next();
+  if (req.method === 'GET' && PUBLIC_GETS.has(req.path)) return next();
   if (OAUTH_ID && process.env.OAUTH_REDIRECT_BASE) {
     if (verifySession(cookieOf(req, 'dash_session'))) return next();
     if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'login required', login: '/auth/login' });
@@ -191,6 +197,11 @@ app.use(express.static(__dirname + '/public', {
 app.get('/public/agentstable', (req, res) => {
   res.setHeader('Cache-Control', 'no-cache, must-revalidate');
   res.sendFile(path.join(__dirname, 'public', 'agentstable-public.html'));
+});
+// The Form Guide — community model×task recommendations (Phase 1: read-only).
+app.get('/agentstable', (req, res) => {
+  res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+  res.sendFile(path.join(__dirname, 'public', 'formguide.html'));
 });
 
 // Capability flags — agent features need the claude CLI (subscription auth) and
@@ -4812,6 +4823,70 @@ app.get('/api/public/agentstable/tiers', asyncRoute(async (req, res) => {
       label: rc.label || k };
   }
   res.json({ generatedAt: nowIso(), tiers });
+}));
+
+// ---------- the Form Guide (Phase 1, read-only) ----------
+// Community model×task database (spec: agent-stable repo, spec/FORM-GUIDE.md).
+// Phase 1 ships no database and NO fabricated thresholds: each task maps to the
+// benchmark judged most predictive (basis: prior); recommend() = cheapest of the
+// top-3 on that benchmark. NO LLM in any request path — table lookups only.
+// Curated L1/L2; community subdivision + reports arrive in Phase 2.
+const FORM_GUIDE = {
+  code:        { label: 'Code',        bench: 'SWE-bench Verified', alt: 'LiveCodeBench',
+                 l2: ['generate', 'debug', 'review', 'refactor', 'test-writing', 'architecture', 'completion'] },
+  agentic:     { label: 'Agentic',     bench: 'AA Intelligence',
+                 l2: ['orchestration', 'tool-calling', 'multi-step-planning', 'browser-use', 'computer-use', 'long-horizon'] },
+  analysis:    { label: 'Analysis',    bench: 'GPQA Diamond', alt: 'AA Intelligence',
+                 l2: ['quantitative', 'legal', 'scientific', 'financial', 'causal-reasoning'] },
+  writing:     { label: 'Writing',     bench: 'LMArena', alt: 'AA Intelligence',
+                 l2: ['technical', 'creative', 'editing', 'summarization', 'translation'] },
+  extraction:  { label: 'Extraction',  bench: 'MMLU-Pro', alt: 'AA Intelligence',
+                 l2: ['classification', 'structured-output', 'entity-extraction', 'ocr-cleanup'] },
+  research:    { label: 'Research',    bench: 'HLE', alt: 'AA Intelligence',
+                 l2: ['web-research', 'literature-review', 'fact-checking', 'synthesis'] },
+  conversation:{ label: 'Conversation', bench: 'LMArena', alt: 'AA Intelligence',
+                 l2: ['support', 'tutoring', 'roleplay'] },
+  math:        { label: 'Math',        bench: 'AIME', alt: 'MATH-500',
+                 l2: ['proof', 'computation', 'word-problems', 'formalization'] },
+  vision:      { label: 'Vision',      bench: 'AA Intelligence',
+                 l2: ['understanding', 'chart-reading', 'document-parsing', 'spatial'] },
+  generation:  { label: 'Generation',  bench: 'LMArena Image (t2i)',
+                 l2: ['image'] },
+};
+async function formGuideModels() {
+  const rows = (await readTabCached(STABLE_SHEET_ID, APA_MODELS_TAB, APA_MODELS_HEADERS, 300000)).rows;
+  return rows.map(r => {
+    let b = {}; try { b = JSON.parse(r.Benchmarks || '{}'); } catch (e) {}
+    const bm = {}; for (const [bk, v] of Object.entries(b)) if (!bk.startsWith('_')) bm[bk] = v;
+    return { model: r.Model, lab: r.Lab, os: String(r.OS || '').trim() === '1',
+      priceIn: r.PriceIn === '' ? null : +r.PriceIn, priceOut: r.PriceOut === '' ? null : +r.PriceOut, benchmarks: bm };
+  });
+}
+app.get('/api/public/formguide', asyncRoute(async (req, res) => {
+  res.setHeader('Cache-Control', 'public, max-age=60');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  let models = []; try { models = await formGuideModels(); } catch (e) {}
+  res.json({ generatedAt: nowIso(), phase: 1, basis: 'prior', taxonomy: FORM_GUIDE, models });
+}));
+app.get('/api/public/formguide/recommend', asyncRoute(async (req, res) => {
+  res.setHeader('Cache-Control', 'public, max-age=60');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  const task = String(req.query.task || '').trim().toLowerCase();
+  const node = FORM_GUIDE[task.split('.')[0]];
+  if (!node) return res.status(404).json({ error: 'unknown task', tasks: Object.keys(FORM_GUIDE) });
+  let models = []; try { models = await formGuideModels(); } catch (e) {}
+  const scored = b => models.filter(m => m.benchmarks[b] != null).sort((x, y) => y.benchmarks[b] - x.benchmarks[b]);
+  let bench = node.bench, ranked = scored(bench);
+  if (ranked.length < 2 && node.alt) { bench = node.alt; ranked = scored(bench); }
+  if (ranked.length < 2 && bench !== 'AA Intelligence') { bench = 'AA Intelligence'; ranked = scored(bench); }
+  if (!ranked.length) return res.status(503).json({ error: 'board has no scores yet for this task', task, benchmark: bench });
+  const top = ranked.slice(0, 3);
+  const priced = top.filter(m => m.priceOut != null);
+  const pick = (priced.length ? priced : top).slice().sort((x, y) => (x.priceOut ?? 1e9) - (y.priceOut ?? 1e9))[0];
+  res.json({ task, basis: 'prior', benchmark: bench, min_score: null, n_reports: 0,
+    model: pick.model, score: pick.benchmarks[bench], priceIn: pick.priceIn, priceOut: pick.priceOut,
+    alternatives: top.filter(m => m.model !== pick.model).map(m => ({ model: m.model, score: m.benchmarks[bench], priceIn: m.priceIn, priceOut: m.priceOut })),
+    note: 'threshold unrated until community reports exist — this is the cheapest of the top-3 on ' + bench });
 }));
 
 // Agent stable — declared roster (active + standby) joined with 7d usage by module.

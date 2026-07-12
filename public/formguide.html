@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>the form guide — which model is enough?</title>
+<meta name="description" content="The form guide: a community model×task database. Pick a task, get the model and benchmark evidence — read-only Phase 1, community reports coming.">
+<style>
+  :root {
+    --bg:#0b0f14; --panel:#131a22; --panel2:#1a222c; --line:#263140; --line2:#1a222c;
+    --ink:#dbe4ee; --ink2:#8fa1b3; --ink3:#5c6f82; --blue:#7fb0ff; --gold:#e9b949; --green:#6fcf97;
+  }
+  * { box-sizing:border-box }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:15px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+  a { color:var(--blue); text-decoration:none } a:hover { text-decoration:underline }
+  a:focus-visible, button:focus-visible { outline:2px solid var(--blue); outline-offset:2px }
+  .wrap { max-width:1160px; margin:0 auto; padding:20px 16px 48px }
+  header { display:flex; flex-wrap:wrap; gap:12px 18px; align-items:center; margin-bottom:18px }
+  .shoe { flex:0 0 auto }
+  h1 { font-size:24px; margin:0; font-weight:700 } h1 .dash { color:var(--gold) }
+  .sub { color:var(--ink2); font-size:13px }
+  .spacer { flex:1 }
+  .links { font-size:13px; color:var(--ink3) }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+            padding:16px 18px; margin-bottom:16px }
+  section h2 { margin:0 0 4px; font-size:15px; font-weight:600 }
+  .note { color:var(--ink3); font-size:12.5px; margin:0 0 12px }
+  .pills { display:flex; flex-wrap:wrap; gap:8px; margin:4px 0 6px }
+  .pill { border:1.5px solid var(--line); border-radius:18px; padding:7px 16px; cursor:pointer;
+          background:none; color:var(--ink); font:inherit; font-size:13.5px }
+  .pill:hover { border-color:var(--ink3) }
+  .pill.on { border-color:var(--gold); color:var(--gold) }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; margin:10px 0 0 }
+  .chip { border:1px solid var(--line2); border-radius:12px; padding:3px 10px; font-size:12px; color:var(--ink2) }
+  .rec { display:none; background:var(--panel2); border:1px solid var(--line2); border-radius:8px;
+         padding:14px 16px; margin-top:14px }
+  .rec .m { font-size:20px; font-weight:700 }
+  .rec .meta { color:var(--ink2); font-size:13px; margin-top:4px }
+  .rec .alts { color:var(--ink3); font-size:12.5px; margin-top:8px }
+  .rec .basis { color:var(--gold); font-size:12px; margin-top:10px }
+  table { width:100%; border-collapse:collapse; font-size:13.5px }
+  th { text-align:left; color:var(--ink3); font-weight:500; font-size:12px; letter-spacing:.06em;
+       padding:6px 10px 6px 0; border-bottom:1px solid var(--line) }
+  td { padding:7px 10px 7px 0; border-bottom:1px solid var(--line2) }
+  tr:last-child td { border-bottom:0 }
+  .num { text-align:right; font-variant-numeric:tabular-nums } th.num { text-align:right }
+  .dim { color:var(--ink3) } .muted { color:var(--ink2) }
+  .scroll { overflow-x:auto }
+  pre.api { background:var(--panel2); border:1px solid var(--line2); border-radius:8px;
+            padding:10px 14px; font-size:13px; overflow-x:auto; margin:0 0 8px }
+  pre.api.dim { color:var(--ink2) }
+  .empty { color:var(--ink3); font-size:13px; padding:8px 0 }
+  footer { color:var(--ink3); font-size:12.5px; line-height:1.7; margin-top:24px }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <svg class="shoe" width="44" height="44" viewBox="60 80 180 160" aria-hidden="true">
+      <defs><linearGradient id="sh" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#e8c07a"/><stop offset="1" stop-color="#b8863d"/></linearGradient></defs>
+      <path d="M 199.8 110.2 A 65 65 0 1 1 100.2 110.2" fill="none" stroke="url(#sh)" stroke-width="24" stroke-linecap="round"/>
+    </svg>
+    <div>
+      <h1>the form<span class="dash">-</span>guide</h1>
+      <div class="sub">which model is enough for the task? — a community model×task database</div>
+    </div>
+    <div class="spacer"></div>
+    <div class="links">
+      <a href="/public/agentstable">live board</a> ·
+      <a href="https://github.com/TheDavidLevitt/agent-stable/blob/main/spec/FORM-GUIDE.md">spec</a> ·
+      <a href="https://github.com/TheDavidLevitt/agent-stable">github</a>
+    </div>
+  </header>
+
+  <section aria-labelledby="h-pick">
+    <h2 id="h-pick">Pick a task</h2>
+    <p class="note">Curated top levels; the community subdivides below them once reporting opens. In Phase&nbsp;1 subtasks inherit their domain's benchmark.</p>
+    <div class="pills" id="l1" role="tablist"></div>
+    <div class="chips" id="l2"></div>
+    <div class="rec" id="rec" role="status"></div>
+  </section>
+
+  <section aria-labelledby="h-rank">
+    <h2 id="h-rank">The field <span class="muted" id="rank-bench"></span></h2>
+    <p class="note">Every model on the board with a score on the selected task's benchmark, best first.</p>
+    <div class="scroll"><table id="rank"><tbody><tr><td class="empty">pick a task above</td></tr></tbody></table></div>
+  </section>
+
+  <section aria-labelledby="h-api">
+    <h2 id="h-api">For apps</h2>
+    <p class="note">CORS-open, read-only, cached, and — by hard rule — no LLM anywhere in the request path: pure table lookups you cannot run up a bill with.</p>
+    <pre class="api" id="apiCurl">curl -s "https://dashyng.com/api/public/formguide/recommend?task=code"</pre>
+    <pre class="api dim" id="apiSample">…</pre>
+  </section>
+
+  <section aria-labelledby="h-how">
+    <h2 id="h-how">How this works — and what's next</h2>
+    <p class="note" style="margin-bottom:6px">
+      <b class="muted">Phase 1 (now):</b> read-only. Each task maps to the benchmark judged most predictive
+      (<span style="color:var(--gold)">basis: prior</span>); the recommendation is the cheapest of the top-3 —
+      no fabricated thresholds.</p>
+    <p class="note" style="margin-bottom:6px">
+      <b class="muted">Phase 2:</b> sign in with GitHub, report task × model × success (1–5) with optional evidence,
+      vote on reports; thresholds get <i>fitted</i> from outcomes and <span style="color:var(--gold)">basis</span>
+      flips to <span style="color:var(--green)">fitted</span> with confidence intervals.</p>
+    <p class="note" style="margin:0">
+      Reports and hypotheses will be open data (ODbL). Full design:
+      <a href="https://github.com/TheDavidLevitt/agent-stable/blob/main/spec/FORM-GUIDE.md">spec/FORM-GUIDE.md</a>.</p>
+  </section>
+
+  <footer>
+    Read-only Phase 1 of the form guide, running on
+    <a href="https://github.com/TheDavidLevitt/agent-stable">agent-stable</a>'s market board (MIT).
+    <span id="stamp"></span>
+  </footer>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let DATA = null, sel = 'code';
+
+function renderL1() {
+  $('l1').innerHTML = Object.entries(DATA.taxonomy).map(([k, n]) =>
+    `<button class="pill ${k === sel ? 'on' : ''}" role="tab" aria-selected="${k === sel}" data-k="${esc(k)}">${esc(n.label)}</button>`).join('');
+  document.querySelectorAll('#l1 .pill').forEach(b => b.addEventListener('click', () => { sel = b.dataset.k; renderL1(); renderTask(); }));
+}
+
+async function renderTask() {
+  const node = DATA.taxonomy[sel];
+  $('l2').innerHTML = (node.l2 || []).map(s => `<span class="chip">${esc(sel)}.${esc(s)}</span>`).join('');
+  $('apiCurl').textContent = `curl -s "https://dashyng.com/api/public/formguide/recommend?task=${sel}"`;
+  const rec = $('rec'); rec.style.display = 'block'; rec.innerHTML = '<span class="empty">consulting the form…</span>';
+  let r;
+  try { r = await (await fetch('/api/public/formguide/recommend?task=' + encodeURIComponent(sel))).json(); }
+  catch (e) { rec.innerHTML = '<span class="empty">unavailable — try again shortly</span>'; return; }
+  if (r.error) { rec.innerHTML = `<span class="empty">${esc(r.error)}</span>`; $('apiSample').textContent = JSON.stringify(r, null, 1); return; }
+  rec.innerHTML = `<div class="m">${esc(r.model)}</div>
+    <div class="meta">${esc(r.benchmark)}: <b>${esc(r.score)}</b>${r.priceOut != null ? ` · $${esc(r.priceIn)}/$${esc(r.priceOut)} per 1M tok` : ''}</div>
+    ${r.alternatives && r.alternatives.length ? `<div class="alts">also in the frame: ${r.alternatives.map(a => `${esc(a.model)} (${esc(a.score)}${a.priceOut != null ? `, $${esc(a.priceOut)}/1M out` : ''})`).join(' · ')}</div>` : ''}
+    <div class="basis">basis: prior — ${esc(r.note)}</div>`;
+  $('apiSample').textContent = JSON.stringify(r, null, 1);
+
+  // ranked field for this benchmark
+  const bench = r.benchmark;
+  $('rank-bench').textContent = '— ' + bench;
+  const ranked = DATA.models.filter(m => m.benchmarks[bench] != null).sort((a, b) => b.benchmarks[bench] - a.benchmarks[bench]);
+  $('rank').innerHTML = ranked.length ? '<thead><tr><th>model</th><th>lab</th><th class="num">' + esc(bench) + '</th><th class="num">$/1M in</th><th class="num">$/1M out</th><th></th></tr></thead><tbody>' +
+    ranked.map(m => `<tr${m.model === r.model ? ' style="color:var(--green)"' : ''}><td>${esc(m.model)}${m.model === r.model ? ' ←' : ''}</td><td class="muted">${esc(m.lab || '')}</td>
+      <td class="num">${esc(m.benchmarks[bench])}</td>
+      <td class="num">${m.priceIn != null ? m.priceIn : '<span class="dim">—</span>'}</td>
+      <td class="num">${m.priceOut != null ? m.priceOut : '<span class="dim">—</span>'}</td>
+      <td class="dim">${m.os ? 'open-weight' : ''}</td></tr>`).join('') + '</tbody>'
+    : '<tbody><tr><td class="empty">no scores for ' + esc(bench) + ' yet</td></tr></tbody>';
+}
+
+fetch('/api/public/formguide').then(r => r.json()).then(d => {
+  DATA = d;
+  renderL1(); renderTask();
+  $('stamp').textContent = 'Board updated ' + new Date(d.generatedAt).toLocaleString() + '.';
+}).catch(() => { $('l1').innerHTML = '<span class="empty">feed unavailable — try again in a minute</span>'; });
+</script>
+</body>
+</html>
