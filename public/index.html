@@ -3389,7 +3389,13 @@ function COST(v, cls) {
   return `<span style="color:var(--text2)">$${tot.toFixed(2)}</span> (${parts.join(' + ')})`;
 }
 const fmtTok = n => n >= 1e6 ? (n/1e6).toFixed(2)+'M' : n >= 1e3 ? Math.round(n/1e3)+'k' : (n||0);
+(function loadAgentsSummary(attempt) {
 api('/api/agents/summary').then(d => {
+  if (d && d.unavailable) { // Sheets-quota storm on a cold cloud instance — retry, don't show zeros
+    $('agents-summary').innerHTML = '<div class="tiny muted">agents data busy (Sheets quota) — retrying…</div>';
+    if ((attempt || 0) < 6) setTimeout(() => loadAgentsSummary((attempt || 0) + 1), 45000);
+    return;
+  }
   const mo = (d.month.real||0)+(d.month.credit||0)+(d.month.included||0);
   const worked = (d.activities||[]).slice(0,5).map(a => `${esc(a.module)} ×${a.n}`).join(' · ') || 'quiet';
   const dec = (d.decisions||[]).slice(0,3).map(x => `<div class="tiny" style="padding:1px 0;font-size:11.5px">• <b>${esc(x.module)}</b> ${esc(x.decision)}${x.why ? ' <span class="muted">— ' + esc(String(x.why).slice(0,90)) + '</span>' : ''}</div>`).join('');
@@ -3399,7 +3405,12 @@ api('/api/agents/summary').then(d => {
     + (dec ? `<div class="tiny" style="text-transform:uppercase;font-weight:700;margin-top:4px">Key decisions</div>${dec}` : '')
     + `<div style="font-size:12.5px;margin-top:4px"><b>Month to date:</b> $${mo.toFixed(2)} — ${COST(d.month) || '$0.00'} ${adopted}</div>`
     + `<div class="tiny" style="margin-top:3px"><span style="color:var(--red)">red</span>=charged (real) · <span style="color:var(--green)">green</span>=credit · grey=subscription (hypothetical) · <a href="/agents.html">full agents dashboard →</a></div>`;
-}).catch(() => { $('agents-summary').innerHTML = '<div class="err">agents summary unavailable</div>'; });
+}).catch(() => {
+  $('agents-summary').innerHTML = '<div class="tiny muted">agents summary unavailable — retrying…</div>';
+  if ((attempt || 0) < 6) setTimeout(() => loadAgentsSummary((attempt || 0) + 1), 45000);
+  else $('agents-summary').innerHTML = '<div class="err">agents summary unavailable</div>';
+});
+})(0);
 api('/api/filesystem').then(d => {
   if (d.unavailable) { $('filemgr').style.display = 'none'; return; }
   $('fm-meta').textContent = `(${d.totalFiles.toLocaleString()} tracked files · ${d.changed24h} changed 24h)`;

@@ -75,12 +75,6 @@ const { OAuth2Client } = require('google-auth-library');
 const OAUTH_ID = CFG.oauthClientId || process.env.GOOGLE_OAUTH_CLIENT_ID;
 const OAUTH_SECRET = CFG.oauthClientSecret || process.env.GOOGLE_OAUTH_CLIENT_SECRET;
 const ALLOWED_EMAIL = CFG.allowedEmail;
-// Game guests (comma-separated emails, e.g. JUNGLEFARM_EMAILS=kid@x.com,parent@y.com):
-// may sign in with Google but are confined to /junglefarm — every other path redirects
-// there. Only ALLOWED_EMAIL sees the dashboard itself.
-const GAME_GUEST_EMAILS = String(process.env.JUNGLEFARM_EMAILS || '').toLowerCase()
-  .split(',').map(s => s.trim()).filter(Boolean);
-const isGamePath = p => p === '/junglefarm' || p.startsWith('/junglefarm/');
 const SESSION_SECRET = process.env.SESSION_SECRET || process.env.DASHBOARD_PASSWORD || 'dev-only-secret';
 
 const b64url = s => Buffer.from(s).toString('base64url');
@@ -105,23 +99,11 @@ const OAUTH_REDIRECT_BASE = process.env.OAUTH_REDIRECT_BASE || '';
 const redirectUri = req => OAUTH_REDIRECT_BASE
   ? `${OAUTH_REDIRECT_BASE.replace(/\/$/, '')}/auth/callback`
   : `${req.headers['x-forwarded-proto'] || 'http'}://${req.headers.host}/auth/callback`;
-// The callback is pinned to one hostname (above), but users may arrive on www.<base>:
-// a host-only cookie set on the apex never reaches www and login loops forever. Scope the
-// cookie to the registrable domain whenever the request host is under it; direct *.run.app
-// hits keep the host-only cookie.
-const BASE_HOST = OAUTH_REDIRECT_BASE ? new URL(OAUTH_REDIRECT_BASE).hostname.replace(/^www\./, '') : '';
-const cookieDomain = req => {
-  const host = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(':')[0];
-  return BASE_HOST && (host === BASE_HOST || host.endsWith('.' + BASE_HOST)) ? `; Domain=${BASE_HOST}` : '';
-};
-// post-login destination: only same-site relative paths survive the round trip
-const safeNext = p => (typeof p === 'string' && p.startsWith('/') && !p.startsWith('//')) ? p : '';
 
 app.get('/auth/login', (req, res) => {
   if (!OAUTH_ID) return res.status(501).send('OAuth not configured');
   const c = new OAuth2Client(OAUTH_ID, OAUTH_SECRET, redirectUri(req));
-  const next = safeNext(req.query.next);
-  const url = c.generateAuthUrl({ scope: ['openid', 'email', 'profile'], prompt: 'select_account', ...(next ? { state: 'next:' + next } : {}) });
+  const url = c.generateAuthUrl({ scope: ['openid', 'email', 'profile'], prompt: 'select_account' });
   if (req.query.go) return res.redirect(url); // direct-redirect escape hatch
   // tiny landing: sign-in + (when configured) a link to the public demo stub
   const demo = process.env.DEMO_URL || '';
@@ -140,19 +122,12 @@ app.get('/auth/callback', asyncRoute(async (req, res) => {
   const { tokens } = await c.getToken(req.query.code);
   const ticket = await c.verifyIdToken({ idToken: tokens.id_token, audience: OAUTH_ID });
   const email = (ticket.getPayload().email || '').toLowerCase();
-  const isOwner = email === ALLOWED_EMAIL;
-  if (!isOwner && !GAME_GUEST_EMAILS.includes(email)) return res.status(403).send(`Not authorized: ${email}`);
+  if (email !== ALLOWED_EMAIL) return res.status(403).send(`Not authorized: ${email}`);
   const secure = (req.headers['x-forwarded-proto'] === 'https') ? '; Secure' : '';
-  res.set('Set-Cookie', `dash_session=${encodeURIComponent(signSession(email))}; HttpOnly${secure}; SameSite=Lax; Max-Age=${30 * 24 * 3600}; Path=/${cookieDomain(req)}`);
-  const next = safeNext(String(req.query.state || '').startsWith('next:') ? String(req.query.state).slice(5) : '');
-  if (isOwner) return res.redirect(next || '/');
-  res.redirect(isGamePath(next.split('?')[0]) ? next : '/junglefarm/');
+  res.set('Set-Cookie', `dash_session=${encodeURIComponent(signSession(email))}; HttpOnly${secure}; SameSite=Lax; Max-Age=${30 * 24 * 3600}; Path=/`);
+  res.redirect('/');
 }));
-app.get('/auth/logout', (req, res) => {
-  // clear both scopes — sessions may predate the Domain-scoped cookie
-  res.set('Set-Cookie', ['dash_session=; Max-Age=0; Path=/', `dash_session=; Max-Age=0; Path=/${cookieDomain(req)}`]);
-  res.redirect('/auth/login');
-});
+app.get('/auth/logout', (req, res) => { res.set('Set-Cookie', 'dash_session=; Max-Age=0; Path=/'); res.redirect('/auth/login'); });
 
 // ---------- Gmail consent (location-tracking evidence — separate from the login above) ----------
 // One-time offline-access grant: access_type=offline + prompt=consent guarantees a refresh
@@ -201,20 +176,9 @@ app.use((req, res, next) => {
   // allowlist-built in /api/public/agentstable; never widen this to a prefix match.
   if (req.method === 'GET' && PUBLIC_GETS.has(req.path)) return next();
   if (OAUTH_ID && process.env.OAUTH_REDIRECT_BASE) {
-    const sess = verifySession(cookieOf(req, 'dash_session'));
-    if (sess) {
-      const email = String(sess.email || '').toLowerCase();
-      if (email === ALLOWED_EMAIL) return next();
-      // game guests: /junglefarm only — anything else bounces back to the game
-      if (GAME_GUEST_EMAILS.includes(email)) {
-        if (isGamePath(req.path)) return next();
-        if (req.path.startsWith('/api/')) return res.status(403).json({ error: 'game guests only have /junglefarm' });
-        return res.redirect('/junglefarm/');
-      }
-      // valid signature but email no longer on any list (e.g. guest removed) → re-login
-    }
+    if (verifySession(cookieOf(req, 'dash_session'))) return next();
     if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'login required', login: '/auth/login' });
-    return res.redirect('/auth/login?next=' + encodeURIComponent(req.originalUrl));
+    return res.redirect('/auth/login');
   }
   if (process.env.DASHBOARD_PASSWORD) {
     const b64 = (req.headers.authorization || '').split(' ')[1] || '';
@@ -288,71 +252,6 @@ app.use('/echochamber', asyncRoute(async (req, res) => {
   });
   if (body) upstream.end(body);
   else req.pipe(upstream);
-}));
-
-// ---------- Jungle Farm → learning-graph proxy ----------
-// The game (static files under /junglefarm) reads/writes Jack's knowledge state
-// through here, so it works from any signed-in device. Session-gated by the
-// middleware above (owner + game guests). Only the narrow surface the game
-// needs is proxied — no domain/concept/goal mutation is reachable from the
-// web — and the learner is pinned server-side, ignoring anything the client
-// sends. The engine token never leaves the server.
-const LG_URL = (process.env.LEARNING_GRAPH_URL || '').replace(/\/$/, '');
-const LG_TOKEN = process.env.LEARNING_GRAPH_TOKEN || '';
-const LG_LEARNER = process.env.JUNGLEFARM_LEARNER || 'learner';
-const lgHeaders = { 'Content-Type': 'application/json', ...(LG_TOKEN ? { Authorization: `Bearer ${LG_TOKEN}` } : {}) };
-const lgOk = res => { if (!LG_URL) { res.status(501).json({ error: 'learning graph not configured' }); return false; } return true; };
-
-app.get('/junglefarm/api/:kind(state|frontier|stats)/:domain', asyncRoute(async (req, res) => {
-  if (!lgOk(res)) return;
-  if (!/^[a-z0-9-]+$/.test(req.params.domain)) return res.status(400).json({ error: 'bad domain' });
-  const r = await fetch(`${LG_URL}/api/${req.params.kind}/${req.params.domain}?learner=${encodeURIComponent(LG_LEARNER)}`,
-    { headers: lgHeaders, signal: AbortSignal.timeout(8000) });
-  res.status(r.status).json(await r.json());
-}));
-
-// goals are read-only from the web (the progress page shows them)
-app.get('/junglefarm/api/goals', asyncRoute(async (req, res) => {
-  if (!lgOk(res)) return;
-  const r = await fetch(`${LG_URL}/api/goals?learner=${encodeURIComponent(LG_LEARNER)}`,
-    { headers: lgHeaders, signal: AbortSignal.timeout(8000) });
-  res.status(r.status).json(await r.json());
-}));
-
-const evidenceFields = e => ({
-  concept_id: String(e.concept_id || ''),
-  result: String(e.result || ''),
-  notes: typeof e.notes === 'string' ? e.notes.slice(0, 2000) : undefined,
-  external_ref: typeof e.external_ref === 'string' ? e.external_ref.slice(0, 100) : undefined,
-});
-app.post('/junglefarm/api/evidence', asyncRoute(async (req, res) => {
-  if (!lgOk(res)) return;
-  const body = { ...evidenceFields(req.body || {}), learner_id: LG_LEARNER };
-  const r = await fetch(`${LG_URL}/api/evidence`,
-    { method: 'POST', headers: lgHeaders, body: JSON.stringify(body), signal: AbortSignal.timeout(8000) });
-  res.status(r.status).json(await r.json());
-}));
-// shared game save — versioned KV on the engine, key fixed server-side
-app.get('/junglefarm/api/save', asyncRoute(async (req, res) => {
-  if (!lgOk(res)) return;
-  const r = await fetch(`${LG_URL}/api/kv/junglefarm:${encodeURIComponent(LG_LEARNER)}`,
-    { headers: lgHeaders, signal: AbortSignal.timeout(8000) });
-  res.status(r.status).json(await r.json());
-}));
-app.put('/junglefarm/api/save', asyncRoute(async (req, res) => {
-  if (!lgOk(res)) return;
-  const body = { value: req.body?.value ?? null, rev: req.body?.rev ?? null, force: req.body?.force === true };
-  if (JSON.stringify(body.value ?? null).length > 16384) return res.status(400).json({ error: 'save too large' });
-  const r = await fetch(`${LG_URL}/api/kv/junglefarm:${encodeURIComponent(LG_LEARNER)}`,
-    { method: 'PUT', headers: lgHeaders, body: JSON.stringify(body), signal: AbortSignal.timeout(8000) });
-  res.status(r.status).json(await r.json());
-}));
-app.post('/junglefarm/api/evidence/batch', asyncRoute(async (req, res) => {
-  if (!lgOk(res)) return;
-  const events = (Array.isArray(req.body?.events) ? req.body.events : []).slice(0, 300).map(evidenceFields);
-  const r = await fetch(`${LG_URL}/api/evidence/batch`,
-    { method: 'POST', headers: lgHeaders, body: JSON.stringify({ events, learner_id: LG_LEARNER }), signal: AbortSignal.timeout(15000) });
-  res.status(r.status).json(await r.json());
 }));
 
 // no-cache on HTML so an already-open dashboard always picks up freshly-deployed JS on reload
@@ -3742,7 +3641,9 @@ app.post('/api/agent/summaries/stash', asyncRoute(async (req, res) => {
 // "Unread summaries" block, mark them stashed — but fire NO up/down signal (not engaging
 // with something isn't a vote). Triggered nightly by ci.sh.
 app.post('/api/agent/summaries/sweep', asyncRoute(async (req, res) => {
-  const rows = (await readSummariesTab(0)).filter(s => !String(s.State || '').trim());
+  const cutoff = Date.now() - 24 * 3600e3; // a summary gets a FULL DAY on screen before the sweep may take it
+  const rows = (await readSummariesTab(0)).filter(s => !String(s.State || '').trim())
+    .filter(s => { const t = Date.parse(s.Created || ''); return t && t < cutoff; });
   if (!rows.length) return res.json({ ok: true, swept: 0 });
   const today = nowIso().slice(0, 10);
   const block = `Unread summaries (auto-stashed ${today}):\n` +
@@ -4669,8 +4570,9 @@ app.get('/api/agents/summary', asyncRoute(async (req, res) => {
   const now = Date.now(), day = now - 86400000;
   const monthStart = new Date(); monthStart.setDate(1); monthStart.setHours(0, 0, 0, 0);
   const out = { activities: [], decisions: [], day: { input: 0, output: 0, real: 0, credit: 0, included: 0 }, month: { real: 0, credit: 0, included: 0 }, adopted: [] };
+  let readFailures = 0;
   try { // usage → 24h tokens/cost split + month-to-date
-    for (const v of (await cachedGet("'Usage'!A2:H", 60000, STABLE_SHEET_ID)).data.values || []) {
+    for (const v of (await cachedGet("'Usage'!A2:H", 300000, STABLE_SHEET_ID)).data.values || []) {
       const t = new Date(v[0]).getTime(); if (!t || t < monthStart.getTime()) continue;
       let cost = parseFloat(v[6]) || 0;
       if (!cost) { const p = priceOf(v[3]); if (p) cost = ((+v[4] || 0) * p.in + (+v[5] || 0) * p.out) / 1e6; }
@@ -4678,18 +4580,20 @@ app.get('/api/agents/summary', asyncRoute(async (req, res) => {
       out.month[cls] += cost;
       if (t >= day) { out.day.input += +v[4] || 0; out.day.output += +v[5] || 0; out.day[cls] += cost; }
     }
-  } catch (e) {}
+  } catch (e) { readFailures++; }
   try { // decisions → 24h key calls (skip routine chatter)
-    const dec = ((await cachedGet("'Decisions'!A2:I", 60000, STABLE_SHEET_ID)).data.values || []).filter(v => new Date(v[0]).getTime() >= day);
+    const dec = ((await cachedGet("'Decisions'!A2:I", 300000, STABLE_SHEET_ID)).data.values || []).filter(v => new Date(v[0]).getTime() >= day);
     out.decisions = dec.filter(v => !/^(drained|routine|heartbeat: stage)/i.test(v[4] || '')).slice(-6).reverse()
       .map(v => ({ at: v[0], module: v[2], actor: v[3], decision: v[4], why: v[5] }));
     const byMod = {};
     for (const v of dec) byMod[v[2]] = (byMod[v[2]] || 0) + 1;
     out.activities = Object.entries(byMod).sort((a, b) => b[1] - a[1]).map(([m, n]) => ({ module: m, n }));
-  } catch (e) {}
+  } catch (e) { readFailures++; }
   try { const o = JSON.parse(fs.readFileSync(MODEL_OVERRIDES_FILE, 'utf8')); out.adopted = Object.keys(o).filter(k => !k.startsWith('_') && !['autoAdopt', 'crossProvider'].includes(k)).map(k => ({ module: k, model: o[k] })); } catch (e) {}
   const r2 = o => { for (const k in o) if (typeof o[k] === 'number') o[k] = Math.round(o[k] * 100) / 100; return o; };
-  res.json({ ...out, day: r2(out.day), month: r2(out.month) });
+  // both source reads failed with no cached fallback (cold instance in a Sheets-quota
+  // storm) → tell the client, which retries — silent zeros looked like a blank section
+  res.json({ ...out, unavailable: readFailures >= 2 || undefined, day: r2(out.day), month: r2(out.month) });
 }));
 
 // ---- credits & quotas: subscription/credit pools, computed spend vs user-entered allowances ----
