@@ -247,7 +247,14 @@ app.use('/echochamber', asyncRoute(async (req, res) => {
   if (!EC_URL) return res.status(501).send('EchoChamber not configured (set ECHOCHAMBER_URL)');
   const target = new URL(EC_URL);
   const token = await ecToken();
-  const headers = { ...req.headers, host: target.host };
+  const headers = {
+    ...req.headers,
+    host: target.host,
+    // Gradio derives its public root URL from these — without them it
+    // generates asset/queue URLs against the private run.app host.
+    'x-forwarded-host': req.headers.host,
+    'x-forwarded-proto': req.headers['x-forwarded-proto'] || 'https',
+  };
   delete headers.cookie;        // the dash session cookie stays on this side
   delete headers.authorization;
   if (token) headers.authorization = `Bearer ${token}`;
