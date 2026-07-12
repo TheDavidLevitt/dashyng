@@ -245,15 +245,22 @@ async function ecToken() {
 }
 app.use('/echochamber', asyncRoute(async (req, res) => {
   if (!EC_URL) return res.status(501).send('EchoChamber not configured (set ECHOCHAMBER_URL)');
+  // Without the trailing slash the browser resolves Gradio's relative
+  // ./assets against the domain root instead of /echochamber/.
+  if (req.originalUrl === '/echochamber') return res.redirect(301, '/echochamber/');
   const target = new URL(EC_URL);
   const token = await ecToken();
+  // Cloudflare rewrites Host at the origin, so req.headers.host is the
+  // run.app name; the canonical public host comes from OAUTH_REDIRECT_BASE.
+  const publicHost = (process.env.OAUTH_REDIRECT_BASE || '')
+    .replace(/^https?:\/\//, '').replace(/\/.*$/, '') || req.headers.host;
   const headers = {
     ...req.headers,
     host: target.host,
     // Gradio derives its public root URL from these — without them it
     // generates asset/queue URLs against the private run.app host.
-    'x-forwarded-host': req.headers.host,
-    'x-forwarded-proto': req.headers['x-forwarded-proto'] || 'https',
+    'x-forwarded-host': publicHost,
+    'x-forwarded-proto': 'https',
   };
   delete headers.cookie;        // the dash session cookie stays on this side
   delete headers.authorization;
