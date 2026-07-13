@@ -75,6 +75,15 @@ const { OAuth2Client } = require('google-auth-library');
 const OAUTH_ID = CFG.oauthClientId || process.env.GOOGLE_OAUTH_CLIENT_ID;
 const OAUTH_SECRET = CFG.oauthClientSecret || process.env.GOOGLE_OAUTH_CLIENT_SECRET;
 const ALLOWED_EMAIL = CFG.allowedEmail;
+// Game guests (comma-separated emails, e.g. JUNGLEFARM_EMAILS=kid@x.com,parent@y.com):
+// may sign in with Google but are confined to /junglefarm — every other path redirects
+// there. Only ALLOWED_EMAIL sees the dashboard itself.
+// ⚠ PARALLEL-SESSION NOTE: this block and the /junglefarm/api proxy below were wiped
+// twice on 2026-07-12 by tree resets/sweeps from other sessions. Jungle Farm auth
+// BREAKS IN PRODUCTION without them — do not remove; see JungleVine/DEPLOY.md.
+const GAME_GUEST_EMAILS = String(process.env.JUNGLEFARM_EMAILS || '').toLowerCase()
+  .split(',').map(s => s.trim()).filter(Boolean);
+const isGamePath = p => p === '/junglefarm' || p.startsWith('/junglefarm/');
 const SESSION_SECRET = process.env.SESSION_SECRET || process.env.DASHBOARD_PASSWORD || 'dev-only-secret';
 
 const b64url = s => Buffer.from(s).toString('base64url');
@@ -99,11 +108,23 @@ const OAUTH_REDIRECT_BASE = process.env.OAUTH_REDIRECT_BASE || '';
 const redirectUri = req => OAUTH_REDIRECT_BASE
   ? `${OAUTH_REDIRECT_BASE.replace(/\/$/, '')}/auth/callback`
   : `${req.headers['x-forwarded-proto'] || 'http'}://${req.headers.host}/auth/callback`;
+// The callback is pinned to one hostname (above), but users may arrive on www.<base>:
+// a host-only cookie set on the apex never reaches www and login loops forever. The gate
+// 301s www → apex (one canonical host); the Domain-scoped cookie is belt-and-braces for
+// sessions that predate the redirect. Direct *.run.app hits keep host-only cookies.
+const BASE_HOST = OAUTH_REDIRECT_BASE ? new URL(OAUTH_REDIRECT_BASE).hostname.replace(/^www\./, '') : '';
+const cookieDomain = req => {
+  const host = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(':')[0];
+  return BASE_HOST && (host === BASE_HOST || host.endsWith('.' + BASE_HOST)) ? `; Domain=${BASE_HOST}` : '';
+};
+// post-login destination: only same-site relative paths survive the round trip
+const safeNext = p => (typeof p === 'string' && p.startsWith('/') && !p.startsWith('//')) ? p : '';
 
 app.get('/auth/login', (req, res) => {
   if (!OAUTH_ID) return res.status(501).send('OAuth not configured');
   const c = new OAuth2Client(OAUTH_ID, OAUTH_SECRET, redirectUri(req));
-  const url = c.generateAuthUrl({ scope: ['openid', 'email', 'profile'], prompt: 'select_account' });
+  const next = safeNext(req.query.next);
+  const url = c.generateAuthUrl({ scope: ['openid', 'email', 'profile'], prompt: 'select_account', ...(next ? { state: 'next:' + next } : {}) });
   if (req.query.go) return res.redirect(url); // direct-redirect escape hatch
   // tiny landing: sign-in + (when configured) a link to the public demo stub
   const demo = process.env.DEMO_URL || '';
@@ -122,12 +143,19 @@ app.get('/auth/callback', asyncRoute(async (req, res) => {
   const { tokens } = await c.getToken(req.query.code);
   const ticket = await c.verifyIdToken({ idToken: tokens.id_token, audience: OAUTH_ID });
   const email = (ticket.getPayload().email || '').toLowerCase();
-  if (email !== ALLOWED_EMAIL) return res.status(403).send(`Not authorized: ${email}`);
+  const isOwner = email === ALLOWED_EMAIL;
+  if (!isOwner && !GAME_GUEST_EMAILS.includes(email)) return res.status(403).send(`Not authorized: ${email}`);
   const secure = (req.headers['x-forwarded-proto'] === 'https') ? '; Secure' : '';
-  res.set('Set-Cookie', `dash_session=${encodeURIComponent(signSession(email))}; HttpOnly${secure}; SameSite=Lax; Max-Age=${30 * 24 * 3600}; Path=/`);
-  res.redirect('/');
+  res.set('Set-Cookie', `dash_session=${encodeURIComponent(signSession(email))}; HttpOnly${secure}; SameSite=Lax; Max-Age=${30 * 24 * 3600}; Path=/${cookieDomain(req)}`);
+  const next = safeNext(String(req.query.state || '').startsWith('next:') ? String(req.query.state).slice(5) : '');
+  if (isOwner) return res.redirect(next || '/');
+  res.redirect(isGamePath(next.split('?')[0]) ? next : '/junglefarm/');
 }));
-app.get('/auth/logout', (req, res) => { res.set('Set-Cookie', 'dash_session=; Max-Age=0; Path=/'); res.redirect('/auth/login'); });
+app.get('/auth/logout', (req, res) => {
+  // clear both scopes — sessions may predate the Domain-scoped cookie
+  res.set('Set-Cookie', ['dash_session=; Max-Age=0; Path=/', `dash_session=; Max-Age=0; Path=/${cookieDomain(req)}`]);
+  res.redirect('/auth/login');
+});
 
 // ---------- Gmail consent (location-tracking evidence — separate from the login above) ----------
 // One-time offline-access grant: access_type=offline + prompt=consent guarantees a refresh
@@ -170,15 +198,29 @@ const PUBLIC_GETS = new Set([
 // reachable — merely POSSESSING the OAuth client creds (the Mac holds them for the
 // Gmail-consent relay) must not lock down the open LAN tier.
 app.use((req, res, next) => {
+  // one canonical host: www → apex, so the session cookie has a single home
+  const reqHost = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(':')[0];
+  if (BASE_HOST && reqHost === 'www.' + BASE_HOST) return res.redirect(301, `https://${BASE_HOST}${req.originalUrl}`);
   if (req.path.startsWith('/auth/')) return next();
   // Public read-only carve-out: the sanitized agent-stable showcase. Exact GET paths only —
   // everything else (all POSTs, all other pages/APIs) stays behind the gate. The payload is
   // allowlist-built in /api/public/agentstable; never widen this to a prefix match.
   if (req.method === 'GET' && PUBLIC_GETS.has(req.path)) return next();
   if (OAUTH_ID && process.env.OAUTH_REDIRECT_BASE) {
-    if (verifySession(cookieOf(req, 'dash_session'))) return next();
+    const sess = verifySession(cookieOf(req, 'dash_session'));
+    if (sess) {
+      const email = String(sess.email || '').toLowerCase();
+      if (email === ALLOWED_EMAIL) return next();
+      // game guests: /junglefarm only — anything else bounces back to the game
+      if (GAME_GUEST_EMAILS.includes(email)) {
+        if (isGamePath(req.path)) return next();
+        if (req.path.startsWith('/api/')) return res.status(403).json({ error: 'game guests only have /junglefarm' });
+        return res.redirect('/junglefarm/');
+      }
+      // valid signature but email no longer on any list (e.g. guest removed) → re-login
+    }
     if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'login required', login: '/auth/login' });
-    return res.redirect('/auth/login');
+    return res.redirect('/auth/login?next=' + encodeURIComponent(req.originalUrl));
   }
   if (process.env.DASHBOARD_PASSWORD) {
     const b64 = (req.headers.authorization || '').split(' ')[1] || '';
@@ -252,6 +294,72 @@ app.use('/echochamber', asyncRoute(async (req, res) => {
   });
   if (body) upstream.end(body);
   else req.pipe(upstream);
+}));
+
+
+// ---------- Jungle Farm → learning-graph proxy ----------
+// The game (static files under /junglefarm) reads/writes Jack's knowledge state
+// through here, so it works from any signed-in device. Session-gated by the
+// middleware above (owner + game guests). Only the narrow surface the game
+// needs is proxied — no domain/concept/goal mutation is reachable from the
+// web — and the learner is pinned server-side, ignoring anything the client
+// sends. The engine token never leaves the server.
+const LG_URL = (process.env.LEARNING_GRAPH_URL || '').replace(/\/$/, '');
+const LG_TOKEN = process.env.LEARNING_GRAPH_TOKEN || '';
+const LG_LEARNER = process.env.JUNGLEFARM_LEARNER || 'learner';
+const lgHeaders = { 'Content-Type': 'application/json', ...(LG_TOKEN ? { Authorization: `Bearer ${LG_TOKEN}` } : {}) };
+const lgOk = res => { if (!LG_URL) { res.status(501).json({ error: 'learning graph not configured' }); return false; } return true; };
+
+app.get('/junglefarm/api/:kind(state|frontier|stats)/:domain', asyncRoute(async (req, res) => {
+  if (!lgOk(res)) return;
+  if (!/^[a-z0-9-]+$/.test(req.params.domain)) return res.status(400).json({ error: 'bad domain' });
+  const r = await fetch(`${LG_URL}/api/${req.params.kind}/${req.params.domain}?learner=${encodeURIComponent(LG_LEARNER)}`,
+    { headers: lgHeaders, signal: AbortSignal.timeout(8000) });
+  res.status(r.status).json(await r.json());
+}));
+
+// goals are read-only from the web (the progress page shows them)
+app.get('/junglefarm/api/goals', asyncRoute(async (req, res) => {
+  if (!lgOk(res)) return;
+  const r = await fetch(`${LG_URL}/api/goals?learner=${encodeURIComponent(LG_LEARNER)}`,
+    { headers: lgHeaders, signal: AbortSignal.timeout(8000) });
+  res.status(r.status).json(await r.json());
+}));
+
+const evidenceFields = e => ({
+  concept_id: String(e.concept_id || ''),
+  result: String(e.result || ''),
+  notes: typeof e.notes === 'string' ? e.notes.slice(0, 2000) : undefined,
+  external_ref: typeof e.external_ref === 'string' ? e.external_ref.slice(0, 100) : undefined,
+});
+app.post('/junglefarm/api/evidence', asyncRoute(async (req, res) => {
+  if (!lgOk(res)) return;
+  const body = { ...evidenceFields(req.body || {}), learner_id: LG_LEARNER };
+  const r = await fetch(`${LG_URL}/api/evidence`,
+    { method: 'POST', headers: lgHeaders, body: JSON.stringify(body), signal: AbortSignal.timeout(8000) });
+  res.status(r.status).json(await r.json());
+}));
+app.post('/junglefarm/api/evidence/batch', asyncRoute(async (req, res) => {
+  if (!lgOk(res)) return;
+  const events = (Array.isArray(req.body?.events) ? req.body.events : []).slice(0, 300).map(evidenceFields);
+  const r = await fetch(`${LG_URL}/api/evidence/batch`,
+    { method: 'POST', headers: lgHeaders, body: JSON.stringify({ events, learner_id: LG_LEARNER }), signal: AbortSignal.timeout(15000) });
+  res.status(r.status).json(await r.json());
+}));
+// shared game save — versioned KV on the engine, key fixed server-side
+app.get('/junglefarm/api/save', asyncRoute(async (req, res) => {
+  if (!lgOk(res)) return;
+  const r = await fetch(`${LG_URL}/api/kv/junglefarm:${encodeURIComponent(LG_LEARNER)}`,
+    { headers: lgHeaders, signal: AbortSignal.timeout(8000) });
+  res.status(r.status).json(await r.json());
+}));
+app.put('/junglefarm/api/save', asyncRoute(async (req, res) => {
+  if (!lgOk(res)) return;
+  const body = { value: req.body?.value ?? null, rev: req.body?.rev ?? null, force: req.body?.force === true };
+  if (JSON.stringify(body.value ?? null).length > 16384) return res.status(400).json({ error: 'save too large' });
+  const r = await fetch(`${LG_URL}/api/kv/junglefarm:${encodeURIComponent(LG_LEARNER)}`,
+    { method: 'PUT', headers: lgHeaders, body: JSON.stringify(body), signal: AbortSignal.timeout(8000) });
+  res.status(r.status).json(await r.json());
 }));
 
 // no-cache on HTML so an already-open dashboard always picks up freshly-deployed JS on reload
