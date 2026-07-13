@@ -129,6 +129,9 @@ app.get('/auth/login', (req, res) => {
   // tiny landing: sign-in + (when configured) a link to the public demo stub
   const demo = process.env.DEMO_URL || '';
   res.send(`<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>dashyng</title>
+<script>/* canonical host: Cloudflare hides the original Host from the app, so the
+browser hops www→apex itself — one cookie home, no login loop */
+if (location.hostname.startsWith('www.')) location.replace(location.href.replace('//www.', '//'));</script>
 <body style="margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0d1117;color:#e6edf3;font-family:system-ui,sans-serif">
 <div style="text-align:center">
   <div style="font-size:28px;font-weight:700;margin-bottom:4px">dashyng</div>
