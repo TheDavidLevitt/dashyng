@@ -64,7 +64,7 @@
     </svg>
     <div>
       <h1>the form<span class="dash">-</span>guide</h1>
-      <div class="sub">which model is enough for the task? — a community model×task database</div>
+      <div class="sub">which model is enough for the task? — our outcomes vs the benchmarks (private view)</div>
     </div>
     <div class="spacer"></div>
     <div class="links">
@@ -89,25 +89,22 @@
   </section>
 
   <section aria-labelledby="h-api">
-    <h2 id="h-api">For apps</h2>
-    <p class="note">CORS-open, read-only, cached, and — by hard rule — no LLM anywhere in the request path: pure table lookups you cannot run up a bill with.</p>
-    <pre class="api" id="apiCurl">curl -s "https://dashyng.com/api/public/formguide/recommend?task=code"</pre>
+    <h2 id="h-api">API (owner-gated)</h2>
+    <p class="note">Same answer, machine-readable — requests need this dashboard's session cookie. For the anonymous tier-level endpoint apps can use, see <code>/api/public/agentstable/tiers</code>.</p>
+    <pre class="api" id="apiCurl">GET /api/public/formguide/recommend?task=code</pre>
     <pre class="api dim" id="apiSample">…</pre>
   </section>
 
   <section aria-labelledby="h-how">
-    <h2 id="h-how">How this works — and what's next</h2>
+    <h2 id="h-how">How this works</h2>
     <p class="note" style="margin-bottom:6px">
-      <b class="muted">Phase 1 (now):</b> read-only. Each task maps to the benchmark judged most predictive
-      (<span style="color:var(--gold)">basis: prior</span>); the recommendation is the cheapest of the top-3 —
-      no fabricated thresholds.</p>
-    <p class="note" style="margin-bottom:6px">
-      <b class="muted">Phase 2:</b> sign in with GitHub, report task × model × success (1–5) with optional evidence,
-      vote on reports; thresholds get <i>fitted</i> from outcomes and <span style="color:var(--gold)">basis</span>
-      flips to <span style="color:var(--green)">fitted</span> with confidence intervals.</p>
+      Each task maps to the benchmark judged most predictive (<span style="color:var(--gold)">basis: prior</span>);
+      the recommendation is the cheapest of the top-3 — no fabricated thresholds. As our own metered
+      outcomes accumulate they get compared against these scores here, privately.</p>
     <p class="note" style="margin:0">
-      Reports and hypotheses will be open data (ODbL). Full design:
-      <a href="https://github.com/TheDavidLevitt/agent-stable/blob/main/spec/FORM-GUIDE.md">spec/FORM-GUIDE.md</a>.</p>
+      The public community version of this idea is shelved (2026-07-14) — design kept in
+      <a href="https://github.com/TheDavidLevitt/agent-stable/blob/main/spec/FORM-GUIDE.md">spec/FORM-GUIDE.md</a>
+      should it ever be revived.</p>
   </section>
 
   <footer>
@@ -132,7 +129,7 @@ function renderL1() {
 async function renderTask() {
   const node = DATA.taxonomy[sel];
   $('l2').innerHTML = (node.l2 || []).map(s => `<span class="chip">${esc(sel)}.${esc(s)}</span>`).join('');
-  $('apiCurl').textContent = `curl -s "https://dashyng.com/api/public/formguide/recommend?task=${sel}"`;
+  $('apiCurl').textContent = `GET /api/public/formguide/recommend?task=${sel}`;
   const rec = $('rec'); rec.style.display = 'block'; rec.innerHTML = '<span class="empty">consulting the form…</span>';
   let r;
   try { r = await (await fetch('/api/public/formguide/recommend?task=' + encodeURIComponent(sel))).json(); }

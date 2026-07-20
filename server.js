@@ -192,9 +192,10 @@ app.get('/auth/gmail/disconnect', (req, res) => { try { fs.unlinkSync(GMAIL_TOKE
 
 // The ONLY unauthenticated paths: exact-match read-only GETs (no writes, no LLM in any
 // of their request paths). Additions here are a REVIEW event — never widen to a prefix.
+// The Form Guide (/agentstable + /api/public/formguide*) was public 07-12→07-14, then
+// taken private by owner decision: it stays as the signed-in benchmark-comparison view.
 const PUBLIC_GETS = new Set([
   '/public/agentstable', '/api/public/agentstable', '/api/public/agentstable/tiers',
-  '/agentstable', '/api/public/formguide', '/api/public/formguide/recommend',
 ]);
 // gate: OAuth session (public tier) → basic-auth (if password set) → open.
 // Login is enforced only when OAUTH_REDIRECT_BASE marks this instance as publicly
