@@ -5015,9 +5015,9 @@ app.get('/api/public/agentstable/tiers', asyncRoute(async (req, res) => {
 // top-3 on that benchmark. NO LLM in any request path — table lookups only.
 // Curated L1/L2; community subdivision + reports arrive in Phase 2.
 const FORM_GUIDE = {
-  code:        { label: 'Code',        bench: 'SWE-bench Verified', alt: 'LiveCodeBench',
+  code:        { label: 'Code',        bench: 'AA Coding Index', alt: 'SWE-bench Verified',
                  l2: ['generate', 'debug', 'review', 'refactor', 'test-writing', 'architecture', 'completion'] },
-  agentic:     { label: 'Agentic',     bench: 'AA Intelligence',
+  agentic:     { label: 'Agentic',     bench: 'AA Agentic Index', alt: 'AA Intelligence',
                  l2: ['orchestration', 'tool-calling', 'multi-step-planning', 'browser-use', 'computer-use', 'long-horizon'] },
   analysis:    { label: 'Analysis',    bench: 'GPQA Diamond', alt: 'AA Intelligence',
                  l2: ['quantitative', 'legal', 'scientific', 'financial', 'causal-reasoning'] },
@@ -5036,20 +5036,55 @@ const FORM_GUIDE = {
   generation:  { label: 'Generation',  bench: 'LMArena Image (t2i)',
                  l2: ['image'] },
 };
+// Benchmark backbone: Artificial Analysis data API (free tier — standardized indices +
+// pricing; attribution required, https://artificialanalysis.ai). Cached 6h in-memory
+// (~4 req/day per instance against a 100/day key limit). No key or API failure →
+// fall back to the sheet-compiled board so the Form Guide keeps working.
+let aaCache = { at: 0, models: null };
+async function aaModels() {
+  const key = CFG.aaApiKey;
+  if (!key) return null;
+  if (Date.now() - aaCache.at < 6 * 3600000 && aaCache.models) return aaCache.models;
+  try {
+    const r = await fetch('https://artificialanalysis.ai/api/v2/language/models/free',
+      { headers: { 'x-api-key': key }, signal: AbortSignal.timeout(10000) });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    const rows = Array.isArray(j) ? j : (j.data || j.models || []);
+    const num = v => (v == null || v === '' || isNaN(+v)) ? null : +v;
+    const models = rows.map(m => {
+      const ev = m.evaluations || m.evals || m;
+      const pr = m.pricing || m;
+      const bm = {};
+      const put = (k, v) => { const n = num(v); if (n != null) bm[k] = Math.round(n * 10) / 10; };
+      put('AA Intelligence', ev.artificial_analysis_intelligence_index);
+      put('AA Coding Index', ev.artificial_analysis_coding_index);
+      put('AA Agentic Index', ev.artificial_analysis_agentic_index);
+      return { model: m.slug || m.id || m.name, lab: (m.model_creator && m.model_creator.name) || m.creator || m.organization || '',
+        os: !!(m.licensing ? m.licensing.is_open_weights : m.is_open_weights),
+        priceIn: num(pr.price_1m_input_tokens), priceOut: num(pr.price_1m_output_tokens), benchmarks: bm };
+    }).filter(m => m.model && Object.keys(m.benchmarks).length);
+    if (models.length) { aaCache = { at: Date.now(), models }; return models; }
+  } catch (e) { console.error('AA api:', e.message); }
+  return aaCache.models; // stale beats none; null on cold failure → sheet fallback
+}
 async function formGuideModels() {
+  const aa = await aaModels();
+  if (aa) return { source: 'artificialanalysis.ai', models: aa };
   const rows = (await readTabCached(STABLE_SHEET_ID, APA_MODELS_TAB, APA_MODELS_HEADERS, 300000)).rows;
-  return rows.map(r => {
+  return { source: 'board', models: rows.map(r => {
     let b = {}; try { b = JSON.parse(r.Benchmarks || '{}'); } catch (e) {}
     const bm = {}; for (const [bk, v] of Object.entries(b)) if (!bk.startsWith('_')) bm[bk] = v;
     return { model: r.Model, lab: r.Lab, os: String(r.OS || '').trim() === '1',
       priceIn: r.PriceIn === '' ? null : +r.PriceIn, priceOut: r.PriceOut === '' ? null : +r.PriceOut, benchmarks: bm };
-  });
+  }) };
 }
 app.get('/api/public/formguide', asyncRoute(async (req, res) => {
   res.setHeader('Cache-Control', 'public, max-age=60');
   res.setHeader('Access-Control-Allow-Origin', '*');
-  let models = []; try { models = await formGuideModels(); } catch (e) {}
-  res.json({ generatedAt: nowIso(), phase: 1, basis: 'prior', taxonomy: FORM_GUIDE, models });
+  let src = { source: 'board', models: [] }; try { src = await formGuideModels(); } catch (e) {}
+  res.json({ generatedAt: nowIso(), phase: 1, basis: 'prior', taxonomy: FORM_GUIDE, models: src.models,
+    source: src.source, attribution: src.source === 'artificialanalysis.ai' ? 'Benchmark and pricing data: Artificial Analysis (https://artificialanalysis.ai)' : undefined });
 }));
 app.get('/api/public/formguide/recommend', asyncRoute(async (req, res) => {
   res.setHeader('Cache-Control', 'public, max-age=60');
@@ -5057,7 +5092,8 @@ app.get('/api/public/formguide/recommend', asyncRoute(async (req, res) => {
   const task = String(req.query.task || '').trim().toLowerCase();
   const node = FORM_GUIDE[task.split('.')[0]];
   if (!node) return res.status(404).json({ error: 'unknown task', tasks: Object.keys(FORM_GUIDE) });
-  let models = []; try { models = await formGuideModels(); } catch (e) {}
+  let src = { source: 'board', models: [] }; try { src = await formGuideModels(); } catch (e) {}
+  const models = src.models;
   const scored = b => models.filter(m => m.benchmarks[b] != null).sort((x, y) => y.benchmarks[b] - x.benchmarks[b]);
   let bench = node.bench, ranked = scored(bench);
   if (ranked.length < 2 && node.alt) { bench = node.alt; ranked = scored(bench); }
@@ -5069,6 +5105,8 @@ app.get('/api/public/formguide/recommend', asyncRoute(async (req, res) => {
   res.json({ task, basis: 'prior', benchmark: bench, min_score: null, n_reports: 0,
     model: pick.model, score: pick.benchmarks[bench], priceIn: pick.priceIn, priceOut: pick.priceOut,
     alternatives: top.filter(m => m.model !== pick.model).map(m => ({ model: m.model, score: m.benchmarks[bench], priceIn: m.priceIn, priceOut: m.priceOut })),
+    source: src.source,
+    attribution: src.source === 'artificialanalysis.ai' ? 'Benchmark and pricing data: Artificial Analysis (https://artificialanalysis.ai)' : undefined,
     note: 'threshold unrated until community reports exist — this is the cheapest of the top-3 on ' + bench });
 }));
 

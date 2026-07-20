@@ -37,6 +37,9 @@ module.exports = {
   fsRoots: Array.isArray(local.fsRoots) ? local.fsRoots : [],
   // GCP project for Vertex (Gemini/Imagen/embeddings); '' = those providers unavailable
   gcpProject: pick('gcpProject', 'GCP_PROJECT', ''),
+  // Artificial Analysis data API key (free tier) — benchmark backbone for the Form Guide;
+  // '' = fall back to the sheet-compiled board. https://artificialanalysis.ai/data-api
+  aaApiKey: pick('aaApiKey', 'AA_API_KEY', ''),
   // failover VM hostname (labels its Usage/Decisions rows in the agents summary)
   vmHost: pick('vmHost', 'DASHBOARD_VM_HOST', ''),
   // location-tracking baseline: where the owner is assumed to be absent contrary evidence

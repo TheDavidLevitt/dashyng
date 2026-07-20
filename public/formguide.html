@@ -112,7 +112,8 @@
 
   <footer>
     Read-only Phase 1 of the form guide, running on
-    <a href="https://github.com/TheDavidLevitt/agent-stable">agent-stable</a>'s market board (MIT).
+    <a href="https://github.com/TheDavidLevitt/agent-stable">agent-stable</a> (MIT).
+    <span id="attrib"></span>
     <span id="stamp"></span>
   </footer>
 </div>
@@ -159,7 +160,10 @@ async function renderTask() {
 fetch('/api/public/formguide').then(r => r.json()).then(d => {
   DATA = d;
   renderL1(); renderTask();
-  $('stamp').textContent = 'Board updated ' + new Date(d.generatedAt).toLocaleString() + '.';
+  $('attrib').innerHTML = d.source === 'artificialanalysis.ai'
+    ? 'Benchmark &amp; pricing data: <a href="https://artificialanalysis.ai">Artificial Analysis</a>. '
+    : 'Benchmark data compiled by the procurement agent. ';
+  $('stamp').textContent = 'Updated ' + new Date(d.generatedAt).toLocaleString() + '.';
 }).catch(() => { $('l1').innerHTML = '<span class="empty">feed unavailable — try again in a minute</span>'; });
 </script>
 </body>
