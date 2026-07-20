@@ -132,10 +132,51 @@ const apaAdapters = createAdapters({
   openai: process.env.OPENAI_API_KEY ? { apiKey: process.env.OPENAI_API_KEY } : null,
   xai: process.env.XAI_API_KEY ? { apiKey: process.env.XAI_API_KEY } : null,
   // hosted / local paths for OPEN-WEIGHT models (Meta, DeepSeek, Qwen, GLM…) — first configured wins
-  openrouter: process.env.OPENROUTER_API_KEY ? { apiKey: process.env.OPENROUTER_API_KEY } : null,
+  openrouter: (require('./config').openrouterKey) ? { apiKey: require('./config').openrouterKey } : null,
   together: process.env.TOGETHER_API_KEY ? { apiKey: process.env.TOGETHER_API_KEY } : null,
   ollama: process.env.OLLAMA_URL ? { baseUrl: process.env.OLLAMA_URL } : { },  // local, keyless — probed at call time
 });
+// ---------- OpenRouter market feed (keyless — no account needed for prices) ----------
+// One cached fetch per 6h of openrouter.ai/api/v1/models (~340 models): live per-token
+// prices across hosted providers, and the id catalog. Two uses: (a) live price fallback
+// for the tiers / form-guide endpoints when the board has no price; (b) resolving APA's
+// scraped model names ("deepseek-v4-pro-max") to runnable OpenRouter ids
+// ("deepseek/…") so candidate probes work. Feed failure degrades to the stale cache.
+let orCache = { at: 0, list: null };
+async function openrouterModels() {
+  if (Date.now() - orCache.at < 6 * 3600000 && orCache.list) return orCache.list;
+  try {
+    const r = await fetch('https://openrouter.ai/api/v1/models', { signal: AbortSignal.timeout(10000) });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const list = ((await r.json()).data || []).map(m => ({
+      id: m.id,
+      priceIn: m.pricing && m.pricing.prompt != null ? +m.pricing.prompt * 1e6 : null,
+      priceOut: m.pricing && m.pricing.completion != null ? +m.pricing.completion * 1e6 : null,
+    })).filter(m => m.id);
+    if (list.length) orCache = { at: Date.now(), list };
+  } catch (e) { console.error('openrouter feed:', e.message); }
+  return orCache.list || [];
+}
+const orNorm = s => String(s || '').toLowerCase().replace(/-20\d{6}$/, '').replace(/[^a-z0-9]/g, '');
+const orTail = id => orNorm(String(id).split('/').pop());
+// exact tail match, else a UNIQUE prefix match (either direction) — ambiguity returns the
+// input unchanged so a wrong model is never silently probed ("gpt-5" must not hit "gpt-5-6-luna")
+async function openrouterResolveId(model) {
+  const want = orNorm(model);
+  if (!want) return model;
+  const list = await openrouterModels();
+  const exact = list.find(m => orTail(m.id) === want);
+  if (exact) return exact.id;
+  const near = list.filter(m => orTail(m.id).startsWith(want) || want.startsWith(orTail(m.id)));
+  return near.length === 1 ? near[0].id : model;
+}
+async function openrouterPrice(model) {
+  const want = orNorm(model);
+  if (!want) return null;
+  const hit = (await openrouterModels()).find(m => orTail(m.id) === want);
+  return hit && hit.priceOut != null ? { in: hit.priceIn, out: hit.priceOut } : null;
+}
+
 function apaProviderFor(modelId, lab) {
   const l = String(lab || '').toLowerCase(), id = String(modelId || '').toLowerCase();
   if (/anthropic|claude/.test(l) || /^claude/.test(id)) return 'anthropic';
@@ -150,7 +191,8 @@ function apaProviderFor(modelId, lab) {
 async function apaModelText(modelId, lab, prompt) {
   const provider = apaProviderFor(modelId, lab);
   if (!provider) throw new Error('no eval path for lab ' + lab);
-  const out = await apaAdapters.call({ provider, model: modelId, prompt });
+  const runId = provider === 'openrouter' ? await openrouterResolveId(modelId) : modelId;
+  const out = await apaAdapters.call({ provider, model: runId, prompt });
   logUsage({ module: 'apa-eval', model: out.model || modelId, input: out.usage.input, output: out.usage.output, costUsd: '', note: provider + ' ' + out.latencyMs + 'ms' }).catch(() => {});
   return out.text;
 }
@@ -264,4 +306,4 @@ async function generateImage(prompt, opts) {
   return { provider: 'vertex-imagen', images };
 }
 
-module.exports = { listProviders, generateText, generateImage, embedText, geminiText, grokText, grokAgent, apaModelText, apaAdapters, apaProviderFor, probeVertex, GEMINI_MODEL, EMBED_MODEL, EMBED_DIM, IMAGEN_MODEL, VERTEX_LOCATION };
+module.exports = { listProviders, generateText, generateImage, embedText, geminiText, grokText, grokAgent, apaModelText, apaAdapters, apaProviderFor, probeVertex, openrouterModels, openrouterResolveId, openrouterPrice, GEMINI_MODEL, EMBED_MODEL, EMBED_DIM, IMAGEN_MODEL, VERTEX_LOCATION };

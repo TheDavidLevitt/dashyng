@@ -40,6 +40,9 @@ module.exports = {
   // Artificial Analysis data API key (free tier) — benchmark backbone for the Form Guide;
   // '' = fall back to the sheet-compiled board. https://artificialanalysis.ai/data-api
   aaApiKey: pick('aaApiKey', 'AA_API_KEY', ''),
+  // OpenRouter API key — unlocks APA candidate probes across ~all hosted models via one
+  // account. The keyless price feed works without it. '' = openrouter adapter disabled.
+  openrouterKey: pick('openrouterKey', 'OPENROUTER_API_KEY', ''),
   // failover VM hostname (labels its Usage/Decisions rows in the agents summary)
   vmHost: pick('vmHost', 'DASHBOARD_VM_HOST', ''),
   // location-tracking baseline: where the owner is assumed to be absent contrary evidence

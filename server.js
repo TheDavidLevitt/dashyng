@@ -4518,9 +4518,12 @@ const apaEngine = createApa({
   usageHistory: usageRows,
 });
 const apaProjectedSavings = (module, incId, candId) => apaEngine.projectSavings(module, incId, candId).catch(() => null);
-const apaEval = (cand, inc) => { // cand/inc = { id, lab } → module wants { id, provider }
-  const { apaProviderFor } = require('./providers');
-  return apaEngine.evaluate({ id: cand.id, provider: apaProviderFor(cand.id, cand.lab) }, { id: inc.id, provider: apaProviderFor(inc.id, inc.lab) });
+const apaEval = async (cand, inc) => { // cand/inc = { id, lab } → module wants { id, provider }
+  const { apaProviderFor, openrouterResolveId } = require('./providers');
+  // openrouter probes need catalog ids ("deepseek/…"), not scraped names — resolve first
+  const rid = async (id, prov) => (prov === 'openrouter' ? await openrouterResolveId(id) : id);
+  const cp = apaProviderFor(cand.id, cand.lab), ip = apaProviderFor(inc.id, inc.lab);
+  return apaEngine.evaluate({ id: await rid(cand.id, cp), provider: cp }, { id: await rid(inc.id, ip), provider: ip });
 };
 // normalize a scraped model name → a runnable id for its lab (best-effort; providers reject bad ids)
 function apaModelId(name, lab) {
@@ -4999,10 +5002,12 @@ app.get('/api/public/agentstable/tiers', asyncRoute(async (req, res) => {
   const tiers = {};
   for (const [k, rc] of Object.entries(roles.roles || {})) {
     const p = rc.winner ? priceRow(rc.winner) : null;
-    const pt = !p && rc.winner ? priceOf(rc.winner) : null; // board row first, price table as fallback
+    // price chain: board row → static price table → live OpenRouter market feed
+    const pt = !p && rc.winner ? priceOf(rc.winner) : null;
+    const po = !p && !pt && rc.winner ? await require('./providers').openrouterPrice(rc.winner) : null;
     tiers[k] = { model: rc.winner || null,
-      priceIn: p && p.PriceIn !== '' ? +p.PriceIn : (pt ? pt.in : null),
-      priceOut: p && p.PriceOut !== '' ? +p.PriceOut : (pt ? pt.out : null),
+      priceIn: p && p.PriceIn !== '' ? +p.PriceIn : (pt ? pt.in : (po ? po.in : null)),
+      priceOut: p && p.PriceOut !== '' ? +p.PriceOut : (pt ? pt.out : (po ? po.out : null)),
       fallbacks: rc.fallbacks || [], benchmark: rc.primary || null, min: rc.min ?? (cutoffs[k] || {}).min ?? null,
       label: rc.label || k };
   }
@@ -5071,14 +5076,21 @@ async function aaModels() {
 }
 async function formGuideModels() {
   const aa = await aaModels();
-  if (aa) return { source: 'artificialanalysis.ai', models: aa };
-  const rows = (await readTabCached(STABLE_SHEET_ID, APA_MODELS_TAB, APA_MODELS_HEADERS, 300000)).rows;
-  return { source: 'board', models: rows.map(r => {
-    let b = {}; try { b = JSON.parse(r.Benchmarks || '{}'); } catch (e) {}
-    const bm = {}; for (const [bk, v] of Object.entries(b)) if (!bk.startsWith('_')) bm[bk] = v;
-    return { model: r.Model, lab: r.Lab, os: String(r.OS || '').trim() === '1',
-      priceIn: r.PriceIn === '' ? null : +r.PriceIn, priceOut: r.PriceOut === '' ? null : +r.PriceOut, benchmarks: bm };
-  }) };
+  const src = aa ? { source: 'artificialanalysis.ai', models: aa }
+    : { source: 'board', models: (await readTabCached(STABLE_SHEET_ID, APA_MODELS_TAB, APA_MODELS_HEADERS, 300000)).rows.map(r => {
+        let b = {}; try { b = JSON.parse(r.Benchmarks || '{}'); } catch (e) {}
+        const bm = {}; for (const [bk, v] of Object.entries(b)) if (!bk.startsWith('_')) bm[bk] = v;
+        return { model: r.Model, lab: r.Lab, os: String(r.OS || '').trim() === '1',
+          priceIn: r.PriceIn === '' ? null : +r.PriceIn, priceOut: r.PriceOut === '' ? null : +r.PriceOut, benchmarks: bm };
+      }) };
+  // fill missing prices from the live OpenRouter market feed (keyless, cached)
+  const { openrouterPrice } = require('./providers');
+  for (const m of src.models) {
+    if (m.priceOut != null) continue;
+    const po = await openrouterPrice(m.model);
+    if (po) { m.priceIn = m.priceIn ?? po.in; m.priceOut = po.out; m.priceSource = 'openrouter'; }
+  }
+  return src;
 }
 app.get('/api/public/formguide', asyncRoute(async (req, res) => {
   res.setHeader('Cache-Control', 'public, max-age=60');
