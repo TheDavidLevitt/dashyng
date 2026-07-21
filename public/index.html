@@ -40,6 +40,16 @@ a:hover { text-decoration: underline; }
 .muted { color: var(--text2); font-size: 12px; }
 .tiny { color: var(--text3); font-size: 10.5px; }
 .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; margin-bottom: 6px; }
+/* journal-driven ad-hoc lists */
+.jl-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 6px; margin-top: 4px; }
+.jl-box { border: 1px solid var(--border); border-left: 3px solid var(--violet); border-radius: 7px; background: var(--card); padding: 6px 8px; position: relative; }
+.jl-box h3 { margin: 0 22px 4px 0; font-size: 12.5px; font-weight: 650; }
+.jl-box .jl-x { position: absolute; top: 4px; right: 5px; opacity: .45; cursor: pointer; font-size: 12px; line-height: 1; background: none; border: 0; color: var(--text2); }
+.jl-box .jl-x:hover { opacity: 1; }
+.jl-box .jl-src { font-size: 10px; color: var(--text3); font-weight: 400; }
+.jl-item { display: flex; gap: 6px; align-items: baseline; font-size: 12px; padding: 1px 0; cursor: pointer; }
+.jl-item .jl-chk { flex: 0 0 auto; }
+.jl-item.done span { text-decoration: line-through; color: var(--text3); }
 .empty { color: var(--text3); font-style: italic; padding: 4px 0; font-size: 12.5px; }
 .err { color: var(--amber); background: color-mix(in srgb, var(--amber) 12%, transparent);
   padding: 4px 8px; border-radius: 4px; font-size: 12px; display: inline-block; }
@@ -463,6 +473,20 @@ details summary { cursor: pointer; color: var(--text2); font-size: 12.5px; paddi
 </div>
 </section>
 
+<section data-sec="jlists">
+<h2><span data-sec-title>Journal Lists</span> <span class="muted tiny" id="jlists-meta"></span></h2>
+<div id="jlists"></div>
+</section>
+
+<section data-sec="cinote">
+<h2><span data-sec-title>Note to CI</span></h2>
+<div class="card" style="display:flex;gap:6px;align-items:flex-start">
+  <textarea id="cinote-in" rows="1" placeholder="a comment for the CI to read…" style="flex:1;resize:vertical;min-height:22px;font:inherit;background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:5px;padding:4px 6px"></textarea>
+  <button id="cinote-send" class="q-btn" style="white-space:nowrap">Send</button>
+  <span id="cinote-status" class="tiny muted" style="align-self:center"></span>
+</div>
+</section>
+
 <section data-sec="agents">
 <h2 data-sec-title style="margin-top:10px">Agent Stable <span class="muted">— <a href="/agents.html">stable · incoming · APA →</a></span></h2>
 <div id="agents-summary" class="card"><div class="empty">Loading…</div></div>
@@ -633,7 +657,7 @@ async function saveLinks() {
     box.querySelector('.lk-url').focus();
   };
 })();
-const SEC_DEFS = { links: 'Links', habits: 'Habits', brief: 'Agent brief', today: 'Today', todo: 'Task Lists', agents: 'Agent Stable', files: 'File manager', completed: 'Completed', media: 'Reading queue', markets: 'Markets', signals: 'Market signals', news: 'News', week: 'Week ahead' };
+const SEC_DEFS = { links: 'Links', habits: 'Habits', brief: 'Agent brief', today: 'Today', todo: 'Task Lists', jlists: 'Journal Lists', cinote: 'Note to CI', agents: 'Agent Stable', files: 'File manager', completed: 'Completed', media: 'Reading queue', markets: 'Markets', signals: 'Market signals', news: 'News', week: 'Week ahead' };
 let appSettings = { sections: {}, quadrants: {}, calendars: [] };
 function setSecTitle(el, title) { // replace only the text node — keep the ＋/meta spans inside headings
   const n = [...el.childNodes].find(x => x.nodeType === 3 && x.nodeValue.trim());
@@ -1567,6 +1591,70 @@ function renderTodayCards() {
 let calEvents = null;
 let actData = { events: [], leads: [] }; // agent-scanned activity events (see ACTIVITIES pref tab)
 api('/api/activities').then(d => { if (d && Array.isArray(d.events)) { actData = d; renderLookahead(); renderTodayCards(); } }).catch(() => {});
+
+// ---------- journal-driven ad-hoc lists ----------
+// A `## Heading` in the journal that isn't a template section becomes an ephemeral todo
+// box here. One-click ✕ dismisses the whole box (undoable); items toggle done in place.
+let jlists = [];
+function renderJList() {
+  const el = document.getElementById('jlists'); if (!el) return;
+  const meta = document.getElementById('jlists-meta');
+  if (!jlists.length) {
+    el.innerHTML = '<div class="tiny muted">Add a bulleted list under a new <code>## Heading</code> in today\'s journal (one that isn\'t a template section) and it appears here.</div>';
+    if (meta) meta.textContent = ''; return;
+  }
+  if (meta) meta.textContent = jlists.length + (jlists.length === 1 ? ' list' : ' lists');
+  el.innerHTML = '<div class="jl-grid">' + jlists.map(l => `<div class="jl-box" data-id="${esc(l.id)}">
+    <button class="jl-x" title="Done — remove this list">✕</button>
+    <h3>${esc(l.heading)} <span class="jl-src">${esc(l.date || '')}</span></h3>
+    ${(l.items || []).map((it, i) => `<div class="jl-item${it.done ? ' done' : ''}" data-i="${i}"><input type="checkbox" class="jl-chk"${it.done ? ' checked' : ''}><span>${esc(it.text)}</span></div>`).join('')}
+  </div>`).join('') + '</div>';
+  el.querySelectorAll('.jl-box').forEach(box => {
+    const list = jlists.find(l => l.id === box.dataset.id); if (!list) return;
+    box.querySelector('.jl-x').onclick = async () => {
+      jlists = jlists.filter(l => l.id !== list.id); renderJList();
+      await api(`/api/journal-lists/${encodeURIComponent(list.id)}/dismiss`, { method: 'POST', body: '{}' });
+      pushChange && pushChange({ label: 'remove list "' + list.heading + '"', undo: async () => {
+        await api(`/api/journal-lists/${encodeURIComponent(list.id)}/restore`, { method: 'POST', body: '{}' }); loadJLists();
+      }, redo: async () => {
+        await api(`/api/journal-lists/${encodeURIComponent(list.id)}/dismiss`, { method: 'POST', body: '{}' }); loadJLists();
+      } });
+      toast && toast('List removed (↩ to undo)');
+    };
+    box.querySelectorAll('.jl-item').forEach(row => {
+      const it = list.items[+row.dataset.i];
+      row.onclick = e => {
+        if (e.target.tagName === 'INPUT') return; // the checkbox handler below fires
+        row.querySelector('.jl-chk').click();
+      };
+      row.querySelector('.jl-chk').onchange = ev => {
+        it.done = ev.target.checked; row.classList.toggle('done', it.done);
+        api(`/api/journal-lists/${encodeURIComponent(list.id)}/item`, { method: 'POST', body: JSON.stringify({ text: it.text, done: it.done }) });
+      };
+    });
+  });
+}
+function loadJLists() {
+  return api('/api/journal-lists').then(d => { if (d && Array.isArray(d.lists)) { jlists = d.lists; renderJList(); } }).catch(() => {});
+}
+loadJLists();
+setInterval(loadJLists, 90000); // pick up new journal headings without a reload
+
+// ---------- freeform note to the CI ----------
+(() => {
+  const inp = document.getElementById('cinote-in'), btn = document.getElementById('cinote-send'), st = document.getElementById('cinote-status');
+  if (!inp || !btn) return;
+  const send = async () => {
+    const text = inp.value.trim(); if (!text) return;
+    btn.disabled = true; st.textContent = 'sending…';
+    const r = await api('/api/feedback', { method: 'POST', body: JSON.stringify({ kind: 'comment', context: text }) });
+    btn.disabled = false;
+    if (r && r.ok) { inp.value = ''; st.textContent = 'saved ✓'; setTimeout(() => { st.textContent = ''; }, 2500); }
+    else { st.textContent = 'failed'; }
+  };
+  btn.onclick = send;
+  inp.onkeydown = e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); send(); } };
+})();
 let locBars = []; // resolved + pinned location bars (see /api/location)
 let locDragUntil = 0; // swallow the ghost click that follows a bar drag (same-grid mousedown/up)
 function loadLocation() {

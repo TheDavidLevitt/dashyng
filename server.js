@@ -2491,6 +2491,7 @@ const SIGNAL_BY_KIND = {
   event_up: 2, event_down: -1, // Today-card thumbs
   event_scheduled: 4, // swiped an event onto the ACTUAL calendar — strongest event signal
   event_skipped: -0.5, // swipe left = "just not scheduled" — barely negative by design
+  comment: 0, // freeform note the owner types for the CI to read — context, not a vote
 };
 app.post('/api/feedback', asyncRoute(async (req, res) => {
   const { kind, title, url, source, context, subjects, person, author } = req.body || {};
@@ -2504,6 +2505,8 @@ app.post('/api/feedback', asyncRoute(async (req, res) => {
   const line = JSON.stringify(entry);
   if (HAS_JOURNAL) {
     fs.appendFileSync(FEEDBACK_FILE, line + '\n'); // Mac: CI reads this directly
+    // a freeform CI comment also lands in the journal's ## CI Log so it's visible there
+    if (kind === 'comment' && context) appendToJournal(`- ${nowIso().slice(11, 16)} ${String(context).replace(/\n+/g, ' ')}`, { section: 'CI Log' });
   } else {
     await appendTabRow(FB_TAB, FB_HEADERS, [line, nowIso(), '']); // cloud: durable; Mac drains
   }
@@ -3295,6 +3298,132 @@ function appendToJournal(line, { section = 'Agent Log', day = 'today' } = {}) {
     return true;
   } catch (e) { console.error('journal append failed:', e.message); return false; }
 }
+
+// ---------- journal-driven ad-hoc lists ----------
+// A `##` heading in a daily note that ISN'T one of the template's own sections (e.g.
+// "## Pack for the trip") becomes an ephemeral todo box on the dashboard, built from
+// the bulleted items under it. No LLM — a plain markdown scan on the Mac (the only tier
+// with the vault), synced to the cloud tier via a Heartbeat cell like markets/bars. Boxes
+// persist until the owner ✕-dismisses them (they don't vanish when the day rolls over);
+// a dismissed heading only comes back if its note is edited again after the dismissal.
+const JLISTS_LOCAL = path.join(__dirname, 'data', 'journal-lists.json');
+const JLISTS_CELL = "'Heartbeat'!Q1";
+const JLIST_WINDOW = 7; // scan this many most-recent daily notes
+// template sections that are NEVER ad-hoc lists (lowercased); config can extend for other vaults
+const KNOWN_HEADINGS = new Set([
+  'post-meditation notes', 'health notes', 'family/personal notes', 'journal', 'work', 'todo',
+  'stashed notes', 'agent feedback', 'ci log', 'agent notes', 'agent log', 'stashed media',
+  ...(Array.isArray(CFG.journalKnownHeadings) ? CFG.journalKnownHeadings.map(h => String(h).toLowerCase()) : []),
+]);
+const jlSlug = s => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60);
+function readJListsFile() { const j = readJson(JLISTS_LOCAL, null); return (j && Array.isArray(j.lists)) ? j : { savedAt: 0, lists: [], dismissed: {} }; }
+function saveJLists(store) {
+  const payload = { savedAt: Date.now(), lists: store.lists || [], dismissed: store.dismissed || {} };
+  try { writeJson(JLISTS_LOCAL, payload); } catch (e) {}
+  storeValues_update(JLISTS_CELL, JSON.stringify(payload)); // fire-and-forget cross-tier
+  return payload;
+}
+function storeValues_update(cell, raw) {
+  store.values.update({ spreadsheetId: TODO_SHEET_ID, range: cell, valueInputOption: 'RAW', requestBody: { values: [[String(raw).slice(0, 49000)]] } }).catch(() => {});
+}
+async function syncJListsFromSheet() {
+  try {
+    const r = await store.values.get({ spreadsheetId: TODO_SHEET_ID, range: JLISTS_CELL });
+    const raw = (((r.data.values || [[]])[0] || [])[0]) || '';
+    let remote = null; try { remote = JSON.parse(raw); } catch (e) {}
+    const local = readJson(JLISTS_LOCAL, null);
+    if (remote && Array.isArray(remote.lists) && (!local || (remote.savedAt || 0) > (local.savedAt || 0))) { writeJson(JLISTS_LOCAL, remote); return; }
+    if (local && (!remote || (local.savedAt || 0) > (remote.savedAt || 0))) storeValues_update(JLISTS_CELL, JSON.stringify(local));
+  } catch (e) {}
+}
+// Mac-only: parse the recent daily notes, upsert ad-hoc lists, preserve done-state by item text.
+async function scanJournalLists() {
+  if (!HAS_JOURNAL || process.env.DASHBOARD_NO_JOBS) return;
+  await syncJListsFromSheet(); // fold in any dismiss/toggle done on the phone first
+  const store = readJListsFile();
+  const dismissed = store.dismissed || {};
+  const prevDone = {}; // slug -> Set(done item texts) to carry across scans
+  for (const l of store.lists || []) prevDone[jlSlug(l.heading)] = new Set((l.items || []).filter(i => i.done).map(i => i.text));
+  let files = [];
+  try { files = fs.readdirSync(JOURNAL_DIR).filter(f => /^\d{4}-\d{2}-\d{2}\.md$/.test(f)).sort().slice(-JLIST_WINDOW); } catch (e) { return; }
+  const found = {}; // slug -> { heading, date, mtime, items:[{text,done}] } — newest note wins the items
+  for (const f of files) {
+    const full = path.join(JOURNAL_DIR, f);
+    let mtime, text;
+    try { mtime = fs.statSync(full).mtimeMs; text = fs.readFileSync(full, 'utf8'); } catch (e) { continue; }
+    let cur = null, items = null;
+    for (const line of text.split('\n')) {
+      const h2 = line.match(/^##\s+(.+?)\s*$/);
+      if (h2) {
+        const heading = h2[1].trim();
+        if (KNOWN_HEADINGS.has(heading.toLowerCase()) || !heading) { cur = null; continue; }
+        cur = heading; items = [];
+        found[jlSlug(heading)] = { heading, date: f.slice(0, 10), mtime, items }; // newest file overwrites
+        continue;
+      }
+      if (/^#(?!#)/.test(line) || /^#{3,}\s/.test(line)) { cur = null; continue; } // H1 / H3+ ends the section
+      if (cur) {
+        const b = line.match(/^\s*(?:[-*+•]|\d+\.)\s+(?:\[([ xX])\]\s+)?(.+?)\s*$/);
+        if (b && b[2].trim()) items.push({ text: b[2].trim(), done: /[xX]/.test(b[1] || '') });
+      }
+    }
+  }
+  const lists = [];
+  for (const [slug, v] of Object.entries(found)) {
+    if (!v.items.length) continue;                                  // a heading with no bullets isn't a list
+    if (dismAt(dismissed[slug]) && v.mtime <= dismAt(dismissed[slug])) continue; // dismissed & not re-touched since
+    const carried = prevDone[slug] || new Set();
+    lists.push({ id: 'jl:' + slug, heading: v.heading, date: v.date, items: v.items.map(i => ({ text: i.text, done: i.done || carried.has(i.text) })) });
+  }
+  saveJLists({ lists, dismissed });
+}
+// dismissed[slug] is {at, list?} — `at` gates re-add on scan, `list` lets undo restore the
+// exact box without waiting for (or depending on) a re-scan. Tolerates the legacy bare-epoch shape.
+const dismAt = d => (typeof d === 'number' ? d : (d && d.at) || 0);
+if (HAS_JOURNAL && !process.env.DASHBOARD_NO_JOBS) {
+  setTimeout(() => scanJournalLists().catch(() => {}), 20e3);
+  setInterval(() => scanJournalLists().catch(() => {}), 120e3); // journal edits are frequent — low latency
+}
+setInterval(syncJListsFromSheet, 10 * 60000); // cloud tier: pull Mac's lists
+app.get('/api/journal-lists', asyncRoute(async (req, res) => {
+  if (!HAS_JOURNAL) await syncJListsFromSheet().catch(() => {}); // cloud: freshen from the cell
+  res.json({ lists: readJListsFile().lists || [] });
+}));
+app.post('/api/journal-lists/scan', asyncRoute(async (req, res) => {
+  if (!HAS_JOURNAL) return res.status(400).json({ error: 'journal scanning runs on the vault host' });
+  await scanJournalLists();
+  res.json({ ok: true, lists: readJListsFile().lists || [] });
+}));
+app.post('/api/journal-lists/:id/dismiss', asyncRoute(async (req, res) => {
+  const store = readJListsFile();
+  const l = (store.lists || []).find(x => x.id === req.params.id);
+  const slug = l ? jlSlug(l.heading) : String(req.params.id).replace(/^jl:/, '');
+  store.dismissed = store.dismissed || {};
+  store.dismissed[slug] = { at: Date.now(), list: l || null }; // stash the box so undo restores it verbatim
+  store.lists = (store.lists || []).filter(x => x.id !== req.params.id);
+  res.json({ ok: true, list: saveJLists(store) });
+}));
+app.post('/api/journal-lists/:id/restore', asyncRoute(async (req, res) => { // undo of a dismiss
+  const store = readJListsFile();
+  const slug = String(req.params.id).replace(/^jl:/, '');
+  const stashed = store.dismissed && store.dismissed[slug];
+  if (store.dismissed) delete store.dismissed[slug];
+  // put the exact box back immediately (no dependence on a re-scan, which never runs on a
+  // no-jobs/cloud tier); if it wasn't stashed, the Mac's next scan re-materializes it
+  const l = stashed && stashed.list;
+  if (l && !(store.lists || []).some(x => x.id === l.id)) store.lists = [...(store.lists || []), l];
+  saveJLists(store);
+  res.json({ ok: true, lists: readJListsFile().lists || [] });
+}));
+app.post('/api/journal-lists/:id/item', asyncRoute(async (req, res) => {
+  const { text, done } = req.body || {};
+  const store = readJListsFile();
+  const l = (store.lists || []).find(x => x.id === req.params.id);
+  if (!l) return res.status(404).json({ error: 'list not found' });
+  const item = (l.items || []).find(i => i.text === text);
+  if (item) item.done = !!done;
+  res.json({ ok: true, list: saveJLists(store) });
+}));
 
 // Stash queue — the journal is Mac-only (E2E), so a stash from the cloud/iPhone
 // can't write it directly. Park it in a Sheet tab; the Mac heartbeat drains
