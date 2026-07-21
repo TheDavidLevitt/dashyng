@@ -3316,6 +3316,36 @@ const KNOWN_HEADINGS = new Set([
   ...(Array.isArray(CFG.journalKnownHeadings) ? CFG.journalKnownHeadings.map(h => String(h).toLowerCase()) : []),
 ]);
 const jlSlug = s => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60);
+// The ## Todo section is itself scanned: a LABELED bulleted group under it (a non-bullet
+// label line followed by bullets) becomes a box UNLESS its label routes to an existing
+// quadrant (Q1–Q4 / M, or a configured quadrant name) — mirroring how the heartbeat files
+// those. An explicit "(new)" / "-new" / "-n" / "start new … box" marker forces a box even
+// for a quadrant-named group.
+const TODO_SECTION = String(CFG.journalTodoSection || 'todo').toLowerCase();
+const jlNewMarker = s => /\(\s*(?:new|start)\b[^)]*\)|(?:^|\s)[-–]\s*n(?:ew)?\s*$|\bnew (?:collapsed )?(?:section|box)\b|\bstart (?:a )?new\b/i.test(String(s));
+function jlQuadrantLabels() {
+  const s = new Set(['m', 'monitor', 'urgent + important', 'important, schedule', 'delegate to agent', 'neither, eliminate', 'learning goals',
+    ...(Array.isArray(CFG.journalQuadrantAliases) ? CFG.journalQuadrantAliases.map(x => String(x).toLowerCase()) : [])]);
+  try { const q = (loadSettings().quadrants) || {}; for (const k of Object.keys(q)) { s.add(k.toLowerCase()); if (q[k] && q[k].label) s.add(String(q[k].label).toLowerCase()); } } catch (e) {}
+  return s;
+}
+function jlIsQuadrantLabel(label) {
+  const l = String(label).toLowerCase().trim();
+  if (/^\(?q[1-9]\)?:?$/.test(l) || /^\(?[lm]\d*\)?:?$/.test(l)) return true;   // "Q3:", "(Q1)", "M", "L6"
+  if (/[-–,:]?\s*\(?q[1-9]\)?:?\s*$/.test(l) && l.replace(/[-–,:()\s]|q[1-9]/g, '').length) return true; // "Moulin (Q1)"
+  return jlQuadrantLabels().has(l.replace(/[():]/g, '').trim());
+}
+function jlCleanTodoLabel(s) {
+  return String(s)
+    .replace(/^\s*\[[ xX]?\]\s*/, '')               // leading [] / [x] checkbox
+    .replace(/#[\w-]+/g, '')                          // #todo etc. tags
+    .replace(/\(\s*(?:new|start)\b[^)]*\)/ig, '')     // (new …) / (start new … box …)
+    .replace(/[-–]\s*n(?:ew)?\s*$/i, '')              // -new / -n suffix
+    .replace(/[-–,:]?\s*\(?q[1-9]\)?:?\s*$/i, '')     // trailing quadrant ref
+    .replace(/[*_`]+/g, '')                            // markdown emphasis
+    .replace(/[:\-–]\s*$/, '')
+    .replace(/\s+/g, ' ').trim();
+}
 function readJListsFile() { const j = readJson(JLISTS_LOCAL, null); return (j && Array.isArray(j.lists)) ? j : { savedAt: 0, lists: [], dismissed: {} }; }
 function saveJLists(store) {
   const payload = { savedAt: Date.now(), lists: store.lists || [], dismissed: store.dismissed || {} };
@@ -3351,22 +3381,43 @@ async function scanJournalLists() {
     const full = path.join(JOURNAL_DIR, f);
     let mtime, text;
     try { mtime = fs.statSync(full).mtimeMs; text = fs.readFileSync(full, 'utf8'); } catch (e) { continue; }
-    let cur = null, items = null;
+    let cur = null, items = null;              // ad-hoc H2 section in progress
+    let inTodo = false, tLabel = null, tItems = null; // labeled group inside ## Todo
+    const bullet = line => line.match(/^\s*(?:[-*+•]|\d+\.)\s+(?:\[([ xX])\]\s+)?(.+?)\s*$/);
+    const flushTodo = () => {                  // decide if the just-parsed ## Todo group is a box
+      if (tLabel && tItems && tItems.length) {
+        const forced = jlNewMarker(tLabel);
+        if (forced || !jlIsQuadrantLabel(tLabel)) {
+          const clean = jlCleanTodoLabel(tLabel) || 'Todo';
+          found[jlSlug(clean)] = { heading: clean, date: f.slice(0, 10), mtime, items: tItems };
+        }
+      }
+      tLabel = null; tItems = null;
+    };
     for (const line of text.split('\n')) {
       const h2 = line.match(/^##\s+(.+?)\s*$/);
       if (h2) {
+        cur = null; items = null; flushTodo(); inTodo = false;
         const heading = h2[1].trim();
-        if (KNOWN_HEADINGS.has(heading.toLowerCase()) || !heading) { cur = null; continue; }
+        if (heading.toLowerCase() === TODO_SECTION) { inTodo = true; continue; }
+        if (KNOWN_HEADINGS.has(heading.toLowerCase()) || !heading) continue;
         cur = heading; items = [];
         found[jlSlug(heading)] = { heading, date: f.slice(0, 10), mtime, items }; // newest file overwrites
         continue;
       }
-      if (/^#(?!#)/.test(line) || /^#{3,}\s/.test(line)) { cur = null; continue; } // H1 / H3+ ends the section
+      if (/^#(?!#)/.test(line) || /^#{3,}\s/.test(line)) { cur = null; flushTodo(); inTodo = false; continue; } // H1 / H3+ ends the section
+      if (inTodo) {
+        const b = bullet(line);
+        if (b && b[2].trim()) { if (tLabel) tItems.push({ text: b[2].trim(), done: /[xX]/.test(b[1] || '') }); } // bullet under a label
+        else if (line.trim()) { flushTodo(); tLabel = line.trim(); tItems = []; }                               // a new group label
+        continue;
+      }
       if (cur) {
-        const b = line.match(/^\s*(?:[-*+•]|\d+\.)\s+(?:\[([ xX])\]\s+)?(.+?)\s*$/);
+        const b = bullet(line);
         if (b && b[2].trim()) items.push({ text: b[2].trim(), done: /[xX]/.test(b[1] || '') });
       }
     }
+    flushTodo();
   }
   const lists = [];
   for (const [slug, v] of Object.entries(found)) {
