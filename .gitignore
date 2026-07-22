@@ -32,3 +32,5 @@ spec/LESSONS-local.md
 data/store/
 data/feedback.jsonl
 public/junglefarm/
+data/journal-lists.json
+data/monitor-snapshot.json

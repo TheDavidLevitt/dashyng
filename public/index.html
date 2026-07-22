@@ -200,6 +200,9 @@ input.loc-bar-input { font-size: 10.5px; width: 100%; padding: 0 3px; background
   cursor: pointer; padding: 0 4px; font-size: 10.5px; line-height: 15px; flex-shrink: 0; opacity: 0.45; }
 .q-task:hover .q-btn, .q-btn:focus { opacity: 1; }
 .q-btn.done:hover { background: var(--green); color: #fff; border-color: var(--green); }
+.q-btn.sal-toggle { opacity: .35; } .q-btn.sal-toggle:hover { opacity: 1; }
+.q-btn.sal-toggle.on { opacity: 1; color: var(--violet); border-color: var(--violet); }
+.q-task.q-salient .q-body { font-weight: 600; }
 .q.drop-target { outline: 2px dashed var(--accent); outline-offset: -2px; }
 .q-task.drop-before { box-shadow: 0 -2px 0 0 var(--accent); }
 .q-task.drop-after { box-shadow: 0 2px 0 0 var(--accent); }
@@ -1013,13 +1016,18 @@ function taskHtml(t, opts) {
     : (opts.child ? '' : '<span class="q-toggle"></span>');
   const cnt = kids && collapsed.has(t.ID) ? ` <span class="q-count">(${kids})</span>` : '';
   const bullet = opts.rank ? `<span class="q-bullet q-rank">${opts.rank}.</span>` : '<span class="q-bullet">•</span>';
-  return `<div class="q-task ${opts.child ? 'child' : ''}" draggable="true" data-id="${esc(t.ID)}" data-q="${esc(normQ(t.Quadrant))}" data-parent="${esc(opts.child ? t.Parent : '')}">
+  const sal = isSalientClient(t);
+  const star = opts.mon ? `<button class="q-btn sal-toggle${sal ? ' on' : ''}" title="${sal ? 'High salience — changes push to your journal' : 'Mark high-salience (push changes to your journal)'}">${sal ? '★' : '☆'}</button>` : '';
+  return `<div class="q-task ${opts.child ? 'child' : ''}${sal ? ' q-salient' : ''}" draggable="true" data-id="${esc(t.ID)}" data-q="${esc(normQ(t.Quadrant))}" data-parent="${esc(opts.child ? t.Parent : '')}">
     ${toggle}${bullet}
     <span class="q-body">${taskBodyHtml(t.Task)}${cnt}${srcBadge(t.Source)}${dueHtml(t)}${note}</span>
+    ${star}
     <button class="q-btn move" title="Move / group">⇄</button>
     <button class="q-btn done" title="Mark done">✓</button>
   </div>`;
 }
+// high salience = a `salient` tag or a leading "!" in the task text (mirrors the server watcher)
+const isSalientClient = t => /(^|,)\s*(salient|high)\s*($|,)/i.test(String(t.Tags || '')) || /^\s*!/.test(String(t.Task || ''));
 
 // External async completions (done-handler's delayed re-render, journal-read finishing in
 // the background) must not clobber an inline task/list-name edit the user is mid-typing —
@@ -1054,8 +1062,8 @@ function renderMatrix() {
     const inner = roots.map((t, ri) => {
       const kids = childrenOf(t.ID);
       count += 1 + kids.length;
-      let html = taskHtml(t, { showNotes: qd.key === 'M', childCount: kids.length, rank: ranked ? ri + 1 : 0 });
-      if (!collapsed.has(t.ID)) html += kids.map(k => taskHtml(k, { showNotes: qd.key === 'M', child: true })).join('');
+      let html = taskHtml(t, { showNotes: qd.key === 'M', mon: qd.key === 'M', childCount: kids.length, rank: ranked ? ri + 1 : 0 });
+      if (!collapsed.has(t.ID)) html += kids.map(k => taskHtml(k, { showNotes: qd.key === 'M', mon: qd.key === 'M', child: true })).join('');
       return html;
     }).join('') || '<div class="empty">—</div>';
     const sub = qc.sub || qd.sub;
@@ -1213,6 +1221,24 @@ function attachHandlers() {
         setTimeout(renderMatrixSafe, 350);
       } else el.classList.remove('saving');
     });
+  });
+
+  // ☆/★ salience toggle on Monitor items — sets/clears the `salient` tag; a high-salience
+  // Monitor change is pushed to the journal (server-side watcher) so it can't be missed.
+  rootEl.querySelectorAll('.q-btn.sal-toggle').forEach(btn => btn.onclick = async e => {
+    e.stopPropagation();
+    const id = btn.closest('.q-task').dataset.id;
+    const t = allTasks.find(x => x.ID === id); if (!t) return;
+    const tags = String(t.Tags || '').split(',').map(s => s.trim()).filter(Boolean);
+    const had = tags.some(x => /^(salient|high)$/i.test(x)) || /^\s*!/.test(t.Task || '');
+    let out = tags.filter(x => !/^(salient|high)$/i.test(x));
+    if (had) { if (/^\s*!/.test(t.Task || '')) t.Task = t.Task.replace(/^\s*!\s*/, ''); }  // clearing: also drop a leading !
+    else out.push('salient');
+    t.Tags = out.join(',');
+    const body = had && t.Task !== undefined ? { Tags: t.Tags, Task: t.Task } : { Tags: t.Tags };
+    renderMatrix();
+    const r = await api('/api/tasks/' + encodeURIComponent(id), { method: 'PATCH', body: JSON.stringify(body) });
+    if (r && r.error) showErr(r.error);
   });
 
   // collapse/expand parent groups

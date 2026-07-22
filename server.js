@@ -3476,6 +3476,50 @@ app.post('/api/journal-lists/:id/item', asyncRoute(async (req, res) => {
   res.json({ ok: true, list: saveJLists(store) });
 }));
 
+// ---------- Monitor-list change watcher ----------
+// A HIGH-SALIENCE change to the Monitor quadrant (a new watch, or a material change to one)
+// gets pushed to the journal's ## Agent Notes so the owner is sure to review it — e.g. a new
+// "job openings at X" watch. Low-salience churn never touches the journal; nothing outside
+// the Monitor quadrant does either (market-signal ticks stay put). Runs server-side on the
+// Mac, INDEPENDENT of the heartbeat's claude auth. Salience = a `salient`/`high` tag, or a
+// leading "!" in the task text (the dashboard's ☆/★ toggle sets the tag).
+const MONITOR_SNAP = path.join(__dirname, 'data', 'monitor-snapshot.json');
+const isMonitorQuad = q => /^(m|mon|monitor)$/i.test(String(q || '').trim());
+const isSalientTask = t => /(^|,)\s*(salient|high|⭐|🔔)\s*($|,)/i.test(String(t.Tags || '')) || /^\s*!/.test(String(t.Task || ''));
+const monitorSig = t => `${String(t.Task || '').trim().replace(/^\s*!\s*/, '')}|${String(t.Status || '').toLowerCase()}|${String(t.Notes || '').trim().slice(0, 140)}`;
+async function monitorWatch() {
+  if (!HAS_JOURNAL || process.env.DASHBOARD_NO_JOBS) return;
+  let rows;
+  try { rows = (await readTodoTab()).rows; } catch (e) { return; }
+  const mon = rows.filter(t => isMonitorQuad(t.Quadrant) && String(t.Status || '').toLowerCase() !== 'archived');
+  const seen = (readJson(MONITOR_SNAP, null) || {}).seen || {};
+  const first = !Object.keys(seen).length && !fs.existsSync(MONITOR_SNAP); // don't dump the whole existing list into the journal on first-ever run
+  const pushes = [];
+  const next = {};
+  for (const t of mon) {
+    const sal = isSalientTask(t), sig = monitorSig(t), prev = seen[t.ID];
+    if (!first && sal && (!prev || prev.pushed !== sig)) {
+      const verb = !prev ? 'New monitor' : 'Monitor updated';
+      const done = String(t.Status || '').toLowerCase() === 'done';
+      pushes.push(`- 🔔 ${verb}: ${String(t.Task || '').replace(/^\s*!\s*/, '').replace(/\n+/g, ' ').trim()}${done ? ' — resolved' : ''}`);
+      next[t.ID] = { sig, pushed: sig };
+    } else {
+      next[t.ID] = { sig, pushed: (prev && prev.pushed) || (sal ? sig : '') }; // record; low-salience never sets `pushed`
+    }
+  }
+  writeJson(MONITOR_SNAP, { seen: next, at: nowIso() });
+  if (pushes.length) appendToJournal([`Monitor changes (${today()}):`, ...pushes].join('\n'), { section: 'Agent Notes' });
+}
+if (HAS_JOURNAL && !process.env.DASHBOARD_NO_JOBS) {
+  setTimeout(() => monitorWatch().catch(() => {}), 35e3);
+  setInterval(() => monitorWatch().catch(() => {}), 30 * 60000); // every 30 min
+}
+app.post('/api/monitor/scan', asyncRoute(async (req, res) => { // manual trigger (testing / on-demand)
+  if (!HAS_JOURNAL) return res.status(400).json({ error: 'monitor watch runs on the journal host' });
+  await monitorWatch();
+  res.json({ ok: true });
+}));
+
 // Stash queue — the journal is Mac-only (E2E), so a stash from the cloud/iPhone
 // can't write it directly. Park it in a Sheet tab; the Mac heartbeat drains
 // pending rows into the journal (Stage A-stash) and stamps Drained. On the Mac
