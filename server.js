@@ -1166,6 +1166,7 @@ const PLUGINS = {};
 const PLUGIN_NEWS_SOURCES = [];
 const PLUGIN_HEALTH = [];
 const PLUGIN_LLM = []; // llm({prompt, module, model, tools}, ctx) → string (answered) | null (pass)
+const PLUGIN_BRIEF = []; // briefItems() → [{kind, text}] salient non-news items the Agent Brief may elevate
 const pluginCtx = () => ({ store, config: CFG, runLLM: (prompt, opts) => runClaude(prompt, opts) });
 try {
   for (const f of fs.readdirSync(path.join(__dirname, 'plugins')).filter(f => f.endsWith('.js'))) {
@@ -1181,6 +1182,7 @@ try {
         if (s && s.title && typeof s.build === 'function') PLUGIN_NEWS_SOURCES.push({ ...s, _file: f });
       if (typeof p.healthRows === 'function') PLUGIN_HEALTH.push({ fn: p.healthRows, _file: f });
       if (typeof p.llm === 'function') PLUGIN_LLM.push({ fn: p.llm, _file: f }); // LLM router: return a string to answer, null to pass
+      if (typeof p.briefItems === 'function') PLUGIN_BRIEF.push({ fn: p.briefItems.bind(p), _file: f }); // salient weather/etc → Agent Brief
     } catch (e) { console.error('plugin load failed:', f, e.message); }
   }
 } catch (e) {}
@@ -2831,6 +2833,21 @@ app.get('/api/activities', asyncRoute(async (req, res) => {
   });
   res.json({ events, leads });
 }));
+// salient upcoming events (in their lead-alert window) for the Agent Brief — the "events of
+// interest, elevated if salient" side of the weather/events brief hook.
+async function eventLeadsForBrief() {
+  try {
+    const acts = await loadActivitiesConfig();
+    const leadOf = Object.fromEntries(acts.map(a => [a.activity, a.leadDays]));
+    const tab = await readTabCached(TODO_SHEET_ID, ACTEV_TAB, ACTEV_HEADERS, 120000).catch(() => ({ rows: [] }));
+    const t0 = today();
+    return tab.rows.filter(r => {
+      const lead = leadOf[r.Activity] || 0; if (!lead) return false;
+      const start = new Date(Date.parse(r.Date) - lead * 864e5).toISOString().slice(0, 10);
+      return t0 >= start && t0 < r.Date;
+    }).slice(0, 4).map(r => ({ kind: 'event', text: `${r.Title}${r.Venue ? ' @ ' + r.Venue : ''} — ${r.Date}` }));
+  } catch (e) { return []; }
+}
 // "+" travel input above the look-ahead: free text (possibly several legs) → LLM parse →
 // evidence signals + PINNED bars (user input is authoritative), optionally back-synced to
 // the calendar as all-day events. "JFK->LHR 25/7" = flight arriving London July 25.
@@ -4106,13 +4123,21 @@ app.get('/api/brief', asyncRoute(async (req, res) => {
     const order = { 'News': 0, 'Deep dives': 1, 'Books & Film': 2 };
     const cand = news.sections.flatMap(s => s.items.map(it => ({ ...it, sec: s.title }))).sort((a, b) => ((order[a.sec] ?? 0) - (order[b.sec] ?? 0)) || (b.salience - a.salience)).slice(0, 40);
     const lines = cand.map((it, i) => `${i}. [${it.sec}] ${it.title} — ${it.source}${it.age ? ', ' + it.age : ''} <${it.link}>`);
+    // owner-context items (salient weather from plugins + salient upcoming events) the brief
+    // may elevate — folded in only if genuinely more consequential than the weakest news pick
+    const extras = [];
+    for (const b of PLUGIN_BRIEF) { try { const items = await b.fn(); if (Array.isArray(items)) extras.push(...items); } catch (e) {} }
+    try { extras.push(...(await eventLeadsForBrief())); } catch (e) {}
+    const extrasBlock = extras.length
+      ? `\n\nWEATHER & EVENTS (the owner's OWN situation — geographically/temporally where they are or are going). Include AT MOST ONE of these as a brief line, and ONLY if it is genuinely more consequential to the owner than your weakest news pick (a severe storm/frost/heat where they'll be, or a marquee event they follow). Otherwise ignore this block entirely:\n${extras.map(e => `- [${e.kind}] ${e.text}`).join('\n')}`
+      : '';
     const served = {};
     const raw = await runClaude(
       `You are the owner's chief of staff. From the numbered headlines, do TWO things.\n` +
-      `(A) Pick the 3 MOST SALIENT HARD-NEWS developments and rank them. EXCLUDE fiction, creative writing, book reviews, routine hiring/funding listicles, and anything >48h old. Salience = genuine consequence to the owner${CFG.profile ? ' — ' + CFG.profile : ''}. Concrete events (an executive order, an IPO filing, a ceasefire step) outrank commentary.\n` +
-      `(B) Write the brief: EXACTLY 3 lines, one per top story, each LEADING with the specific fact a headline omits — names, numbers, dates, dollar figures, status. NO humor, NO wordplay, NO preamble, NO hedging. Terse and dense. Hotlink the key noun of each line as a markdown [text](url) using the URL given.\n\n` +
+      `(A) Pick the 3 MOST SALIENT developments and rank them. EXCLUDE fiction, creative writing, book reviews, routine hiring/funding listicles, and anything >48h old. Salience = genuine consequence to the owner${CFG.profile ? ' — ' + CFG.profile : ''}. Concrete events (an executive order, an IPO filing, a ceasefire step) outrank commentary. You MAY replace your weakest pick with ONE weather/event item from the WEATHER & EVENTS block IF it outranks that news for the owner.\n` +
+      `(B) Write the brief: EXACTLY 3 lines, one per top item, each LEADING with the specific fact a headline omits — names, numbers, dates, dollar figures, status. NO humor, NO wordplay, NO preamble, NO hedging. Terse and dense. Hotlink the key noun of each NEWS line as a markdown [text](url) using the URL given (a weather/event line needs no link).\n\n` +
       `The headlines below are self-contained — rank and write from them directly. You MAY use WebSearch/WebFetch to enrich a specific figure, but this is optional; if a fetch fails or a tool is unavailable, proceed anyway from the headline text. NEVER mention tools, access, or your own limitations in the output.\n` +
-      `Return STRICT JSON only — no prose before or after, no code fences: {"top":[{"i":<number>,"detail":"the specific fact"}],"brief":"3 lines, one per story, with inline [text](url) links and hard specifics"}\n\nHEADLINES:\n${lines.join('\n')}`,
+      `Return STRICT JSON only — no prose before or after, no code fences: {"top":[{"i":<number or -1 for a weather/event line>,"detail":"the specific fact"}],"brief":"3 lines, one per item, with inline [text](url) links on news lines and hard specifics"}\n\nHEADLINES:\n${lines.join('\n')}${extrasBlock}`,
       { tools: 'WebFetch,WebSearch', timeoutMs: 180000, module: 'brief', model: modelFor('brief', 'claude-sonnet-5'), served });
     // Robustly extract the brief text — NEVER leak raw JSON to the UI. Strip code
     // fences, parse the {...} block; if that fails, regex-pull the "brief" value; if

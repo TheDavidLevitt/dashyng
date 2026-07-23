@@ -34,3 +34,4 @@ data/feedback.jsonl
 public/junglefarm/
 data/journal-lists.json
 data/monitor-snapshot.json
+data/weather-locations.json
