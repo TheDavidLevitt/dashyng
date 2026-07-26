@@ -1151,6 +1151,45 @@ app.get('/api/settings', asyncRoute(async (req, res) => res.json({
   sheetUrl: TODO_SHEET_ID ? `https://docs.google.com/spreadsheets/d/${TODO_SHEET_ID}/edit` : '',
 })));
 
+// ---------- wind & waves (owner's home break): glanceable surf/kite check ----------
+// Open-Meteo forecast + marine APIs (free, keyless). Daylight hours only (06-20 local);
+// daily = the day's peak wind (that's what gates a session) + biggest wave w/ its period.
+let surfCache = { at: 0, data: null };
+app.get('/api/surf', asyncRoute(async (req, res) => {
+  if (surfCache.data && Date.now() - surfCache.at < 60 * 60000) return res.json(surfCache.data);
+  const LAT = CFG.surfSpotLat, LON = CFG.surfSpotLon;
+  if (!LAT && !LON) return res.json({ unconfigured: true, hint: 'Set surfSpotName/surfSpotLat/surfSpotLon to enable the wind & waves check.' });
+  const [w, m] = await Promise.all([
+    fetch(`https://api.open-meteo.com/v1/forecast?latitude=${LAT}&longitude=${LON}&hourly=wind_speed_10m,wind_direction_10m&wind_speed_unit=kn&forecast_days=7&timezone=Europe%2FParis`).then(r => r.json()),
+    fetch(`https://marine-api.open-meteo.com/v1/marine?latitude=${LAT}&longitude=${LON}&hourly=wave_height,wave_period&forecast_days=7&timezone=Europe%2FParis`).then(r => r.json()).catch(() => null),
+  ]);
+  const wt = w?.hourly?.time || [];
+  if (!wt.length) { track('surf', false, 'open-meteo empty'); return res.json({ error: 'forecast unavailable' }); }
+  const ws = w.hourly.wind_speed_10m, wd = w.hourly.wind_direction_10m;
+  const mIdx = new Map((m?.hourly?.time || []).map((t, i) => [t, i]));
+  const byDay = {};
+  wt.forEach((t, i) => {
+    const [date, hm] = t.split('T'); const h = +hm.slice(0, 2);
+    if (h < 6 || h > 20) return; // daylight only
+    const mi = mIdx.get(t);
+    (byDay[date] = byDay[date] || []).push({ h, wind: ws[i], dir: wd[i],
+      wave: mi != null ? m.hourly.wave_height[mi] : null, period: mi != null ? m.hourly.wave_period[mi] : null });
+  });
+  const dates = Object.keys(byDay).sort();
+  const daily = dates.slice(0, 7).map(date => {
+    const rows = byDay[date].filter(x => x.wind != null);
+    if (!rows.length) return { date };
+    const top = rows.reduce((a, b) => b.wind > a.wind ? b : a, rows[0]);       // peak wind of the day
+    const wv = rows.reduce((a, b) => (b.wave || 0) > (a.wave || 0) ? b : a, rows[0]); // biggest wave
+    return { date, wind: top.wind, dir: top.dir, wave: wv.wave, period: wv.period };
+  });
+  const hours = dates.slice(0, 2).map(date => ({ date, slots: byDay[date].filter(x => x.h % 3 === 0) })); // 06 09 12 15 18
+  const data = { at: nowIso(), spot: CFG.surfSpotName || 'Home break', daily, hours };
+  track('surf', true, `${daily.length}d / ${hours.length}×3h`);
+  surfCache = { at: Date.now(), data };
+  res.json(data);
+}));
+
 // ---------- plugin sections (plugins/*.js — private, gitignored; see plugins/README.md) ----------
 // A plugin = { key, title, data(), client } → appears as a dashboard section on any tier
 // that has the file. This is how private bits stay out of the public repo without a fork.
@@ -1242,6 +1281,11 @@ app.post('/api/settings', asyncRoute(async (req, res) => {
     next.headline = {};
     if (typeof s.headline.greeting === 'string') next.headline.greeting = s.headline.greeting.trim().slice(0, 60);
     if (['weekday-long', 'weekday-short', 'numeric', 'iso'].includes(s.headline.dateFormat)) next.headline.dateFormat = s.headline.dateFormat;
+  }
+  if ('cycle' in s) { // pink-"?" prediction: {lastStart 'YYYY-MM-DD', length days}; null clears
+    if (s.cycle === null) delete next.cycle;
+    else if (s.cycle && /^\d{4}-\d{2}-\d{2}$/.test(String(s.cycle.lastStart || '')))
+      next.cycle = { lastStart: s.cycle.lastStart, length: Math.min(60, Math.max(15, +s.cycle.length || 28)) };
   }
   saveSettings(next);
   res.json({ ok: true, settings: next });
@@ -3222,6 +3266,18 @@ async function runClaude(prompt, { tools, timeoutMs, module, model, served } = {
       const out = await r.fn({ prompt, module, model, tools }, pluginCtx());
       if (typeof out === 'string' && out) { mark('plugin:' + String(r._file || 'llm').replace(/\.js$/, '')); return out; }
     } catch (e) { console.error(`plugin llm router (${r._file}):`, e.message); }
+  }
+  // CHEAPEST QUALIFIED FIRST: tool-free work on NON-PERSONAL modules goes to the Google AI
+  // Studio free tier ($0, rate-limited). Any failure — rate limit, empty, no key — falls
+  // straight through to the paid chain, so this can only ever save money, never block work.
+  if (!tools) {
+    const pv = require('./providers');
+    if (pv.geminiFreeAllowed(module)) {
+      try {
+        const out = await pv.geminiFreeText(prompt, undefined, module || 'generate-text');
+        if (out) { mark('gemini-free (AI Studio)'); return out; }
+      } catch (e) { track('agent', true, 'gemini-free unavailable, falling through: ' + String(e.message).slice(0, 80)); }
+    }
   }
   if (!HAS_CLAUDE) {
     if (tools) throw new Error('agent tools (web fetch/search) require the claude CLI');

@@ -72,6 +72,35 @@ async function geminiText(prompt, model = GEMINI_MODEL, module = 'generate-text'
   return text.trim();
 }
 
+// —— Google AI Studio FREE tier ——————————————————————————————————————————————
+// Same Gemini models, $0, no card — but hard rate limits AND Google may use free-tier data
+// to improve its products. So it is the cheapest QUALIFIED model only for NON-PERSONAL
+// content; geminiFreeAllowed() is the gate and personal modules are excluded by name.
+const AISTUDIO = 'https://generativelanguage.googleapis.com/v1beta/models';
+const GEMINI_FREE_KEY = () => (require('./config').geminiFreeKey || process.env.GEMINI_API_KEY || '');
+const GEMINI_FREE_MODEL = () => (require('./config').geminiFreeModel || 'gemini-2.5-flash');
+// modules whose prompts can carry the owner's private life — never eligible for a tier that
+// may train on the payload, no matter how cheap
+const PERSONAL_MODULES = /journal|heartbeat|cycle|location|stash|brief|triage|gmail|ci$/i;
+function geminiFreeAllowed(module) { return !!GEMINI_FREE_KEY() && !PERSONAL_MODULES.test(String(module || '')); }
+async function geminiFreeText(prompt, model = GEMINI_FREE_MODEL(), module = 'generate-text') {
+  const key = GEMINI_FREE_KEY();
+  if (!key) throw new Error('no AI Studio key');
+  const r = await fetch(`${AISTUDIO}/${model}:generateContent?key=${encodeURIComponent(key)}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      generationConfig: { temperature: 0.4, maxOutputTokens: 32768 } }),
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(`aistudio ${model} HTTP ${r.status}: ${String(j.error?.message || '').slice(0, 160)}`);
+  const text = j.candidates?.[0]?.content?.parts?.map(p => p.text).join('') || '';
+  if (!text) throw new Error('gemini-free: empty response');
+  const um = j.usageMetadata || {};
+  // logged as '<model>-free' so pricing/costClass score it $0 / 'included' rather than GCP credit
+  logUsage({ module, model: model + '-free', input: um.promptTokenCount, output: um.candidatesTokenCount, costUsd: 0, note: 'aistudio free tier' }).catch(() => {});
+  return text.trim();
+}
+
 function claudeCliText(prompt) {
   return new Promise((resolve, reject) => {
     execFile(CLAUDE_BIN, ['-p', prompt, '--model', 'claude-haiku-4-5-20251001'],
@@ -306,4 +335,4 @@ async function generateImage(prompt, opts) {
   return { provider: 'vertex-imagen', images };
 }
 
-module.exports = { listProviders, generateText, generateImage, embedText, geminiText, grokText, grokAgent, apaModelText, apaAdapters, apaProviderFor, probeVertex, openrouterModels, openrouterResolveId, openrouterPrice, GEMINI_MODEL, EMBED_MODEL, EMBED_DIM, IMAGEN_MODEL, VERTEX_LOCATION };
+module.exports = { listProviders, generateText, generateImage, embedText, geminiText, geminiFreeText, geminiFreeAllowed, grokText, grokAgent, apaModelText, apaAdapters, apaProviderFor, probeVertex, openrouterModels, openrouterResolveId, openrouterPrice, GEMINI_MODEL, EMBED_MODEL, EMBED_DIM, IMAGEN_MODEL, VERTEX_LOCATION };

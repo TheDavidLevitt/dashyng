@@ -115,6 +115,19 @@ input.sec-rename { display: inline-block; max-width: 200px; font-size: inherit; 
 .la-day.la-past { opacity: 0.4; }
 .la-day.la-today { border-color: var(--accent); }
 .la-date { font-weight: 700; color: var(--text2); font-size: 9.5px; text-transform: uppercase; margin-bottom: 1px; }
+.cyc { color: #ff5ca8; font-weight: 800; } /* unlabeled by design */
+/* wind & waves — glanceable boxes; amber >12kt, red >15kt */
+.surf-row { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 5px; }
+.surf-hrow { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; margin-top: 4px; }
+.surf-hlbl { font-size: 10px; font-weight: 700; text-transform: uppercase; color: var(--text3); min-width: 44px; }
+.surf-d { background: var(--card2); border: 1px solid var(--border); border-radius: 5px; padding: 3px 6px;
+  font-size: 11px; text-align: center; min-width: 58px; font-variant-numeric: tabular-nums; }
+.surf-d.wA { background: rgba(255, 170, 0, 0.16); border-color: rgba(255, 170, 0, 0.5); }
+.surf-d.wR { background: rgba(255, 70, 70, 0.18); border-color: rgba(255, 70, 70, 0.55); }
+.surf-lbl { font-size: 9px; text-transform: uppercase; color: var(--text3); font-weight: 700; }
+.surf-w { font-weight: 650; }
+.surf-v { font-size: 10px; color: var(--text2); }
+.surf-ar { display: inline-block; font-size: 10px; }
 .la-ev { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text); line-height: 1.35; }
 .la-ev .la-t { color: var(--text3); font-variant-numeric: tabular-nums; }
 .la-ev.la-act { color: var(--violet); } /* agent-scanned activity events */
@@ -538,6 +551,11 @@ details summary { cursor: pointer; color: var(--text2); font-size: 12.5px; paddi
 <div id="signals" class="card" style="margin-top:4px"><div class="empty">Loading signals…</div></div></details>
 </section>
 
+<section data-sec="surf">
+<h2><span data-sec-title>Wind &amp; waves</span> <span class="muted" style="font-size:12px" id="surf-spot"></span></h2>
+<div class="card" id="surf"><div class="empty">Loading forecast…</div></div>
+</section>
+
 <section data-sec="news">
 <h2><span data-sec-title>News</span> <span class="muted" id="news-ts"></span></h2>
 <h2 id="summaries-head" style="display:none;margin-top:0">News Summaries <span class="muted" id="summaries-meta"></span></h2>
@@ -660,7 +678,7 @@ async function saveLinks() {
     box.querySelector('.lk-url').focus();
   };
 })();
-const SEC_DEFS = { links: 'Links', habits: 'Habits', brief: 'Agent brief', today: 'Today', todo: 'Task Lists', jlists: 'Journal Lists', cinote: 'Note to CI', agents: 'Agent Stable', files: 'File manager', completed: 'Completed', media: 'Reading queue', markets: 'Markets', signals: 'Market signals', news: 'News', week: 'Week ahead' };
+const SEC_DEFS = { links: 'Links', habits: 'Habits', brief: 'Agent brief', today: 'Today', todo: 'Task Lists', jlists: 'Journal Lists', cinote: 'Note to CI', agents: 'Agent Stable', files: 'File manager', completed: 'Completed', media: 'Reading queue', markets: 'Markets', signals: 'Market signals', surf: 'Wind & waves', news: 'News', week: 'Week ahead' };
 let appSettings = { sections: {}, quadrants: {}, calendars: [] };
 function setSecTitle(el, title) { // replace only the text node — keep the ＋/meta spans inside headings
   const n = [...el.childNodes].find(x => x.nodeType === 3 && x.nodeValue.trim());
@@ -769,6 +787,9 @@ function cfgToggle() {
     <div class="tiny muted" style="margin-bottom:3px">Calendar (multi-day events) and Locations-of-interest always run. Gmail (flight/train/hotel confirmations) needs a one-time consent:
       ${caps.gmail ? '<b style="color:var(--green)">connected</b> · <a href="/auth/gmail/disconnect">disconnect</a>' : '<a href="/auth/gmail/connect" target="_blank">connect Gmail →</a>'}
       · <a href="#" id="cfg-loc-scan">rescan now</a></div>
+    <div class="cfg-head"><span class="cyc">?</span></div>
+    <div class="cfg-row"><input type="date" id="cfg-cyc-date" value="${esc(appSettings.cycle?.lastStart || '')}">
+      <input type="number" id="cfg-cyc-len" min="15" max="60" value="${+(appSettings.cycle?.length) || 28}" style="width:52px"><span class="tiny muted">d · clear the date to turn off</span></div>
     <div class="cfg-row" style="margin-top:8px"><button id="cfg-save"><b>Save & reload</b></button><button id="cfg-close">Cancel</button></div>`;
   const wire = () => {
     p.querySelectorAll('.cfg-up, .cfg-dn').forEach(b => b.onclick = () => {
@@ -825,7 +846,9 @@ function cfgToggle() {
       return v ? { [v.startsWith('http') ? 'url' : 'id']: v, on: row.querySelector('.cfg-con').checked } : null;
     }).filter(Boolean);
     const calendarLookahead = p.querySelector('#cfg-lookahead') ? p.querySelector('#cfg-lookahead').value : (appSettings.calendarLookahead || '');
-    api('/api/settings', { method: 'POST', body: JSON.stringify({ settings: { sections, quadrants, calendars, calendarLookahead } }) })
+    const cycDate = ($('cfg-cyc-date') || {}).value || '';
+    const cycle = cycDate ? { lastStart: cycDate, length: +($('cfg-cyc-len') || {}).value || 28 } : null;
+    api('/api/settings', { method: 'POST', body: JSON.stringify({ settings: { sections, quadrants, calendars, calendarLookahead, cycle } }) })
       .then(r => { if (r && r.error) { toast(r.error); return; } location.reload(); })
       .catch(e => toast(e.message));
   };
@@ -1969,6 +1992,57 @@ function editLocationBarText(id) {
   input.onkeydown = e => { if (e.key === 'Enter') finish(true); if (e.key === 'Escape') finish(false); e.stopPropagation(); };
   input.onblur = () => finish(true);
 }
+// ---------- cycle window: pink "?" on the 5 days before the predicted start (no label by design) ----------
+function cycDates() {
+  const c = appSettings.cycle;
+  if (!c || !c.lastStart) return new Set();
+  const len = (+c.length || 28) * 86400000;
+  let t = Date.parse(c.lastStart + 'T12:00:00');
+  if (!isFinite(t)) return new Set();
+  const today0 = new Date(); today0.setHours(12, 0, 0, 0);
+  while (t < today0.getTime()) t += len; // roll forward to the next predicted start
+  const p2 = n => String(n).padStart(2, '0');
+  const iso = d => `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
+  const s = new Set();
+  for (let i = 1; i <= 5; i++) s.add(iso(new Date(t - i * 86400000)));
+  return s;
+}
+function markCycle() { // "?" beside Today (when today is in the window) and Agent brief (any of next 5 days)
+  const set = cycDates();
+  const p2 = n => String(n).padStart(2, '0');
+  const isoPlus = k => { const d = new Date(); d.setDate(d.getDate() + k); return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`; };
+  const put = (sel, on) => {
+    const el = document.querySelector(sel); if (!el) return;
+    const had = el.querySelector('.cyc');
+    if (on && !had) el.insertAdjacentHTML('beforeend', ' <span class="cyc">?</span>');
+    if (!on && had) had.remove();
+  };
+  put('section[data-sec="today"] [data-sec-title]', set.has(isoPlus(0)));
+  put('section[data-sec="brief"] [data-sec-title]', [0, 1, 2, 3, 4].some(k => set.has(isoPlus(k))));
+}
+// ---------- wind & waves (home break, config-keyed) ----------
+function loadSurf() {
+  api('/api/surf').then(d => {
+    const el = $('surf'); if (!el) return;
+    const lbl = $('surf-spot'); if (lbl && d && d.spot) lbl.textContent = d.spot;
+    if (d && d.unconfigured) { el.innerHTML = `<div class="empty">${esc(d.hint)}</div>`; return; }
+    if (!d || d.error || !(d.daily || []).length) { el.innerHTML = `<div class="empty">${esc((d && d.error) || 'forecast unavailable')}</div>`; return; }
+    const cls = w => w > 15 ? ' wR' : w > 12 ? ' wA' : '';
+    const arrow = dir => dir == null ? '' : `<span class="surf-ar" style="transform:rotate(${(dir + 180) % 360}deg)">↑</span>`;
+    const wv = x => x.wave != null ? `${x.wave.toFixed(1)}m·${Math.round(x.period || 0)}s` : '—';
+    const dayLbl = iso => { const d = new Date(iso + 'T12:00:00'); return d.toLocaleDateString('en-GB', { weekday: 'short' }) + ' ' + d.getDate(); };
+    const daily = d.daily.map(x => `<div class="surf-d${cls(x.wind)}">
+        <div class="surf-lbl">${esc(dayLbl(x.date))}</div>
+        <div class="surf-w">${x.wind != null ? Math.round(x.wind) + 'kt' : '—'} ${arrow(x.dir)}</div>
+        <div class="surf-v">${wv(x)}</div></div>`).join('');
+    const hourly = (d.hours || []).map(day => `<div class="surf-hrow"><span class="surf-hlbl">${esc(dayLbl(day.date))}</span>` +
+      day.slots.map(x => `<div class="surf-d surf-h${cls(x.wind)}">
+        <div class="surf-lbl">${String(x.h).padStart(2, '0')}h</div>
+        <div class="surf-w">${Math.round(x.wind)}kt ${arrow(x.dir)}</div>
+        <div class="surf-v">${wv(x)}</div></div>`).join('') + '</div>').join('');
+    el.innerHTML = `<div class="surf-row">${daily}</div>${hourly}`;
+  }).catch(() => { const el = $('surf'); if (el) el.innerHTML = '<div class="empty">forecast unreachable</div>'; });
+}
 function renderLookahead() {
   const today0 = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   let el = document.getElementById('lookahead');
@@ -2023,7 +2097,8 @@ function renderLookahead() {
     const d = new Date(from.getTime() + i * 86400000);
     days.push({ d, past: d < today0, isToday: d.getTime() === today0.getTime() });
   }
-  const dateLbl = d => `${d.toLocaleDateString('en-GB', { weekday: 'short' })} ${d.getDate()}`;
+  const cycSet = cycDates();
+  const dateLbl = d => `${d.toLocaleDateString('en-GB', { weekday: 'short' })} ${d.getDate()}${cycSet.has(isoOf(d)) ? ' <span class="cyc">?</span>' : ''}`;
   const narrow = window.matchMedia('(max-width: 700px)').matches;
 
   if (narrow) {
@@ -3223,7 +3298,9 @@ api('/api/settings').then(s => {
   if (sl && s && s.sheetUrl) { sl.href = s.sheetUrl; sl.style.display = ''; }
   applySettings(); if (allTasks.length) renderMatrix();
   renderLookahead(); // settings may land after the calendar fetch
+  markCycle();       // pink "?" on Today / Agent brief when the window overlaps
 }).catch(() => {});
+loadSurf();
 loadLocation();
 $('list-add-btn').onclick = quadAddList;
 // capability-driven degradation: with no LLM anywhere (no CLI, no API key, no other tier

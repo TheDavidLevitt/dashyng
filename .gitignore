@@ -35,3 +35,5 @@ public/junglefarm/
 data/journal-lists.json
 data/monitor-snapshot.json
 data/weather-locations.json
+data/cycle.json
+data/urgent-state.json

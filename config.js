@@ -51,6 +51,13 @@ module.exports = {
   // Cloud Run carries these as env vars, the Mac in config-local.json
   oauthClientId: pick('oauthClientId', 'GOOGLE_OAUTH_CLIENT_ID', ''),
   oauthClientSecret: pick('oauthClientSecret', 'GOOGLE_OAUTH_CLIENT_SECRET', ''),
+  // Google AI Studio FREE tier (rate-limited, may train on data → non-personal modules only)
+  geminiFreeKey: pick('geminiFreeKey', 'GEMINI_API_KEY', ''),
+  geminiFreeModel: pick('geminiFreeModel', 'GEMINI_FREE_MODEL', 'gemini-2.5-flash'),
+  // Wind & waves widget: the owner's home surf/kite break. '' = section shows a setup hint.
+  surfSpotName: pick('surfSpotName', 'DASHBOARD_SURF_SPOT', ''),
+  surfSpotLat: Number(pick('surfSpotLat', 'DASHBOARD_SURF_LAT', 0)) || 0,
+  surfSpotLon: Number(pick('surfSpotLon', 'DASHBOARD_SURF_LON', 0)) || 0,
   // CI feedback sink + orchestrator learnings source ('' = off) — host-side files, never shipped
   feedbackFile: pick('feedbackFile', 'DASHBOARD_FEEDBACK_FILE', ''),
   learningsFile: pick('learningsFile', 'DASHBOARD_LEARNINGS_FILE', ''),
