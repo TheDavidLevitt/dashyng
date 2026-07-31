@@ -232,6 +232,10 @@ input.loc-bar-input { font-size: 10.5px; width: 100%; padding: 0 3px; background
 .q-due { color: var(--red); font-weight: 600; font-size: 10.5px; margin-left: 4px; }
 .q-due.future { color: var(--text2); font-weight: 400; }
 .q-note { color: var(--text3); font-size: 11px; }
+.q-recur, .q-doer, .q-cmt { font-size: 10px; margin-left: 3px; cursor: help; }
+.q-doer { color: var(--amber); }
+.q-cmt { color: var(--text2); }
+.recur-row { align-items: center; }
 .q-btn { background: none; border: 1px solid var(--border); border-radius: 3px; color: var(--text2);
   cursor: pointer; padding: 0 4px; font-size: 10.5px; line-height: 15px; flex-shrink: 0; opacity: 0.45; }
 .q-task:hover .q-btn, .q-btn:focus { opacity: 1; }
@@ -1108,7 +1112,10 @@ function taskHtml(t, opts) {
   const star = opts.mon ? `<button class="q-btn sal-toggle${sal ? ' on' : ''}" title="${sal ? 'High salience — changes push to your journal' : 'Mark high-salience (push changes to your journal)'}">${sal ? '★' : '☆'}</button>` : '';
   return `<div class="q-task ${opts.child ? 'child' : ''}${sal ? ' q-salient' : ''}" draggable="true" data-id="${esc(t.ID)}" data-q="${esc(normQ(t.Quadrant))}" data-parent="${esc(opts.child ? t.Parent : '')}">
     ${toggle}${bullet}
-    <span class="q-body">${taskBodyHtml(t.Task)}${cnt}${srcBadge(t.Source)}${dueHtml(t)}${(() => { const rc = recurOf(t); return rc ? ` <span class="q-recur" title="${esc(explainRecur(rc))}">🔁</span>` : ''; })()}${note}</span>
+    <span class="q-body">${taskBodyHtml(t.Task)}${cnt}${srcBadge(t.Source)}${dueHtml(t)}${(() => { const rc = recurOf(t); return rc ? ` <span class="q-recur" title="${esc(explainRecur(rc))}">🔁</span>` : ''; })()}${
+    // shared-tab lists: the doer's "reported done" flag and their comments ride along
+    t.doerDone ? ' <span class="q-doer" title="Reported done by the doer — check it off yourself to close it">✋</span>' : ''}${
+    (t.comments || []).length ? ` <span class="q-cmt" title="${esc(t.comments.map(c => `${c.from}: ${c.text}`).join('\n'))}">💬${t.comments.length}</span>` : ''}${note}</span>
     ${star}
     <button class="q-btn move" title="Move / group">⇄</button>
     <button class="q-btn done" title="Mark done">✓</button>
@@ -1428,6 +1435,7 @@ function attachHandlers() {
         `<label style="display:inline-flex;align-items:center;gap:2px;font-size:10px;cursor:pointer"><input type="checkbox" data-d="${i}"${p0 && p0.days.includes(i) ? ' checked' : ''}>${RECUR_LABELS[i].slice(0, 2)}</label>`).join('')
         + ` <span class="tiny muted">every</span> <input type="number" data-n min="1" max="17" value="${p0 ? p0.n : 1}" style="width:36px;background:var(--bg2);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:11px"> <span class="tiny muted">wk</span>`
         + ` <button data-exp>explain</button><button data-save style="color:var(--green)">save</button>${cur ? '<button data-clear style="color:var(--red)">clear</button>' : ''}`
+        + ` <input data-desc placeholder="describe it — e.g. every tuesday and alternating thursdays" style="flex:1;min-width:170px;background:var(--bg2);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:11px;padding:1px 5px"><button data-parse>describe</button>`
         + ` <span class="tiny muted" data-msg style="flex-basis:100%">${cur ? esc(explainRecur(cur)) : ''}</span>`;
       row.after(rr);
       const readRule = () => {
@@ -1435,6 +1443,27 @@ function attachHandlers() {
         const n = Math.max(1, Math.min(17, +rr.querySelector('[data-n]').value || 1));
         return days.length ? { parts: [{ days, n }], anchor: (cur && cur.anchor) || new Date().toISOString().slice(0, 10) } : null;
       };
+      // describe: plain English → rule (deterministic grammar first, LLM for the rest);
+      // the parsed rule lands in the checkboxes so it can be eyeballed before saving
+      // the editor holds ONE cadence: take the first part's n and every day that shares it
+      const applyRule = r => {
+        const n = r.parts[0].n;
+        const days = new Set(r.parts.filter(p => p.n === n).flatMap(p => p.days));
+        rr.querySelectorAll('[data-d]').forEach(c => { c.checked = days.has(+c.dataset.d); });
+        rr.querySelector('[data-n]').value = n;
+      };
+      const doParse = async () => {
+        const text = rr.querySelector('[data-desc]').value.trim();
+        if (!text) return;
+        const msg = rr.querySelector('[data-msg]');
+        msg.textContent = 'parsing…';
+        const r = await api('/api/recur/parse', { method: 'POST', body: JSON.stringify({ text }) });
+        if (!r || !r.ok || !r.rule) { msg.textContent = (r && r.error) || 'could not parse that'; return; }
+        applyRule(r.rule);
+        msg.textContent = `${explainRecur(r.rule)} — next: ${nextRecurClient(r.rule)}${r.by === 'llm' ? ' (LLM)' : ''} · press save`;
+      };
+      rr.querySelector('[data-parse]').onclick = doParse;
+      rr.querySelector('[data-desc]').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); doParse(); } };
       rr.querySelector('[data-exp]').onclick = () => {
         const r = readRule();
         rr.querySelector('[data-msg]').textContent = r ? `${explainRecur(r)} — next: ${nextRecurClient(r)}` : 'pick at least one day';

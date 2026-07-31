@@ -761,7 +761,8 @@ app.get('/api/health', asyncRoute(async (req, res) => {
 
 app.get('/api/tasks', asyncRoute(async (req, res) => {
   const { rows } = await readTodoTab();
-  res.json({ tasks: rows });
+  // Task Lists bound to a shared tab (settings.quadrants[k].share) contribute their rows
+  res.json({ tasks: [...rows, ...await sharedTasksAll()] });
 }));
 
 // Per-list outbound hook (⚙): a task list can carry a webhook URL — create/done/update
@@ -860,6 +861,16 @@ function parseRecurTag(tags) {
   }).filter(Boolean);
   return parts.length ? { parts, anchor: /^\d{4}-\d{2}-\d{2}$/.test(anchor || '') ? anchor : null } : null;
 }
+// Days sharing a cadence belong in ONE part: "monday and wednesday" is mo.we/1, not
+// mo/1+we/1. Both mean the same schedule, but only the merged form round-trips through the
+// single-cadence editor without dropping days.
+function recurToken(parts) {
+  const byN = new Map();
+  for (const p of parts) byN.set(p.n, [...(byN.get(p.n) || []), ...p.days]);
+  return [...byN.entries()]
+    .map(([n, days]) => [...new Set(days)].sort((a, b) => ((a + 6) % 7) - ((b + 6) % 7)).map(i => RECUR_DAYS[i]).join('.') + '/' + n)
+    .join('+');
+}
 function nextRecurDate(rule, fromIso) {
   const from = new Date((fromIso || today()) + 'T12:00:00Z');
   if (isNaN(from)) return '';
@@ -893,9 +904,37 @@ function parseScheduleBracket(text) {
     if (days.length) parts.push({ days: [...new Set(days)], n });
   }
   if (!parts.length) return null;
-  const token = parts.map(p => p.days.map(i => RECUR_DAYS[i]).join('.') + '/' + p.n).join('+') + '@' + today();
+  const token = recurToken(parts) + '@' + today();
   return { stripped: String(text).replace(m[0], '').trim() || String(text).trim(), token };
 }
+
+// "describe" in the repeat editor: plain English → a recur= token. The deterministic
+// grammar above answers first (free, instant, exact); only what it can't parse goes to an
+// LLM, which must reply with the same token shape and is validated before use — a model
+// can therefore never invent a schedule the parser wouldn't accept.
+app.post('/api/recur/parse', asyncRoute(async (req, res) => {
+  const text = String((req.body || {}).text || '').trim().slice(0, 200);
+  if (!text) return res.status(400).json({ error: 'text required' });
+  const direct = parseScheduleBracket('x [' + text + ']');
+  if (direct) return res.json({ ok: true, token: direct.token, rule: parseRecurTag('recur=' + direct.token), by: 'grammar' });
+  const prompt = `Convert this recurrence description into ONE token and output NOTHING else.
+Format: <days>/<everyNweeks>[+<days>/<n>...]
+- days: dot-joined from mo tu we th fr sa su
+- N: 1 = every week, 2 = every other week, 3 = every third week...
+- combine differing cadences with +
+Examples:
+"every tuesday and alternating thursdays" -> tu/1+th/2
+"weekdays" -> mo.tu.we.th.fr/1
+"first thing every other monday and friday" -> mo.fr/2
+Description: ${JSON.stringify(text)}`;
+  let raw = '';
+  try { raw = await runClaude(prompt, { module: 'recur-parse', timeoutMs: 25000 }); } catch (e) {}
+  const m = String(raw || '').match(/[a-z.]+\/\d+(?:\+[a-z.]+\/\d+)*/i);
+  const parsed = m ? parseRecurTag('recur=' + m[0].toLowerCase() + '@' + today()) : null;
+  if (!parsed) return res.json({ ok: false, error: "couldn't turn that into a repeat rule — try e.g. \"every tuesday and alternating thursdays\"" });
+  const token = recurToken(parsed.parts) + '@' + today();
+  res.json({ ok: true, token, rule: parseRecurTag('recur=' + token), by: 'llm' });
+}));
 
 app.post('/api/tasks', asyncRoute(async (req, res) => {
   const { task, quadrant, due, notes, scope, owner, tags, source } = req.body || {};
@@ -907,6 +946,17 @@ app.post('/api/tasks', asyncRoute(async (req, res) => {
     taskText = sched.stripped;
     taskTags = (taskTags ? taskTags + ',' : '') + 'recur=' + sched.token;
     if (!taskDue) taskDue = nextRecurDate(parseRecurTag('recur=' + sched.token), today());
+  }
+  // shared-tab-backed list: the entry belongs on the family sheet, not the Todo tab
+  const bind = sharedBindOfKey(quadrant);
+  if (bind) {
+    const tab = bind.cfg.tab || bind.slug;
+    const uid = crypto.randomUUID();
+    const row = await sharedListAddItem(bind.cfg.sheetId, tab, taskText, { due: taskDue, tags: taskTags, uid });
+    const task = { ID: `sh:${bind.slug}:${row}`, Task: taskText, Quadrant: bind.key, Status: 'Open',
+      Due: taskDue, Tags: taskTags, Source: 'shared', Owner: bind.cfg.name || '', comments: [] };
+    fireListHook('created', task);
+    return res.json({ ok: true, task });
   }
   const { headers, headerRow, rows } = await readTodoTab();
   const id = crypto.randomUUID();
@@ -938,6 +988,54 @@ app.patch('/api/tasks/:id', asyncRoute(async (req, res) => {
   const changes = {};
   for (const k of allowed) if (req.body[k] !== undefined) changes[k] = req.body[k];
   if (!Object.keys(changes).length) return res.status(400).json({ error: 'no recognized fields' });
+  const sh = parseSharedId(req.params.id);
+  // Cross-store moves (drag & drop between a normal list and a shared-tab list) must move
+  // the ROW, not just relabel it — otherwise a task dragged into a shared list would look
+  // shared here and be invisible to the other party.
+  const dest = changes.Quadrant !== undefined ? sharedBindOfKey(changes.Quadrant) : undefined;
+  if (changes.Quadrant !== undefined && (sh || dest) && !(sh && dest && dest.slug === sh.slug)) {
+    if (sh && !dest) { // shared → Todo tab
+      const { items } = await sharedListRead(sh.cfg.sheetId, sh.tab);
+      const it = items.find(i => i.row === sh.row);
+      if (!it) return res.status(404).json({ error: 'item not found' });
+      const { headers, headerRow, rows } = await readTodoTab();
+      const id = crypto.randomUUID();
+      const rowObj = { Task: changes.Task || it.text, Quadrant: changes.Quadrant, Scope: 'Personal', Owner: CFG.owner,
+        Due: changes.Due !== undefined ? changes.Due : it.due, Status: 'Open', Created: today(), Notes: '',
+        Source: WRITE_SOURCE, Updated: nowIso(), Tags: changes.Tags !== undefined ? changes.Tags : it.tags, ID: id, Order: '', Parent: '' };
+      const lastRow = rows.length ? Math.max(...rows.map(r => r._row)) : headerRow;
+      await store.values.update({ spreadsheetId: TODO_SHEET_ID, range: `'${TODO_TAB}'!A${lastRow + 1}`,
+        valueInputOption: 'RAW', requestBody: { values: [headers.map(h => rowObj[h] !== undefined ? rowObj[h] : '')] } });
+      await sharedListClearRow(sh.cfg.sheetId, sh.tab, sh.row);
+      fireListHook('updated', rowObj);
+      return res.json({ ok: true, task: rowObj, moved: 'to-todo' });
+    }
+    const src = sh ? null : (await readTodoTab()).rows.find(r => r.ID === req.params.id);
+    if (dest && (src || sh)) { // Todo tab (or another shared tab) → shared tab
+      let text, due, tags;
+      if (sh) {
+        const { items } = await sharedListRead(sh.cfg.sheetId, sh.tab);
+        const it = items.find(i => i.row === sh.row);
+        if (!it) return res.status(404).json({ error: 'item not found' });
+        ({ text, due, tags } = { text: it.text, due: it.due, tags: it.tags });
+      } else ({ text, due, tags } = { text: src.Task, due: src.Due, tags: src.Tags });
+      const tab = dest.cfg.tab || dest.slug;
+      const row = await sharedListAddItem(dest.cfg.sheetId, tab, changes.Task || text,
+        { due: changes.Due !== undefined ? changes.Due : due, tags: changes.Tags !== undefined ? changes.Tags : tags, uid: crypto.randomUUID() });
+      if (sh) await sharedListClearRow(sh.cfg.sheetId, sh.tab, sh.row);
+      else await updateTaskById(req.params.id, { Status: 'archived' });
+      const task = { ID: `sh:${dest.slug}:${row}`, Task: changes.Task || text, Quadrant: dest.key, Status: 'Open', Source: 'shared' };
+      fireListHook('updated', task);
+      return res.json({ ok: true, task, moved: 'to-shared' });
+    }
+  }
+  if (sh) { // shared-tab row: 'archived' means remove the entry, everything else is a field write
+    if (changes.Status === 'archived') await sharedListClearRow(sh.cfg.sheetId, sh.tab, sh.row);
+    else await sharedListSetTask(sh.cfg.sheetId, sh.tab, sh.row, changes);
+    const task = { ID: req.params.id, ...changes };
+    fireListHook('updated', task);
+    return res.json({ ok: true, task });
+  }
   const updated = await updateTaskById(req.params.id, changes);
   if (!updated) return res.status(404).json({ error: 'task not found: ' + req.params.id });
   fireListHook('updated', updated);
@@ -945,6 +1043,22 @@ app.patch('/api/tasks/:id', asyncRoute(async (req, res) => {
 }));
 
 app.post('/api/tasks/:id/done', asyncRoute(async (req, res) => {
+  const sh = parseSharedId(req.params.id);
+  if (sh) { // shared-tab row: recurring → advance Due (stays open); otherwise owner-check it
+    const { items } = await sharedListRead(sh.cfg.sheetId, sh.tab);
+    const it = items.find(i => i.row === sh.row);
+    if (!it) return res.status(404).json({ error: 'item not found' });
+    const rule = parseRecurTag(it.tags);
+    if (rule) {
+      const next = nextRecurDate(rule, today());
+      await sharedListSetTask(sh.cfg.sheetId, sh.tab, sh.row, { Due: next });
+      return res.json({ ok: true, task: { ID: req.params.id, Due: next }, recurred: true, nextDue: next });
+    }
+    await sharedListSetTask(sh.cfg.sheetId, sh.tab, sh.row, { Status: 'done' });
+    const task = { ID: req.params.id, Task: it.text, Quadrant: sh.slug, Status: 'done' };
+    fireListHook('done', task);
+    return res.json({ ok: true, task });
+  }
   // recurring task: the check means "done for this occurrence" — stay open, advance Due
   const { rows } = await readTodoTab();
   const cur = rows.find(r => r.ID === req.params.id);
@@ -5070,17 +5184,23 @@ async function elistsPayload() {
     items: l.items.map(i => ({ text: i.text, done: i.mark === 'Y', doer: i.mark === 'D',
       comments: comments.filter(c => c.List === l.slug && c.Item === i.text).map(c => ({ from: c.From, text: c.Text, at: c.At })) })),
   }));
-  // shared lists living on an external sheet (family datastore) join the payload
+  // shared lists living on an external sheet (family datastore) join the payload —
+  // unless promoted to a Task List (quadrants[k].share), which owns them instead
+  const promoted = new Set(sharedBinds().map(b => b.slug));
   for (const [slug, cfg] of Object.entries(loadSettings().listShares || {})) {
-    if (!cfg || !cfg.sheetId) continue;
-    try {
-      const { items, comments: cms } = await sharedListRead(cfg.sheetId, cfg.tab || slug);
-      out.push({ id: 'jl:' + slug, heading: cfg.label || (cfg.name ? cfg.name + ' tasks' : slug), persistent: true, shared: true,
-        items: items.map(i => ({ text: i.text, done: i.mark === 'Y', doer: i.mark === 'D',
-          comments: cms.filter(c => c.Item === i.text || !c.Item).map(c => ({ from: c.From, text: c.Text, at: c.At })) })) });
-    } catch (e) {}
+    if (!cfg || !cfg.sheetId || promoted.has(slug)) continue;
+    try { out.push(await sharedListView(slug, cfg)); } catch (e) {}
   }
   return out;
+}
+// One shared list in the Ephemeral-payload shape. Kept separate from elistsPayload so the
+// EXTERNAL token API can serve a list whether or not it has been promoted to a Task List —
+// promotion is an owner-side display choice and must never change the published contract.
+async function sharedListView(slug, cfg) {
+  const { items, comments } = await sharedListRead(cfg.sheetId, cfg.tab || slug);
+  return { id: 'jl:' + slug, heading: cfg.label || (cfg.name ? cfg.name + ' tasks' : slug), persistent: true, shared: true,
+    items: items.map(i => ({ text: i.text, done: i.mark === 'Y', doer: i.mark === 'D',
+      comments: comments.filter(c => c.Item === i.text || !c.Item).map(c => ({ from: c.From, text: c.Text, at: c.At })) })) };
 }
 app.get('/api/journal-lists', asyncRoute(async (req, res) => res.json({ lists: await elistsPayload() })));
 app.post('/api/journal-lists/scan', asyncRoute(async (req, res) => {
@@ -5131,30 +5251,54 @@ app.post('/api/journal-lists/:id/item', asyncRoute(async (req, res) => {
 // listShares[slug] may carry {sheetId, tab}: the list then lives on that sheet's tab —
 // items in A:B (Item | done/'D'/'Y'), comments log in D:G (At | Item | From | Text). One
 // tab = one list + its conversation, shareable sheet-level with family members.
+// Columns H:J (Due | Tags | ID) carry task metadata so a shared list can be a full Task
+// List — recurrence and due dates per entry. The EXTERNAL contract is A:B + D:G only, so
+// adding these can never disturb a helper agent reading the list.
 async function sharedListRead(sheetId, tab) {
-  const r = await store.values.get({ spreadsheetId: sheetId, range: `'${tab}'!A1:G300` }).catch(() => null);
+  const r = await store.values.get({ spreadsheetId: sheetId, range: `'${tab}'!A1:J300` }).catch(() => null);
   const grid = (r && r.data.values) || [];
   const items = [], comments = [];
   for (let i = 1; i < grid.length; i++) {
     const row = grid[i] || [];
     const text = String(row[0] || '').trim();
-    if (text) items.push({ row: i + 1, text, mark: String(row[1] || '').trim().toUpperCase() });
+    if (text) items.push({ row: i + 1, text, mark: String(row[1] || '').trim().toUpperCase(),
+      due: String(row[7] || '').trim(), tags: String(row[8] || '').trim(), uid: String(row[9] || '').trim() });
     if (String(row[3] || '').trim() || String(row[6] || '').trim())
       comments.push({ At: row[3] || '', Item: row[4] || '', From: row[5] || '', Text: row[6] || '' });
   }
   return { items, comments };
 }
 async function sharedListEnsureHeaders(sheetId, tab) {
-  await store.values.update({ spreadsheetId: sheetId, range: `'${tab}'!A1:G1`, valueInputOption: 'RAW',
-    requestBody: { values: [['Item', 'done', '', 'At', 'Item', 'From', 'Text']] } }).catch(() => {});
+  await store.values.update({ spreadsheetId: sheetId, range: `'${tab}'!A1:J1`, valueInputOption: 'RAW',
+    requestBody: { values: [['Item', 'done', '', 'At', 'Item', 'From', 'Text', 'Due', 'Tags', 'ID']] } }).catch(() => {});
 }
 async function sharedListSetMark(sheetId, tab, row, mark) {
   await store.values.update({ spreadsheetId: sheetId, range: `'${tab}'!B${row}`, valueInputOption: 'RAW', requestBody: { values: [[mark]] } });
 }
-async function sharedListAddItem(sheetId, tab, text) {
+async function sharedListAddItem(sheetId, tab, text, meta) {
   const { items } = await sharedListRead(sheetId, tab);
   const row = (items.length ? Math.max(...items.map(i => i.row)) : 1) + 1;
   await store.values.update({ spreadsheetId: sheetId, range: `'${tab}'!A${row}`, valueInputOption: 'RAW', requestBody: { values: [[text]] } });
+  if (meta) await store.values.update({ spreadsheetId: sheetId, range: `'${tab}'!H${row}:J${row}`, valueInputOption: 'RAW',
+    requestBody: { values: [[meta.due || '', meta.tags || '', meta.uid || crypto.randomUUID()]] } });
+  return row;
+}
+// write named task fields onto a shared row (Task→A, done→B, Due→H, Tags→I)
+async function sharedListSetTask(sheetId, tab, row, changes) {
+  const data = [];
+  const cell = (col, v) => data.push({ range: `'${tab}'!${col}${row}`, values: [[v]] });
+  if (changes.Task !== undefined) cell('A', changes.Task);
+  if (changes.Status !== undefined) cell('B', changes.Status === 'done' ? 'Y' : '');
+  if (changes.Due !== undefined) cell('H', changes.Due);
+  if (changes.Tags !== undefined) cell('I', changes.Tags);
+  if (data.length) await store.values.batchUpdate({ spreadsheetId: sheetId, requestBody: { valueInputOption: 'RAW', data } });
+}
+// remove = clear the item's own cells; the comment log in D:G is history and stays
+async function sharedListClearRow(sheetId, tab, row) {
+  await store.values.batchUpdate({ spreadsheetId: sheetId, requestBody: { valueInputOption: 'RAW', data: [
+    { range: `'${tab}'!A${row}:B${row}`, values: [['', '']] },
+    { range: `'${tab}'!H${row}:J${row}`, values: [['', '', '']] },
+  ] } });
 }
 async function sharedListAddComment(sheetId, tab, item, from, text) {
   const { items, comments } = await sharedListRead(sheetId, tab);
@@ -5164,6 +5308,42 @@ async function sharedListAddComment(sheetId, tab, item, from, text) {
 }
 const sharedCfgOf = slug => { const v = (loadSettings().listShares || {})[slug]; return v && v.sheetId ? v : null; };
 
+// ---- a Task List backed by a shared tab ----
+// settings.quadrants[key].share = <listShares slug> promotes a shared list out of Ephemeral
+// notes into a real Task List: its entries become tasks (due dates, recurrence, the ⇄/🔁
+// popover) while still living on the family sheet where the other party — and any helper
+// agent — reads them. Task IDs are positional (`sh:<slug>:<row>`), resolved at write time.
+function sharedBinds() {
+  return Object.entries(loadSettings().quadrants || {})
+    .map(([key, q]) => (q && q.share && sharedCfgOf(q.share)) ? { key, slug: q.share, cfg: sharedCfgOf(q.share) } : null)
+    .filter(Boolean);
+}
+const sharedBindOfKey = key => sharedBinds().find(b => b.key === String(key || '').toUpperCase().trim() || b.key === key);
+function parseSharedId(id) {
+  const m = String(id || '').match(/^sh:([^:]+):(\d+)$/);
+  if (!m) return null;
+  const cfg = sharedCfgOf(m[1]);
+  return cfg ? { slug: m[1], cfg, tab: cfg.tab || m[1], row: +m[2] } : null;
+}
+// shared rows rendered in the Todo-row shape the whole app already speaks
+async function sharedTasksFor(bind) {
+  const tab = bind.cfg.tab || bind.slug;
+  const { items, comments } = await sharedListRead(bind.cfg.sheetId, tab);
+  return items.map(i => ({
+    ID: `sh:${bind.slug}:${i.row}`, Task: i.text, Quadrant: bind.key,
+    Status: i.mark === 'Y' ? 'done' : 'Open', Due: i.due || '', Tags: i.tags || '',
+    Scope: 'Shared', Owner: bind.cfg.name || '', Notes: '', Created: '', Updated: '',
+    Source: 'shared', Order: '', Parent: '',
+    doerDone: i.mark === 'D',
+    comments: comments.filter(c => c.Item === i.text).map(c => ({ from: c.From, text: c.Text, at: c.At })),
+  }));
+}
+async function sharedTasksAll() {
+  const out = [];
+  for (const b of sharedBinds()) { try { out.push(...await sharedTasksFor(b)); } catch (e) {} }
+  return out;
+}
+
 // ---- shared-list bridge: token-authed access for EXTERNAL helpers/agents ----
 // settings.listShares = { slug: { token, name } } (owner-managed). Contract: the external
 // side can READ, mark an item doer-complete ('D' — the owner still checks it off), or leave
@@ -5172,7 +5352,8 @@ const shareOf = token => Object.entries(loadSettings().listShares || {}).find(([
 app.get('/api/elists/ext/:token', asyncRoute(async (req, res) => {
   const hit = shareOf(String(req.params.token || ''));
   if (!hit) return res.status(404).json({ error: 'unknown share' });
-  const list = (await elistsPayload()).find(l => l.id === 'jl:' + hit[0]);
+  const cfg = sharedCfgOf(hit[0]);
+  const list = cfg ? await sharedListView(hit[0], cfg) : (await elistsPayload()).find(l => l.id === 'jl:' + hit[0]);
   if (!list) return res.status(404).json({ error: 'list inactive' });
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.json({ list: list.heading, items: list.items.map(i => ({ item: i.text, status: i.done ? 'done' : i.doer ? 'reported-complete' : 'open', comments: i.comments })) });
