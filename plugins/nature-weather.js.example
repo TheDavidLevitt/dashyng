@@ -1,0 +1,313 @@
+// 🌦 Nature & Weather — 7-day forecasts for the places that matter, plus the moulin's
+// river gauge. Locations come from two sources: PINNED (permanent, kept in this plugin's
+// synced store) and AUTO (wherever the location-tracking bars say you are or are going).
+// Toggle any location off; 📌-pin an auto one to keep it. Salient weather is surfaced to
+// the Agent Brief via the briefItems() hook. All data free / no key (Open-Meteo, Hub'Eau,
+// VigiEau). Private plugin — never ships to the stub.
+const fs = require('fs'), path = require('path');
+const OM = 'https://api.open-meteo.com/v1/forecast';
+const GEO = 'https://geocoding-api.open-meteo.com/v1/search';
+const STORE = path.join(__dirname, '..', 'data', 'weather-locations.json');
+const LOCBARS = path.join(__dirname, '..', 'data', 'location-bars-local.json');
+const CELL = "'Heartbeat'!R1"; // cross-tier sync of pinned/off state (newest-wins)
+const TTL = 30 * 60 * 1000;
+
+async function getJson(url) {
+  const c = new AbortController(); const t = setTimeout(() => c.abort(), 20000);
+  try { const r = await fetch(url, { headers: { 'User-Agent': 'dashboard-weather/1.0' }, signal: c.signal }); return r.ok ? r.json() : null; }
+  catch (e) { return null; } finally { clearTimeout(t); }
+}
+const readStore = () => { try { const j = JSON.parse(fs.readFileSync(STORE, 'utf8')); return { pinned: j.pinned || [], off: (j.off || []), geo: j.geo || {}, surf: j.surf || {}, savedAt: j.savedAt || 0 }; } catch (e) { return { pinned: [], off: [], geo: {}, surf: {}, savedAt: 0 }; } }; // pinned:[{name,lat,lon,label}], off:[name], geo:{key:{lat,lon,label}}
+function writeStore(s, ctx) {
+  s.savedAt = Date.now();
+  try { fs.writeFileSync(STORE, JSON.stringify(s)); } catch (e) {}
+  const sid = ctx && ctx.config && ctx.config.todoSheetId;
+  if (ctx && ctx.store && sid) ctx.store.values.update({ spreadsheetId: sid, range: CELL, valueInputOption: 'RAW', requestBody: { values: [[JSON.stringify(s).slice(0, 49000)]] } }).catch(() => {});
+}
+async function syncStore(ctx) { // pull a newer remote, or push a newer local
+  const sid = ctx && ctx.config && ctx.config.todoSheetId;
+  if (!ctx || !ctx.store || !sid) return readStore();
+  try {
+    const r = await ctx.store.values.get({ spreadsheetId: sid, range: CELL });
+    const raw = (((r.data.values || [[]])[0] || [])[0]) || '';
+    let remote = null; try { remote = JSON.parse(raw); } catch (e) {}
+    const local = readStore();
+    if (remote && (remote.savedAt || 0) > (local.savedAt || 0)) { try { fs.writeFileSync(STORE, JSON.stringify(remote)); } catch (e) {} return remote; }
+    return local;
+  } catch (e) { return readStore(); }
+}
+const norm = s => String(s || '').trim().toLowerCase();
+// distinct place names from the location bars over [today, +14d] — "where I am / am going"
+function autoLocations() {
+  let bars = [];
+  try { bars = (JSON.parse(fs.readFileSync(LOCBARS, 'utf8')).bars) || []; } catch (e) {}
+  const today = new Date().toISOString().slice(0, 10), horizon = new Date(Date.now() + 14 * 864e5).toISOString().slice(0, 10);
+  const seen = new Set(), out = [];
+  for (const b of bars.sort((a, c) => a.start.localeCompare(c.start))) {
+    if (b.end < today || b.start > horizon) continue;
+    const loc = String(b.location || '').trim();
+    if (!loc || loc === 'Location?' || seen.has(norm(loc))) continue;
+    seen.add(norm(loc)); out.push({ name: loc, start: b.start, end: b.end });
+  }
+  return out;
+}
+async function geocode(name, store, ctx) {
+  const k = norm(name);
+  if (store.geo[k]) return store.geo[k];
+  const g = await getJson(`${GEO}?name=${encodeURIComponent(name)}&count=1&language=en`);
+  const r = g && g.results && g.results[0];
+  if (!r) { store.geo[k] = { lat: null, lon: null, label: name }; }
+  else store.geo[k] = { lat: r.latitude, lon: r.longitude, label: [r.name, r.admin1, r.country_code].filter(Boolean).join(', ') };
+  writeStore(store, ctx);
+  return store.geo[k];
+}
+async function forecast(lat, lon) {
+  if (lat == null) return null;
+  const w = await getJson(`${OM}?latitude=${lat}&longitude=${lon}&current=temperature_2m,weather_code&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max,wind_speed_10m_max&timezone=auto&forecast_days=7`);
+  if (!w || !w.daily) return null;
+  const d = w.daily;
+  return {
+    current: w.current ? { t: w.current.temperature_2m, code: w.current.weather_code } : null,
+    days: d.time.map((date, i) => ({ date, code: d.weather_code[i], max: d.temperature_2m_max[i], min: d.temperature_2m_min[i], precip: d.precipitation_sum[i], pprob: d.precipitation_probability_max[i], wind: d.wind_speed_10m_max[i] })),
+  };
+}
+// —— lunar phase (pure computation — no API) ——
+const SYNODIC = 29.53058867, NEWMOON_REF = Date.UTC(2000, 0, 6, 18, 14) / 864e5;
+function moonPhase() {
+  const now = Date.now() / 864e5;
+  const age = ((now - NEWMOON_REF) % SYNODIC + SYNODIC) % SYNODIC;
+  const illum = (1 - Math.cos(2 * Math.PI * age / SYNODIC)) / 2;
+  const waxing = age < SYNODIC / 2;
+  const nextNew = new Date((NEWMOON_REF + Math.ceil((now - NEWMOON_REF) / SYNODIC) * SYNODIC) * 864e5);
+  const nextFull = new Date((NEWMOON_REF + (Math.floor((now - NEWMOON_REF) / SYNODIC) + 0.5 <= (now - NEWMOON_REF) / SYNODIC ? Math.floor((now - NEWMOON_REF) / SYNODIC) + 1.5 : Math.floor((now - NEWMOON_REF) / SYNODIC) + 0.5) * SYNODIC) * 864e5);
+  return { illum: Math.round(illum * 100), waxing, nextNew: nextNew.toISOString().slice(0, 10), nextFull: nextFull.toISOString().slice(0, 10) };
+}
+// —— surf spots: waves + tides (Open-Meteo Marine, free/no-key) ——
+// Known beaches get exact coords; anything else geocodes by name. Max 3 per location.
+const KNOWN_SPOTS = {}; // 'place name': { lat, lon } — pre-seeded geocodes (optional)
+const DEFAULT_SURF = {}; // 'your-place': ['Spot A', 'Spot B'] — add your own
+async function spotCoords(name, store, ctx) {
+  const k = norm(name);
+  if (KNOWN_SPOTS[k]) return KNOWN_SPOTS[k];
+  const g = await geocode(name, store, ctx);
+  return g.lat != null ? { lat: g.lat, lon: g.lon } : null;
+}
+async function marine(lat, lon) {
+  const m = await getJson(`https://marine-api.open-meteo.com/v1/marine?latitude=${lat}&longitude=${lon}&hourly=wave_height,wave_period,sea_level_height_msl&timezone=auto&forecast_days=2`);
+  if (!m || !m.hourly) return null;
+  const h = m.hourly, now = Date.now();
+  const i0 = Math.max(1, h.time.findIndex(t => new Date(t).getTime() >= now));
+  const sl = h.sea_level_height_msl;
+  let hi = null, lo = null;
+  for (let i = i0; i < sl.length - 1 && (!hi || !lo); i++) {
+    if (sl[i] == null) continue;
+    if (!hi && sl[i] >= sl[i - 1] && sl[i] > sl[i + 1]) hi = { t: h.time[i], v: sl[i] };
+    if (!lo && sl[i] <= sl[i - 1] && sl[i] < sl[i + 1]) lo = { t: h.time[i], v: sl[i] };
+  }
+  return { wave: h.wave_height[i0], period: h.wave_period[i0], high: hi, low: lo };
+}
+async function surfFor(locName, store, ctx) {
+  const names = (store.surf && store.surf[norm(locName)]) || DEFAULT_SURF[norm(locName)] || [];
+  const out = [];
+  for (const n of names.slice(0, 3)) {
+    const c = await spotCoords(n, store, ctx);
+    const m = c ? await marine(c.lat, c.lon) : null;
+    out.push({ name: n, ...(m || { wave: null }) });
+  }
+  return out;
+}
+// —— the Louet moulin river gauge (unchanged from the water box) ——
+const HUBEAU = 'https://hubeau.eaufrance.fr/api', VIGIEAU = 'https://api.vigieau.beta.gouv.fr/api';
+const Q_STATION = '05234023', FLOW_STATION = 'Q041401001', MLAT = 43.400326, MLON = -0.049121;
+async function water() {
+  const tr = await getJson(`${HUBEAU}/v2/hydrometrie/observations_tr?code_entite=${FLOW_STATION}&grandeur_hydro=Q&size=1&sort=desc`);
+  const o = tr && tr.data && tr.data[0];
+  const since = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10);
+  const dj = await getJson(`${HUBEAU}/v2/hydrometrie/obs_elab?code_entite=${FLOW_STATION}&grandeur_hydro_elab=QmnJ&date_debut_obs_elab=${since}&size=40`);
+  const series = ((dj && dj.data) || []).filter(o => o.resultat_obs_elab != null).map(o => o.resultat_obs_elab / 1000);
+  const qj = await getJson(`${HUBEAU}/v2/qualite_rivieres/analyse_pc?code_station=${Q_STATION}&size=500&sort=desc&fields=date_prelevement,libelle_parametre,resultat,symbole_unite`);
+  const latest = {}; for (const a of ((qj && qj.data) || [])) { const p = a.libelle_parametre, dd = a.date_prelevement; if (!latest[p] || dd > latest[p].date) latest[p] = { date: dd, value: a.resultat, unit: a.symbole_unite || '' }; }
+  const keys = ['Potentiel en Hydrogène (pH)', 'Oxygène dissous', 'Taux de saturation en oxygène', 'Nitrates', 'Nitrites', 'Orthophosphates (PO4)', 'Ammonium', 'Conductivité à 25°C', 'Matières en suspension'];
+  const dz = await getJson(`${VIGIEAU}/zones?lon=${MLON}&lat=${MLAT}&profil=particulier`);
+  return {
+    latestQ: o ? { m3s: o.resultat_obs / 1000, at: o.date_obs } : null,
+    mean30: series.length ? series.reduce((s, x) => s + x, 0) / series.length : null,
+    temp: latest['Température de l\'Eau'] || null,
+    params: keys.filter(k => latest[k]).map(k => ({ name: k, value: latest[k].value, unit: latest[k].unit, date: latest[k].date })),
+    drought: (Array.isArray(dz) ? dz : []).map(z => ({ type: z.type, gravite: z.niveauGravite, fin: z.arrete && z.arrete.dateFinValidite })).filter(z => z.gravite),
+  };
+}
+
+// active locations = (pinned ∪ auto) − off ; each geocoded + forecast
+async function buildWeather(ctx) {
+  const store = await syncStore(ctx);
+  const auto = autoLocations();
+  const offSet = new Set((store.off || []).map(norm));
+  const merged = []; const seen = new Set();
+  for (const p of (store.pinned || [])) { if (seen.has(norm(p.name))) continue; seen.add(norm(p.name)); merged.push({ name: p.name, pinned: true, auto: false }); }
+  for (const a of auto) { if (seen.has(norm(a.name))) { const m = merged.find(x => norm(x.name) === norm(a.name)); if (m) { m.auto = true; m.when = a; } continue; } seen.add(norm(a.name)); merged.push({ name: a.name, pinned: false, auto: true, when: a }); }
+  const out = [];
+  for (const m of merged) {
+    if (offSet.has(norm(m.name))) { out.push({ ...m, off: true }); continue; }
+    const geo = await geocode(m.name, store, ctx);
+    const fc = geo.lat != null ? await forecast(geo.lat, geo.lon) : null;
+    const surf = await surfFor(m.name, store, ctx).catch(() => []);
+    out.push({ ...m, label: geo.label, lat: geo.lat, lon: geo.lon, fc, surf });
+  }
+  // include off (suppressed) locations too so the client can offer to re-enable them
+  return out;
+}
+
+// severe-weather scan for the brief (only where the owner is / is going, next 3 days)
+function salientWeather(weather) {
+  const lines = [];
+  const dow = d => new Date(d + 'T12:00').toLocaleDateString('en-GB', { weekday: 'short' });
+  for (const w of (weather || [])) {
+    if (w.off || !w.fc || !(w.auto)) continue; // only places you're actually going
+    for (const day of w.fc.days.slice(0, 3)) {
+      const sev = [];
+      if (day.code >= 95) sev.push('thunderstorms');
+      else if (day.pprob >= 80 && day.precip >= 15) sev.push('heavy rain (' + Math.round(day.precip) + 'mm)');
+      if (day.min <= 0) sev.push('frost (' + Math.round(day.min) + '°)');
+      if (day.max >= 37) sev.push('extreme heat (' + Math.round(day.max) + '°)');
+      if (day.wind >= 60) sev.push('high wind (' + Math.round(day.wind) + ' km/h)');
+      if (sev.length) { lines.push(`${w.name} ${dow(day.date)}: ${sev.join(', ')}`); break; } // one line per place
+    }
+  }
+  return lines;
+}
+
+let cache = { at: 0, data: null };
+async function getData(ctx) {
+  if (cache.data && Date.now() - cache.at < TTL) return cache.data;
+  const [weather, w] = await Promise.all([buildWeather(ctx).catch(() => []), water().catch(() => null)]);
+  cache = { at: Date.now(), data: { weather, water: w, moon: moonPhase(), generated: new Date().toISOString() } };
+  return cache.data;
+}
+
+module.exports = {
+  key: 'nature-weather',
+  title: '🌦 Nature & Weather',
+  async data() { return getData(this._ctx || {}); },
+  // capture ctx for data() (the loader calls data() without ctx); routes give us ctx once
+  routes(app, ctx) {
+    this._ctx = ctx;
+    const bust = () => { cache = { at: 0, data: null }; };
+    app.post('/api/weather/pin', async (req, res) => { // { name } — make an auto location permanent
+      const s = await syncStore(ctx); const name = String((req.body || {}).name || '').trim(); if (!name) return res.status(400).json({ error: 'name' });
+      const geo = await geocode(name, s, ctx);
+      if (!s.pinned.some(p => norm(p.name) === norm(name))) s.pinned.push({ name, lat: geo.lat, lon: geo.lon, label: geo.label });
+      s.off = (s.off || []).filter(n => norm(n) !== norm(name)); writeStore(s, ctx); bust(); res.json({ ok: true });
+    });
+    app.post('/api/weather/unpin', async (req, res) => {
+      const s = await syncStore(ctx); const name = String((req.body || {}).name || '').trim();
+      s.pinned = (s.pinned || []).filter(p => norm(p.name) !== norm(name)); writeStore(s, ctx); bust(); res.json({ ok: true });
+    });
+    app.post('/api/weather/toggle', async (req, res) => { // { name, on } — hide/show a location
+      const s = await syncStore(ctx); const name = String((req.body || {}).name || '').trim(); const on = !!(req.body || {}).on;
+      s.off = (s.off || []).filter(n => norm(n) !== norm(name)); if (!on) s.off.push(name); writeStore(s, ctx); bust(); res.json({ ok: true });
+    });
+    app.post('/api/weather/surf', async (req, res) => { // { location, spots: "a, b, c" } — set surf spots for a location (max 3)
+      const s = await syncStore(ctx); const loc = String((req.body || {}).location || '').trim();
+      const names = String((req.body || {}).spots || '').split(',').map(x => x.trim()).filter(Boolean).slice(0, 3);
+      if (!loc) return res.status(400).json({ error: 'location' });
+      s.surf = s.surf || {}; if (names.length) s.surf[norm(loc)] = names; else delete s.surf[norm(loc)];
+      writeStore(s, ctx); bust(); res.json({ ok: true, spots: names });
+    });
+    app.post('/api/weather/add', async (req, res) => { // { name } — pin a brand-new place by name
+      const s = await syncStore(ctx); const name = String((req.body || {}).name || '').trim(); if (!name) return res.status(400).json({ error: 'name' });
+      const geo = await geocode(name, s, ctx); if (geo.lat == null) return res.status(422).json({ error: 'could not find "' + name + '"' });
+      if (!s.pinned.some(p => norm(p.name) === norm(name))) s.pinned.push({ name, lat: geo.lat, lon: geo.lon, label: geo.label });
+      writeStore(s, ctx); bust(); res.json({ ok: true, label: geo.label });
+    });
+  },
+  // salient weather → Agent Brief (core folds this in and lets the LLM include it only if it outweighs the news)
+  async briefItems() { try { return salientWeather((await getData(this._ctx || {})).weather).map(text => ({ kind: 'weather', text })); } catch (e) { return []; } },
+  client: `(el, d) => {
+    const esc = s => String(s == null ? '' : s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+    const post = (u, b) => fetch(u, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b || {}) }).then(() => location.reload());
+    const wmo = c => c >= 95 ? '⛈️' : c >= 85 ? '🌨️' : c >= 80 ? '🌦️' : c >= 71 ? '❄️' : c >= 61 ? '🌧️' : c >= 51 ? '🌦️' : c >= 45 ? '🌫️' : c >= 3 ? '☁️' : c >= 1 ? '⛅' : '☀️';
+    const dow = s => new Date(s + 'T12:00').toLocaleDateString('en-GB', { weekday: 'short' });
+    const active = (d.weather || []).filter(w => !w.off), hidden = (d.weather || []).filter(w => w.off);
+    // —— moon: SVG disc with the lit fraction, % overlaid, waxing/waning + next new moon ——
+    let moonHtml = '';
+    if (d.moon) {
+      const m = d.moon, r = 20, cx = 22, cy = 22;
+      const rx = r * Math.abs(1 - 2 * m.illum / 100);
+      const outerSweep = m.waxing ? 1 : 0;                    // lit limb: right when waxing, left when waning
+      const termSweep = (m.illum >= 50) ? outerSweep : (1 - outerSweep); // gibbous bulges across the middle
+      const path = 'M ' + cx + ' ' + (cy - r) + ' A ' + r + ' ' + r + ' 0 0 ' + outerSweep + ' ' + cx + ' ' + (cy + r) +
+                   ' A ' + rx.toFixed(2) + ' ' + r + ' 0 0 ' + termSweep + ' ' + cx + ' ' + (cy - r) + ' Z';
+      moonHtml = '<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">' +
+        '<svg width="44" height="44" viewBox="0 0 44 44" style="flex:none">' +
+          '<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="#2a2f3a" stroke="var(--border)"/>' +
+          '<path d="' + path + '" fill="#e8e4d8"/>' +
+          '<text x="' + cx + '" y="' + (cy + 4) + '" text-anchor="middle" font-size="11" font-weight="700" fill="' + (m.illum >= 35 ? '#222' : '#ddd') + '">' + m.illum + '%</text>' +
+        '</svg>' +
+        '<div class="tiny muted" style="line-height:1.5"><b style="color:var(--text)">' + (m.waxing ? 'Waxing' : 'Waning') + '</b> · ' + m.illum + '% lit<br>new moon ' + new Date(m.nextNew + 'T12:00').toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }) + ' · full ' + new Date(m.nextFull + 'T12:00').toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }) + '</div>' +
+      '</div>';
+    }
+    const dayCell = (day, i) => '<div style="flex:1;min-width:38px;text-align:center;padding:2px 1px;border-radius:5px;' + (i === 0 ? 'background:color-mix(in srgb,var(--accent) 12%,transparent);' : '') + '">' +
+      '<div class="tiny muted">' + (i === 0 ? 'today' : dow(day.date)) + '</div>' +
+      '<div style="font-size:16px;line-height:1.3">' + wmo(day.code) + '</div>' +
+      '<div style="font-size:11px"><b>' + Math.round(day.max) + '°</b> <span class="muted">' + Math.round(day.min) + '°</span></div>' +
+      (day.pprob >= 30 ? '<div class="tiny" style="color:var(--accent)">' + day.pprob + '%</div>' : '<div class="tiny">&nbsp;</div>') + '</div>';
+    const row = w => {
+      if (!w.fc) return '<div class="tiny muted" style="padding:3px 0">' + esc(w.name) + ' — no forecast (place not found)</div>';
+      const when = w.when ? ' <span class="tiny muted">' + w.when.start.slice(5) + '→' + w.when.end.slice(5) + '</span>' : '';
+      const ctrl = (w.pinned
+        ? '<button class="ib" title="Unpin" data-act="unpin" data-name="' + esc(w.name) + '">📌</button>'
+        : '<button class="ib" title="Pin as a permanent location" data-act="pin" data-name="' + esc(w.name) + '" style="opacity:.5">📍</button>') +
+        '<button class="ib" title="Hide this forecast" data-act="off" data-name="' + esc(w.name) + '">✕</button>';
+      const hm = t => t ? t.slice(11, 16) : '—';
+      const surfHtml = (w.surf && w.surf.length)
+        ? '<div class="tiny muted" style="margin-top:3px;line-height:1.6">🌊 ' + w.surf.map(sp =>
+            '<b style="color:var(--text2)">' + esc(sp.name) + '</b> ' + (sp.wave != null
+              ? sp.wave.toFixed(1) + 'm@' + Math.round(sp.period) + 's · ▲' + hm(sp.high && sp.high.t) + ' ▽' + hm(sp.low && sp.low.t)
+              : 'n/a')).join(' &nbsp; ') +
+          ' <button class="ib" data-act="surf" data-name="' + esc(w.name) + '" data-cur="' + esc((w.surf || []).map(x => x.name).join(', ')) + '" title="Edit surf spots (max 3)" style="opacity:.4">✎</button></div>'
+        : '<div class="tiny" style="margin-top:2px"><button class="ib" data-act="surf" data-name="' + esc(w.name) + '" data-cur="" title="Add surf spots" style="opacity:.35">＋ surf spots</button></div>';
+      return '<div style="margin-top:8px">' +
+        '<div style="display:flex;align-items:baseline;gap:6px"><b style="font-size:13px">' + esc(w.name) + '</b>' +
+          (w.auto && !w.pinned ? '<span class="tiny" style="color:var(--violet)">going</span>' : '') + when +
+          '<span style="margin-left:auto">' + ctrl + '</span></div>' +
+        '<div style="display:flex;gap:3px;margin-top:2px">' + w.fc.days.map(dayCell).join('') + '</div>' +
+        surfHtml +
+      '</div>';
+    };
+    // —— water box (moulin) ——
+    const wat = d.water;
+    let waterHtml = '';
+    if (wat) {
+      const fmtDate = s => s ? new Date(s).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : '';
+      const ago = s => { if (!s) return ''; const days = Math.floor((Date.now() - new Date(s)) / 864e5); return days < 45 ? '' : days < 400 ? ' · ' + Math.round(days / 30) + ' mo ago' : ' · ' + (days / 365).toFixed(1) + ' yr ago'; };
+      const short = { 'Potentiel en Hydrogène (pH)':'pH','Oxygène dissous':'O₂','Taux de saturation en oxygène':'O₂ sat','Nitrates':'NO₃','Nitrites':'NO₂','Orthophosphates (PO4)':'PO₄','Ammonium':'NH₄','Conductivité à 25°C':'cond.','Matières en suspension':'MES' };
+      const q = wat.latestQ, t = wat.temp; let trend = '';
+      if (q && wat.mean30) { const pct = Math.round((q.m3s / wat.mean30 - 1) * 100); trend = pct === 0 ? '≈ 30-day mean' : (pct > 0 ? '▲ ' : '▼ ') + Math.abs(pct) + '% vs 30-day mean (' + wat.mean30.toFixed(2) + ' m³/s)'; }
+      const sd = t ? t.date : (wat.params[0] && wat.params[0].date);
+      const dr = (wat.drought || []).map(z => '<span style="display:inline-block;margin:5px 5px 0 0;padding:1px 7px;border-radius:10px;font-size:11px;background:color-mix(in srgb,var(--red) 20%,var(--card2));border:1px solid var(--red)">⚠ ' + esc(z.gravite).replace(/_/g,' ') + ' — ' + esc(z.type) + (z.fin ? ' · to ' + fmtDate(z.fin) : '') + '</span>').join('');
+      waterHtml = '<div style="margin-top:10px;border-top:1px solid var(--border);padding-top:7px">' +
+        '<div class="tiny muted" style="margin-bottom:2px">💧 Le Louet — moulin</div>' +
+        '<div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap"><div style="font-size:22px;font-weight:700;line-height:1">' + (q ? q.m3s.toFixed(3) + ' <span style="font-size:13px;font-weight:400">m³/s</span>' : '—') + '</div><div class="tiny muted">flow' + (q ? ' · inst. ' + new Date(q.at).toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}) : '') + (trend ? '<br>' + trend : '') + '</div></div>' +
+        (sd ? '<div class="tiny muted" style="margin-top:6px;line-height:1.6">Last water sample · ' + fmtDate(sd) + ago(sd) + (t ? ' — <b style="color:var(--text)">' + Number(t.value).toFixed(1) + ' °C</b>' : '') + (wat.params.length ? '<br>' + wat.params.filter(p => p.name !== \"Température de l'Eau\").map(p => '<b style="color:var(--text2)">' + esc(short[p.name] || p.name) + '</b> ' + esc(p.value) + (p.unit && !/unit|sans/i.test(p.unit) ? ' ' + esc(p.unit) : '')).join(' · ') : '') + '</div>' : '') +
+        (dr ? '<div>' + dr + '</div>' : '') + '</div>';
+    }
+    el.innerHTML = '<div class="card">' + moonHtml +
+      (active.length ? active.map(row).join('') : '<div class="tiny muted">No active locations. Add one below or pin a place you\\'re heading to.</div>') +
+      (hidden.length ? '<div class="tiny muted" style="margin-top:8px">Hidden: ' + hidden.map(w => '<a href="#" data-act="on" data-name="' + esc(w.name) + '" style="color:var(--accent)">' + esc(w.name) + ' ↺</a>').join(' · ') + '</div>' : '') +
+      '<div class="tiny" style="margin-top:8px"><input id="wx-add" placeholder="add a location…" class="q-input" style="width:150px;display:inline-block"> <button class="ib" id="wx-add-btn">＋ pin</button></div>' +
+      waterHtml + '</div>';
+    el.querySelectorAll('[data-act]').forEach(b => b.onclick = e => {
+      e.preventDefault(); const n = b.dataset.name, a = b.dataset.act;
+      if (a === 'surf') { const v = prompt('Surf spots for ' + n + ' (comma-separated, max 3):', b.dataset.cur || ''); if (v !== null) post('/api/weather/surf', { location: n, spots: v }); return; }
+      if (a === 'pin') post('/api/weather/pin', { name: n });
+      else if (a === 'unpin') post('/api/weather/unpin', { name: n });
+      else if (a === 'off') post('/api/weather/toggle', { name: n, on: false });
+      else if (a === 'on') post('/api/weather/toggle', { name: n, on: true });
+    });
+    const addBtn = el.querySelector('#wx-add-btn'), addIn = el.querySelector('#wx-add');
+    const doAdd = () => { const v = addIn.value.trim(); if (v) post('/api/weather/add', { name: v }); };
+    if (addBtn) addBtn.onclick = doAdd;
+    if (addIn) addIn.onkeydown = e => { if (e.key === 'Enter') doAdd(); };
+  }`,
+};

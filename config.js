@@ -51,6 +51,38 @@ module.exports = {
   // Cloud Run carries these as env vars, the Mac in config-local.json
   oauthClientId: pick('oauthClientId', 'GOOGLE_OAUTH_CLIENT_ID', ''),
   oauthClientSecret: pick('oauthClientSecret', 'GOOGLE_OAUTH_CLIENT_SECRET', ''),
+  // Biotech clinical-trial tracker: the path it mounts at, and the guest emails allowed
+  // to sign in and see ONLY that path (comma-separated, or an array in config-local).
+  // The owner always has access; '' guests = owner-only.
+  bioRoute: (() => { const p = String(pick('bioRoute', 'BIO_ROUTE', '/bio')).trim();
+    return ('/' + p.replace(/^\/+|\/+$/g, '')).replace(/\/$/, '') || '/bio'; })(),
+  // Dedicated spreadsheet for the tracker ('' → falls back to the main sheet, pre-split
+  // behavior, exactly like stableSheetId). The service account cannot CREATE spreadsheets
+  // (no Drive quota), so the owner creates one, shares it with the SA, and sets the id here.
+  bioSheetId: pick('bioSheetId', 'BIO_SHEET_ID', ''),
+  // Escalation threshold for the analysis pipeline: below this confidence a tier hands off
+  // to the next one up. Tunable from the logged confidence/outcome data over time.
+  bioConfidenceThreshold: Number(pick('bioConfidenceThreshold', 'BIO_CONFIDENCE_THRESHOLD', 0.8)) || 0.8,
+  // Circuit breaker: if confidence-based escalation fires on more than this fraction of a
+  // run's tasks, the model is miscalibrated rather than the world being uncertain — stop
+  // confidence escalations for the rest of the run so one bad threshold can't drain budget.
+  bioEscalationCircuitBreaker: Number(pick('bioEscalationCircuitBreaker', 'BIO_ESCALATION_BREAKER', 0.5)) || 0.5,
+  // Metered LLM calls are OPT-IN. Off means a host without the free claude CLI refuses to
+  // run the analysis pipeline (and says so) rather than silently billing an API.
+  bioAllowPaidLLM: pick('bioAllowPaidLLM', 'BIO_ALLOW_PAID_LLM', ''),
+  // '1' = reader feedback triggers an Opus run that EDITS public/bio.html and deploys it
+  // (bin/bio-apply.sh holds the file-scope, validation and audit rails). Off = propose only.
+  bioAutoApply: pick('bioAutoApply', 'BIO_AUTO_APPLY', ''),
+  // how many reader-driven page changes one author may trigger per day
+  bioApplyPerDay: Number(pick('bioApplyPerDay', 'BIO_APPLY_PER_DAY', 3)) || 3,
+  bioEmails: (() => { const v = pick('bioEmails', 'BIO_EMAILS', '');
+    return (Array.isArray(v) ? v : String(v).split(','))
+      .map(s => String(s).trim().toLowerCase()).filter(Boolean); })(),
+  // Hampr donate checklist (/ranmali): guest emails allowed to sign in and see ONLY that
+  // page + its API (comma-separated, or an array in config-local). Owner always has access.
+  ranmaliEmails: (() => { const v = pick('ranmaliEmails', 'RANMALI_EMAILS', '');
+    return (Array.isArray(v) ? v : String(v).split(','))
+      .map(s => String(s).trim().toLowerCase()).filter(Boolean); })(),
   // Google AI Studio FREE tier (rate-limited, may train on data → non-personal modules only)
   geminiFreeKey: pick('geminiFreeKey', 'GEMINI_API_KEY', ''),
   geminiFreeModel: pick('geminiFreeModel', 'GEMINI_FREE_MODEL', 'gemini-2.5-flash'),
@@ -58,6 +90,16 @@ module.exports = {
   surfSpotName: pick('surfSpotName', 'DASHBOARD_SURF_SPOT', ''),
   surfSpotLat: Number(pick('surfSpotLat', 'DASHBOARD_SURF_LAT', 0)) || 0,
   surfSpotLon: Number(pick('surfSpotLon', 'DASHBOARD_SURF_LON', 0)) || 0,
+  // Sovereign-CDS coverage: base country list + LOCATIONS-tab regex map [{match,country}]
+  cdsCountries: (() => { const v = pick('cdsCountries', 'DASHBOARD_CDS_COUNTRIES', null);
+    if (Array.isArray(v)) return v; try { return JSON.parse(v); } catch (e) { return null; } })(),
+  cdsLocationMap: (() => { const v = pick('cdsLocationMap', 'DASHBOARD_CDS_LOCATION_MAP', null);
+    if (Array.isArray(v)) return v; try { return JSON.parse(v); } catch (e) { return null; } })(),
+  // Multi-spot roster [{key,name,lat,lon}] — the client geolocates and the closest spot wins;
+  // falls back to the single spot above when absent. JSON string in the env form.
+  surfSpots: (() => { const v = pick('surfSpots', 'DASHBOARD_SURF_SPOTS', null);
+    if (Array.isArray(v)) return v;
+    try { return JSON.parse(v); } catch (e) { return null; } })(),
   // CI feedback sink + orchestrator learnings source ('' = off) — host-side files, never shipped
   feedbackFile: pick('feedbackFile', 'DASHBOARD_FEEDBACK_FILE', ''),
   learningsFile: pick('learningsFile', 'DASHBOARD_LEARNINGS_FILE', ''),

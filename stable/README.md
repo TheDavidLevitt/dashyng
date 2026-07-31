@@ -1,4 +1,14 @@
-# agent-stable
+<div align="center">
+
+<img src="assets/hero.svg" alt="agent-stable — cost-performance management for a stable of AI models" width="100%">
+
+[![CI](https://github.com/TheDavidLevitt/agent-stable/actions/workflows/test.yml/badge.svg)](https://github.com/TheDavidLevitt/agent-stable/actions/workflows/test.yml)
+[![npm](https://img.shields.io/npm/v/agent-stable?color=cb3837&logo=npm)](https://www.npmjs.com/package/agent-stable)
+[![node](https://img.shields.io/node/v/agent-stable?color=339933&logo=node.js&logoColor=white)](package.json)
+[![dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen)](package.json)
+[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
+</div>
 
 **Cost-performance management for a stable of AI models.** Meter every call, classify **whose
 money it was** (subscription · credits · out-of-pocket), benchmark the market by use case, and
@@ -29,6 +39,9 @@ with the current model, its real cost, and anything time- or token-sensitive:
 - **steeldust** — your daily driver; the orchestration layer, escalation from workhorse:
   thesis-led summaries, judgment calls, routing decisions.
 - **thoroughbred** — a top-tier reasoning model; hard analysis, escalation from steeldust.
+- **secretariat** — the stable *on steroids*: a top long-horizon model for multi-hour
+  autonomous work, escalation from thoroughbred. Named for the horse that won the Belmont
+  by 31 lengths — the long-distance record that still stands.
 
 ```js
 const tiers = createTiers({ incumbent: t => store.incumbent(t), priceOf: pricing.priceOf,
@@ -54,7 +67,7 @@ flowchart TB
     MET["meter.js\nnormalize event → cost $ +\nfunding class + latency"]
     PRC["pricing.js\nprice table · costClass()\nself-host estimator"]
     APA["apa.js — decision engine\nevaluate(cand vs incumbent)\nprojectSavings() · adoptGate()"]
-    BRD["board.js\ncompile/parse prompts for the\nmarket board + benchmark knowledge"]
+    BRD["board.js\ntier assignment over sourced\nbenchmark rows (e.g. AA API)"]
   end
 
   subgraph sinks["sinks/ (pluggable)"]
@@ -93,6 +106,14 @@ Data flow in one sentence: **adapters** make any model callable, the **meter** p
 funding-classifies every call into a **sink**, the **APA engine** uses the same adapters to
 head-to-head-test new models against your incumbent and gates adoption, and the **board**
 compiles the market (cost × benchmarks × your thresholds) so the whole loop is inspectable.
+
+## What a host builds on it
+
+<img src="assets/board.svg" alt="Mockup of a host dashboard's procurement board: market table with per-tier benchmarks and funding chips, APA adoption proposal with one-click revert, and a funding panel splitting charged vs credit vs included" width="100%">
+
+*The procurement board a host renders from `board.js` output + meter events (mockup, sample
+data): the market table with per-tier benchmarks and source-of-funds chips, the APA's gated
+adoption proposal, and the funding panel that never confuses expiring credit with cash.*
 
 ## The ideas that matter
 
@@ -139,26 +160,22 @@ const verdict = await apa.evaluate({ id: 'candidate', provider: 'ollama' }, { id
 console.log(apa.adoptGate(verdict, { autoAdopt: true }));
 ```
 
-Run the no-network demo: `node demo.js`
+Run the no-network demo — `node demo.js` replays the whole loop:
+
+<img src="assets/demo.svg" alt="Animated terminal replay of node demo.js: meter three calls, judge a challenger head-to-head, gate adoption, project $204/mo saving" width="100%">
 
 ## Module status
 
-```
-pricing.js   ✅ price table (edit for your stack) · costClass() · selfHostPerMTok()
-meter.js     ✅ usage/decision events → cost + fundingClass + latency → sink; wrap()
-sinks/       ✅ memory · JSONL · Google Sheet (client injected)   ⬜ SQLite · Postgres
-adapters.js  ✅ one OpenAI-compat impl covers openai/xai/openrouter/together/fireworks/
-                groq/ollama/lmstudio; bespoke providers injected as fns; keys injected
-apa.js       ✅ evaluate · projectSavings · adoptGate · considerFinding — the full decision flow
-                with Store/Notify injected (store {recordPrice, incumbent, adopt} · notify
-                {info, propose} · log): swap a Sheet+journal for a JSON-file+Slack and it
-                behaves identically. Scan-prompt ASSEMBLY stays host-side by design — it is
-                context-gathering (credit pools, source scoreboard) from host systems.
-tiers.js     ✅ tier-addressed resolution: resolve('workhorse') / escalate() → model + real
-                cost + funding class + time-sensitive advisories, for downstream agents
-board.js     ◐  compile/parse for market board + benchmark knowledge base (persistence host-side)
-server.js    ⬜ standalone HTTP surface + starter dashboard (second package)
-```
+| Module | | What it does |
+|---|:---:|---|
+| [`pricing.js`](pricing.js) | ✅ | price table (edit for your stack) · `costClass()` · `selfHostPerMTok()` |
+| [`meter.js`](meter.js) | ✅ | usage/decision events → cost + funding class + latency → sink; `wrap()` |
+| [`sinks/`](sinks) | ✅ | memory · JSONL · Google Sheet (client injected) — SQLite · Postgres planned |
+| [`adapters.js`](adapters.js) | ✅ | one OpenAI-compat impl covers openai / xai / openrouter / together / fireworks / groq / ollama / lmstudio; bespoke providers injected as fns; keys injected |
+| [`apa.js`](apa.js) | ✅ | `evaluate` · `projectSavings` · `adoptGate` · `considerFinding` — the full decision flow with Store/Notify injected: swap a Sheet+journal for a JSON-file+Slack and it behaves identically. Scan-prompt *assembly* stays host-side by design — it is context-gathering (credit pools, source scoreboard) from host systems. |
+| [`tiers.js`](tiers.js) | ✅ | tier-addressed resolution: `resolve('workhorse')` / `escalate()` → model + real cost + funding class + time-sensitive advisories, for downstream agents |
+| [`board.js`](board.js) | 🟡 | compile/parse for market board + benchmark knowledge base (persistence host-side) |
+| `server.js` | ⬜ | standalone HTTP surface + starter dashboard (second package) |
 
 ## Design rules
 

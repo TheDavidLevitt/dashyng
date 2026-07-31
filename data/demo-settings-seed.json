@@ -1,10 +1,1 @@
-{
-  "savedAt": 1783956293410,
-  "settings": {
-    "quadrants": {
-      "Q4": {
-        "label": "Learning goals"
-      }
-    }
-  }
-}
+{"savedAt": 1783956293410, "settings": {"quadrants": {"Q4": {"label": "Learning goals"}}, "sections": {"cinote": {"title": "Note to CI (continuous improvement)"}}}}

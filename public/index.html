@@ -46,7 +46,14 @@ a:hover { text-decoration: underline; }
 .jl-box h3 { margin: 0 22px 4px 0; font-size: 12.5px; font-weight: 650; }
 .jl-box .jl-x { position: absolute; top: 4px; right: 5px; opacity: .45; cursor: pointer; font-size: 12px; line-height: 1; background: none; border: 0; color: var(--text2); }
 .jl-box .jl-x:hover { opacity: 1; }
-.jl-box .jl-src { font-size: 10px; color: var(--text3); font-weight: 400; }
+.jl-box .jl-pinned { border-style: solid !important; border-color: var(--violet) !important; }
+.jl-subhead { font-size: 10px; text-transform: uppercase; font-weight: 700; color: var(--text3); margin-top: 6px; }
+.jl-add { display: flex; gap: 4px; margin-top: 4px; }
+.jl-add-in { flex: 1; min-width: 0; padding: 2px 6px; font-size: 11.5px; background: var(--card); color: var(--text); border: 1px solid var(--border); border-radius: 4px; }
+.jl-doer { color: var(--amber); font-size: 10px; font-weight: 700; }
+.jl-cmt { margin-left: 22px; color: var(--text2); }
+.jl-pin { font-size: 11px; }
+.jl-src { font-size: 10px; color: var(--text3); font-weight: 400; }
 .jl-item { display: flex; gap: 6px; align-items: baseline; font-size: 12px; padding: 1px 0; cursor: pointer; }
 .jl-item .jl-chk { flex: 0 0 auto; }
 .jl-item.done span { text-decoration: line-through; color: var(--text3); }
@@ -116,6 +123,22 @@ input.sec-rename { display: inline-block; max-width: 200px; font-size: inherit; 
 .la-day.la-today { border-color: var(--accent); }
 .la-date { font-weight: 700; color: var(--text2); font-size: 9.5px; text-transform: uppercase; margin-bottom: 1px; }
 .cyc { color: #ff5ca8; font-weight: 800; } /* unlabeled by design */
+/* ephemeral notes — visually distinct from task lists: violet accent, dashed border */
+.q-fold { background: none; border: none; color: var(--text2); cursor: pointer; font-size: 11px; padding: 0 4px; }
+.q-folded { min-height: 0 !important; }
+.sig-inline .q-body { font-size: 12px; }
+/* section collapse-by-default (⚙): only the heading shows; click it to expand this session */
+.sec-collapsed > *:not(h2):not(:first-child) { display: none !important; }
+.sec-collapsed > h2 { cursor: pointer; opacity: 0.85; }
+.sec-collapsed > h2::after { content: ' ▸'; color: var(--text3); }
+.ag-tbl { width: 100%; border-collapse: collapse; font-size: 12px; }
+.ag-tbl th { text-align: left; font-size: 9px; text-transform: uppercase; color: var(--text3); padding: 2px 6px; }
+.ag-tbl td { padding: 2px 6px; border-top: 1px solid var(--border); vertical-align: top; }
+.ag-tbl .ag-standby { opacity: 0.55; }
+.en-badge { font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--violet);
+  border: 1px solid var(--violet); border-radius: 8px; padding: 1px 7px; vertical-align: 2px; opacity: 0.8; }
+.en-box { border-style: dashed !important; border-color: var(--violet) !important; background: color-mix(in srgb, var(--violet) 6%, var(--card2)) !important; }
+#enote-bar input { border-style: dashed; }
 /* wind & waves — glanceable boxes; amber >12kt, red >15kt */
 .surf-row { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 5px; }
 .surf-hrow { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; margin-top: 4px; }
@@ -490,7 +513,14 @@ details summary { cursor: pointer; color: var(--text2); font-size: 12.5px; paddi
 </section>
 
 <section data-sec="jlists">
-<h2><span data-sec-title>Journal Lists</span> <span class="muted tiny" id="jlists-meta"></span></h2>
+<h2><span data-sec-title>Ephemeral notes</span> <span class="en-badge">scratch — not tasks</span> <span class="muted tiny" id="jlists-meta"></span></h2>
+<div id="enote-bar" style="display:flex;gap:5px;margin:4px 0;align-items:center">
+  <input id="enote-in" placeholder="Quick note, link, or 📷…" style="flex:1;min-width:0;padding:4px 7px;font-size:12px;background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:5px">
+  <input id="enote-file" type="file" accept="image/*" capture="environment" style="display:none">
+  <button id="enote-cam" class="ib" title="Photo / image">📷</button>
+  <button id="enote-add" class="ib" title="Add note">＋</button>
+</div>
+<div id="enotes"></div>
 <div id="jlists"></div>
 </section>
 
@@ -503,9 +533,15 @@ details summary { cursor: pointer; color: var(--text2); font-size: 12.5px; paddi
 </div>
 </section>
 
+<section data-sec="jobsboard">
+<h2 data-sec-title>Job Openings <span class="muted">— <a href="/jobs">full board →</a></span></h2>
+<div id="jobs-summary" class="card"><div class="empty">Loading…</div></div>
+</section>
+
 <section data-sec="agents">
 <h2 data-sec-title style="margin-top:10px">Agent Stable <span class="muted">— <a href="/agents.html">stable · incoming · APA →</a></span></h2>
 <div id="agents-summary" class="card"><div class="empty">Loading…</div></div>
+<div id="agents-table" class="card" style="margin-top:5px;overflow-x:auto"><div class="empty">Loading stable…</div></div>
 </section>
 
 <section data-sec="files">
@@ -552,7 +588,7 @@ details summary { cursor: pointer; color: var(--text2); font-size: 12.5px; paddi
 </section>
 
 <section data-sec="surf">
-<h2><span data-sec-title>Wind &amp; waves</span> <span class="muted" style="font-size:12px" id="surf-spot"></span></h2>
+<h2><span data-sec-title>Wind &amp; waves</span> <select id="surf-spot-sel" class="tiny" style="background:var(--card2);color:var(--text2);border:1px solid var(--border);border-radius:4px;font-size:11px"></select> <span class="muted" style="font-size:12px" id="surf-spot"></span></h2>
 <div class="card" id="surf"><div class="empty">Loading forecast…</div></div>
 </section>
 
@@ -678,8 +714,9 @@ async function saveLinks() {
     box.querySelector('.lk-url').focus();
   };
 })();
-const SEC_DEFS = { links: 'Links', habits: 'Habits', brief: 'Agent brief', today: 'Today', todo: 'Task Lists', jlists: 'Journal Lists', cinote: 'Note to CI', agents: 'Agent Stable', files: 'File manager', completed: 'Completed', media: 'Reading queue', markets: 'Markets', signals: 'Market signals', surf: 'Wind & waves', news: 'News', week: 'Week ahead' };
+const SEC_DEFS = { links: 'Links', habits: 'Habits', brief: 'Agent brief', today: 'Today', todo: 'Task Lists', jlists: 'Ephemeral notes', cinote: 'Note to CI', jobsboard: 'Job Openings', agents: 'Agent Stable', files: 'File manager', completed: 'Completed', media: 'Reading queue', markets: 'Markets', signals: 'Market signals', surf: 'Wind & waves', news: 'News', week: 'Week ahead' };
 let appSettings = { sections: {}, quadrants: {}, calendars: [] };
+const secExpanded = new Set(); // session-local expansions of collapsed-by-default sections
 function setSecTitle(el, title) { // replace only the text node — keep the ＋/meta spans inside headings
   const n = [...el.childNodes].find(x => x.nodeType === 3 && x.nodeValue.trim());
   if (n) n.nodeValue = title + ' '; else el.prepend(document.createTextNode(title + ' '));
@@ -756,6 +793,7 @@ function cfgToggle() {
     <div id="cfg-secs">${order.map(k => `<div class="cfg-row" data-k="${k}">
       <button class="cfg-up" title="move up">↑</button><button class="cfg-dn" title="move down">↓</button>
       <label style="min-width:16px"><input type="checkbox" class="cfg-vis" ${conf[k]?.hidden ? '' : 'checked'}></label>
+      <label class="tiny" title="collapse by default"><input type="checkbox" class="cfg-fold" ${conf[k]?.collapsed ? 'checked' : ''}> fold</label>
       <b style="font-size:12px">${esc(SEC_DEFS[k] || k)}</b>
       <span class="tiny muted">${conf[k]?.title ? 'shown as “' + esc(conf[k].title) + '”' : ''}</span>
     </div>`).join('')}</div>
@@ -765,6 +803,7 @@ function cfgToggle() {
       <input class="cfg-qlabel" value="${esc(qc[q.key]?.label || '')}" placeholder="${esc(q.label || 'name')}" style="flex:1;min-width:120px">
       <input class="cfg-qsub" value="${esc(qc[q.key]?.sub || '')}" placeholder="${esc(q.sub || 'subtitle / agent instruction')}" style="flex:1;min-width:120px">
       <select class="cfg-qstyle">${['bullets', 'ranked'].map(s => `<option value="${s}" ${(qc[q.key]?.style || 'bullets') === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
+      <label class="tiny" title="collapse by default"><input type="checkbox" class="cfg-qfold" ${qc[q.key]?.collapsed ? 'checked' : ''}> fold</label>
       <button class="cfg-qdel" data-k="${q.key}" title="Remove this list (must be empty)" style="color:var(--red);background:none;border:1px solid var(--border);border-radius:3px">✕</button>
       <input class="cfg-qhook" value="${esc(qc[q.key]?.hook || '')}" placeholder="webhook URL (optional — task events POST here)" style="flex-basis:100%;font-size:11px">
     </div>`).join('')}
@@ -785,12 +824,36 @@ function cfgToggle() {
     <div class="cfg-row"><button id="cfg-caladd">＋ calendar</button><span class="tiny muted">empty list = the default calendar</span></div>
     <div class="cfg-head">Location tracking — evidence sources for the headline &amp; look-ahead bars</div>
     <div class="tiny muted" style="margin-bottom:3px">Calendar (multi-day events) and Locations-of-interest always run. Gmail (flight/train/hotel confirmations) needs a one-time consent:
-      ${caps.gmail ? '<b style="color:var(--green)">connected</b> · <a href="/auth/gmail/disconnect">disconnect</a>' : '<a href="/auth/gmail/connect" target="_blank">connect Gmail →</a>'}
+      ${caps.gmail ? '<b style="color:var(--green)">connected</b> · <a href="/auth/gmail/connect" target="_blank">reconnect</a> · <a href="/auth/gmail/disconnect">disconnect</a>' : '<a href="/auth/gmail/connect" target="_blank"><b>connect Gmail →</b></a>'}
       · <a href="#" id="cfg-loc-scan">rescan now</a></div>
+    <div class="cfg-head">🔑 API keys — LLM features (summaries, note analysis); verified before save, stored server-side, never shown again</div>
+    <div id="cfg-keys"><div class="tiny muted">Loading…</div></div>
     <div class="cfg-head"><span class="cyc">?</span></div>
     <div class="cfg-row"><input type="date" id="cfg-cyc-date" value="${esc(appSettings.cycle?.lastStart || '')}">
       <input type="number" id="cfg-cyc-len" min="15" max="60" value="${+(appSettings.cycle?.length) || 28}" style="width:52px"><span class="tiny muted">d · clear the date to turn off</span></div>
     <div class="cfg-row" style="margin-top:8px"><button id="cfg-save"><b>Save & reload</b></button><button id="cfg-close">Cancel</button></div>`;
+  // API-key rows: independent verify-and-save per provider (not part of cfg-save)
+  api('/api/keys').then(d => {
+    const box = $('cfg-keys'); if (!box) return;
+    box.innerHTML = (d.providers || []).map(pr => `<div class="cfg-row" data-kp="${esc(pr.id)}">
+      <span style="min-width:130px">${esc(pr.label)}</span>
+      <span class="tiny muted ck-st" style="min-width:90px">${pr.stored ? esc(pr.stored) + ' ✓' : pr.fromEnv ? 'from env ✓' : 'not set'}</span>
+      <input type="password" class="ck-in" placeholder="paste key" autocomplete="off" style="flex:1;min-width:120px">
+      <button class="ck-save">Verify & save</button>${pr.stored ? '<button class="ck-del" title="remove stored key">✕</button>' : ''}
+    </div>`).join('') + `<div class="tiny muted">Stored in ${esc(d.storage || '')}.</div>`;
+    box.querySelectorAll('.cfg-row[data-kp]').forEach(row => {
+      const id = row.dataset.kp, st = row.querySelector('.ck-st'), inp = row.querySelector('.ck-in');
+      row.querySelector('.ck-save').onclick = async () => {
+        const key = inp.value.trim(); if (!key) return;
+        st.textContent = 'verifying…';
+        const r = await api('/api/keys', { method: 'POST', body: JSON.stringify({ provider: id, key }) }).catch(e => ({ error: e.message }));
+        inp.value = ''; // never keep the key in the DOM
+        st.textContent = r && r.ok ? r.stored + ' ✓ saved' : (r && r.error) || 'failed';
+      };
+      const del = row.querySelector('.ck-del');
+      if (del) del.onclick = async () => { const r = await api('/api/keys/' + id, { method: 'DELETE' }); st.textContent = r && r.ok ? 'removed' : 'failed'; };
+    });
+  }).catch(() => { const b = $('cfg-keys'); if (b) b.innerHTML = '<div class="tiny err">keys API unavailable</div>'; });
   const wire = () => {
     p.querySelectorAll('.cfg-up, .cfg-dn').forEach(b => b.onclick = () => {
       const row = b.closest('.cfg-row'), sib = b.classList.contains('cfg-up') ? row.previousElementSibling : row.nextElementSibling;
@@ -820,7 +883,8 @@ function cfgToggle() {
     [...p.querySelectorAll('#cfg-secs .cfg-row')].forEach((row, i) => {
       // titles (aliases) are edited on the page, not here — preserve them through a ⚙ save
       const prevTitle = ((appSettings.sections || {})[row.dataset.k] || {}).title;
-      sections[row.dataset.k] = { order: i, hidden: !row.querySelector('.cfg-vis').checked, ...(prevTitle ? { title: prevTitle } : {}) };
+      sections[row.dataset.k] = { order: i, hidden: !row.querySelector('.cfg-vis').checked,
+        ...(row.querySelector('.cfg-fold')?.checked ? { collapsed: true } : {}), ...(prevTitle ? { title: prevTitle } : {}) };
     });
     // merge into the existing config — removed flags, page-drag order, and entries for
     // lists not shown in the panel must survive a ⚙ save
@@ -829,14 +893,15 @@ function cfgToggle() {
       const k = row.dataset.q;
       const label = row.querySelector('.cfg-qlabel').value.trim(), sub = row.querySelector('.cfg-qsub').value.trim();
       const style = row.querySelector('.cfg-qstyle').value;
+      const fold = !!row.querySelector('.cfg-qfold')?.checked;
       const hook = row.querySelector('.cfg-qhook').value.trim();
       const prev = quadrants[k] || {};
       const q = {
         ...prev,
         ...(label ? { label } : {}), ...(sub ? { sub } : {}), ...(hook ? { hook } : {}),
-        ...(style !== 'bullets' ? { style } : {}),
+        ...(style !== 'bullets' ? { style } : {}), ...(fold ? { collapsed: true } : {}),
       };
-      if (!label) delete q.label; if (!sub) delete q.sub; if (!hook) delete q.hook;
+      if (!label) delete q.label; if (!sub) delete q.sub; if (!hook) delete q.hook; if (!fold) delete q.collapsed;
       delete q.width; if (style === 'bullets') delete q.style; // legacy width key retired (w = drag-set cols)
       delete q.wide; // legacy flag superseded by width
       if (Object.keys(q).length) quadrants[k] = q; else quadrants[k] = {}; // {} = reset (server merges; absent keys survive)
@@ -862,7 +927,7 @@ const DEFAULT_LISTS = [
   { key: 'Q1', label: 'Urgent + Important' },
   { key: 'Q2', label: 'Important, schedule' },
   { key: 'Q3', label: 'Delegate to Agent', sub: 'agent can handle autonomously, returns with questions' },
-  { key: 'Q4', label: 'Neither, eliminate' },
+  { key: 'Q4', label: 'Learning goals' },
   { key: 'M', label: 'Monitor', sub: 'awaiting reply / next move' },
 ];
 const LIST_CLS = ['q1', 'q2', 'q3', 'q4', 'q-monitor'];
@@ -1081,6 +1146,7 @@ function renderMatrix() {
     const roots = buckets[qd.key].sort((a, b) => ordOf(a) - ordOf(b));
     const qc = (appSettings.quadrants || {})[qd.key] || {};
     const ranked = (qc.style || 'bullets') === 'ranked';
+    const folded = !!qc.collapsed && !qExpanded.has(qd.key); // collapse-by-default (⚙), expand per session
     let count = 0;
     const inner = roots.map((t, ri) => {
       const kids = childrenOf(t.ID);
@@ -1090,19 +1156,34 @@ function renderMatrix() {
       return html;
     }).join('') || '<div class="empty">—</div>';
     const sub = qc.sub || qd.sub;
+    const foldBtn = qc.collapsed ? `<button class="q-fold" data-k="${qd.key}" title="${folded ? 'expand' : 'fold'}">${folded ? '▸' : '▾'}</button>` : '';
+    if (folded) return `<div class="q ${qd.cls} q-folded" style="grid-column: span ${qCols(qd.key)}" data-target="${qd.key}">
+      <div class="q-header" draggable="true" data-qdrag="${qd.key}"><span><span class="q-grip">≡</span>${esc(listTitle(qd, li))}</span>
+        <span><span class="q-count">${count}</span>${foldBtn}</span></div>
+    </div>`;
     return `<div class="q ${qd.cls}" style="grid-column: span ${qCols(qd.key)}" data-target="${qd.key}">
       <div class="q-header" draggable="true" data-qdrag="${qd.key}" title="drag to move — drop ON a list to land before it, on empty space to move to the end"><span><span class="q-grip">≡</span>${esc(listTitle(qd, li))}</span>
-        <span><span class="q-count">${count}</span><button class="q-w-btn" data-k="${qd.key}" data-d="-1" title="Narrower">‹</button><button class="q-w-btn" data-k="${qd.key}" data-d="1" title="Wider (full page = keep going)">›</button><button class="q-add-btn" data-target="${qd.key}" title="Add">+</button><button class="q-del-btn" data-k="${qd.key}" data-n="${count}" title="Remove this list (must be empty)">✕</button></span></div>
+        <span><span class="q-count">${count}</span>${foldBtn}<button class="q-w-btn" data-k="${qd.key}" data-d="-1" title="Narrower">‹</button><button class="q-w-btn" data-k="${qd.key}" data-d="1" title="Wider (full page = keep going)">›</button><button class="q-add-btn" data-target="${qd.key}" title="Add">+</button><button class="q-del-btn" data-k="${qd.key}" data-n="${count}" title="Remove this list (must be empty)">✕</button></span></div>
       <div class="q-add-row" data-target="${qd.key}" style="display:none;padding:3px 0"><input class="q-input" placeholder="New task — Enter saves, Esc cancels"></div>
       ${sub ? `<div class="q-sub">${esc(sub)}</div>` : ''}
       ${inner}
-      ${qd.key === 'M' ? '<div class="q-task"><span class="q-bullet">→</span><span class="q-body"><a class="q-link" href="#signals" onclick="const d=document.getElementById(\'signals-d\');d.open=true;d.scrollIntoView({behavior:\'smooth\'});return false">market signals <span class="q-count" id="sig-count"></span> ↗</a></span></div>' : ''}
+      ${qd.key === 'Q3' ? (jlists || []).filter(jl => jl.persistent).map(jl =>
+        `<div class="q-task"><span class="q-bullet">📌</span><span class="q-body"><a class="q-link" href="#" onclick="document.querySelector('section[data-sec=jlists]').scrollIntoView({behavior:'smooth'});return false">${esc(jl.heading)}</a> <span class="tiny muted">${(jl.items || []).filter(i => !i.done).length} open · shared</span></span></div>`).join('') : ''}
+      ${qd.key === 'M' ? (sigData || []).filter(sg => String(sg.Status || '').toLowerCase() !== 'done').map(sg =>
+        `<div class="q-task sig-inline"><span class="q-bullet" style="color:var(--violet)">◆</span><span class="q-body">${esc(sg.Signal || '')}${sg.Trend ? ` <span class="tiny muted">${esc(sg.Trend)}</span>` : ''}${sg['Why (one line)'] ? `<div class="tiny muted">${esc(sg['Why (one line)'])}</div>` : ''}</span></div>`).join('')
+        + '<div class="q-task"><span class="q-bullet">→</span><span class="q-body"><a class="q-link" href="#signals" onclick="const d=document.getElementById(\'signals-d\');d.open=true;d.scrollIntoView({behavior:\'smooth\'});return false">market signals <span class="q-count" id="sig-count"></span> ↗</a></span></div>' : ''}
     </div>`;
   }).join('') + '</div>';
 
   renderCompleted();
   renderSalient();
   attachHandlers();
+  $('eisen').querySelectorAll('.q-fold').forEach(b => b.onclick = e => {
+    e.stopPropagation();
+    const k = b.dataset.k;
+    qExpanded.has(k) ? qExpanded.delete(k) : qExpanded.add(k);
+    renderMatrix();
+  });
   layoutMatrix();
 }
 
@@ -1594,6 +1675,7 @@ function renderTodayCards() {
   const evs = (calEvents || []).filter(ev => {
     const s = new Date(ev.start?.dateTime || ev.start?.date);
     const e = new Date(ev.end?.dateTime || ev.end?.date || s);
+    if (ev.end?.dateTime && e < new Date()) return false; // timed event already over — auto-expire
     if (!(e > s)) return s >= d0 && s < d1;
     return s < d1 && e > d0; // overlap: multi-day spans count as "today" too
   }).map(ev => ({ kind: 'cal', title: ev.summary || '(no title)', date: isoToday,
@@ -1644,22 +1726,92 @@ api('/api/activities').then(d => { if (d && Array.isArray(d.events)) { actData =
 // ---------- journal-driven ad-hoc lists ----------
 // A `## Heading` in the journal that isn't a template section becomes an ephemeral todo
 // box here. One-click ✕ dismisses the whole box (undoable); items toggle done in place.
+// ---------- ephemeral notes: quick captures (text / link / image) ----------
+let enotes = [], enotesTier = '';
+function renderENotes() {
+  const el = document.getElementById('enotes'); if (!el) return;
+  el.innerHTML = enotes.length ? '<div class="jl-grid">' + enotes.map(n => `<div class="jl-box en-box" data-id="${esc(n.id)}">
+    <button class="jl-x" title="Remove">✕</button>
+    ${n.type === 'image'
+      ? (n.tier === enotesTier
+          ? `<a href="/api/enotes/img/${esc(n.id)}" target="_blank"><img src="/api/enotes/img/${esc(n.id)}" style="max-width:100%;border-radius:5px" loading="lazy"></a>`
+          : `<div class="tiny muted">📷 captured on another device</div>`) + (n.caption ? `<div class="tiny">${esc(n.caption)}</div>` : '')
+      : n.type === 'link'
+      ? `<a href="${esc(n.text)}" target="_blank" rel="noopener" class="tiny" style="word-break:break-all">🔗 ${esc(n.text.replace(/^https?:\/\//, '').slice(0, 60))}</a>`
+      : `<div style="font-size:12.5px;white-space:pre-wrap">${esc(n.text)}</div>`}
+    <div class="jl-src">${esc((n.at || '').slice(5, 10))}</div>
+  </div>`).join('') + '</div>' : '';
+  el.querySelectorAll('.en-box .jl-x').forEach(b => b.onclick = async () => {
+    const id = b.closest('.en-box').dataset.id;
+    enotes = enotes.filter(n => n.id !== id); renderENotes();
+    await api('/api/enotes/' + encodeURIComponent(id), { method: 'DELETE' });
+    toast && toast('Note removed');
+  });
+  const meta = document.getElementById('jlists-meta');
+  if (meta) { const bits = []; if (enotes.length) bits.push(enotes.length + ' note' + (enotes.length === 1 ? '' : 's')); if (jlists.length) bits.push(jlists.length + ' list' + (jlists.length === 1 ? '' : 's')); meta.textContent = bits.join(' · '); }
+}
+function loadENotes() { return api('/api/enotes').then(d => { if (d && Array.isArray(d.notes)) { enotes = d.notes; enotesTier = d.tier || ''; renderENotes(); } }).catch(() => {}); }
+(() => {
+  const inp = document.getElementById('enote-in'), add = document.getElementById('enote-add'),
+    cam = document.getElementById('enote-cam'), file = document.getElementById('enote-file');
+  if (!inp || !add) return;
+  const post = async () => {
+    const text = inp.value.trim(); if (!text) return;
+    inp.value = '';
+    const r = await api('/api/enotes', { method: 'POST', body: JSON.stringify({ text }) });
+    if (r && r.notes) { enotes = r.notes; renderENotes(); }
+  };
+  add.onclick = post;
+  inp.onkeydown = e => { if (e.key === 'Enter') post(); };
+  cam.onclick = () => file.click();
+  file.onchange = () => {
+    const f = file.files && file.files[0]; if (!f) return;
+    const img = new Image();
+    img.onload = async () => {
+      const MAX = 900, k = Math.min(1, MAX / Math.max(img.width, img.height));
+      const cv = document.createElement('canvas');
+      cv.width = Math.round(img.width * k); cv.height = Math.round(img.height * k);
+      cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+      const dataUrl = cv.toDataURL('image/jpeg', 0.75);
+      URL.revokeObjectURL(img.src); file.value = '';
+      const r = await api('/api/enotes/image', { method: 'POST', body: JSON.stringify({ dataUrl, caption: inp.value.trim() }) });
+      inp.value = '';
+      if (r && r.notes) { enotes = r.notes; renderENotes(); } else toast && toast((r && r.error) || 'upload failed');
+    };
+    img.src = URL.createObjectURL(f);
+  };
+  loadENotes();
+  setInterval(loadENotes, 120000);
+})();
 let jlists = [];
 function renderJList() {
   const el = document.getElementById('jlists'); if (!el) return;
   const meta = document.getElementById('jlists-meta');
   if (!jlists.length) {
-    el.innerHTML = '<div class="tiny muted">Add a bulleted list under a new <code>## Heading</code> in today\'s journal (one that isn\'t a template section) and it appears here.</div>';
-    if (meta) meta.textContent = ''; return;
+    el.innerHTML = enotes.length ? '' : '<div class="tiny muted">Type a quick note above, snap a 📷, or add a bulleted list under a new <code>## Heading</code> in today\'s journal — it all lands here.</div>';
+    renderENotes(); return;
   }
-  if (meta) meta.textContent = jlists.length + (jlists.length === 1 ? ' list' : ' lists');
-  el.innerHTML = '<div class="jl-grid">' + jlists.map(l => `<div class="jl-box" data-id="${esc(l.id)}">
+  renderENotes(); // combined 'N notes · M lists' meta
+  const pinned = jlists.filter(l => l.persistent || l.shared), eph = jlists.filter(l => !l.persistent && !l.shared);
+  const boxHtml = l => `<div class="jl-box${l.persistent || l.shared ? ' jl-pinned' : ''}" data-id="${esc(l.id)}">
     <button class="jl-x" title="Done — remove this list">✕</button>
-    <h3>${esc(l.heading)} <span class="jl-src">${esc(l.date || '')}</span></h3>
-    ${(l.items || []).map((it, i) => `<div class="jl-item${it.done ? ' done' : ''}" data-i="${i}"><input type="checkbox" class="jl-chk"${it.done ? ' checked' : ''}><span>${esc(it.text)}</span></div>`).join('')}
-  </div>`).join('') + '</div>';
+    <h3>${esc(l.heading)} ${l.persistent ? '<span class="jl-pin" title="persistent — never auto-completes">📌</span>' : ''}<span class="jl-src">${esc(l.date || '')}</span></h3>
+    ${(l.items || []).map((it, i) => `<div class="jl-item${it.done ? ' done' : ''}" data-i="${i}"><input type="checkbox" class="jl-chk"${it.done ? ' checked' : ''}><span>${esc(it.text)}${it.doer ? ' <span class="jl-doer" title="helper reports this complete — check to confirm">✋ reported done</span>' : ''}</span>${(it.comments || []).map(c => `<div class="tiny jl-cmt">💬 <b>${esc(c.from)}</b>: ${esc(c.text)}</div>`).join('')}</div>`).join('')}
+    <div class="jl-add"><input class="jl-add-in" placeholder="＋ add item…"><button class="jl-add-go ib">＋</button></div>
+  </div>`;
+  el.innerHTML =
+    (pinned.length ? '<div class="jl-subhead">📌 Pinned / shared</div><div class="jl-grid">' + pinned.map(boxHtml).join('') + '</div>' : '')
+    + (eph.length ? (pinned.length ? '<div class="jl-subhead">Ephemeral</div>' : '') + '<div class="jl-grid">' + eph.map(boxHtml).join('') + '</div>' : '');
   el.querySelectorAll('.jl-box').forEach(box => {
     const list = jlists.find(l => l.id === box.dataset.id); if (!list) return;
+    const addIn = box.querySelector('.jl-add-in'), addGo = box.querySelector('.jl-add-go');
+    const addItem = async () => {
+      const text = addIn.value.trim(); if (!text) return;
+      addIn.value = '';
+      await api('/api/journal-lists/' + encodeURIComponent(list.id) + '/add', { method: 'POST', body: JSON.stringify({ text }) });
+      loadJLists();
+    };
+    if (addGo) { addGo.onclick = addItem; addIn.onkeydown = e => { if (e.key === 'Enter') addItem(); }; }
     box.querySelector('.jl-x').onclick = async () => {
       jlists = jlists.filter(l => l.id !== list.id); renderJList();
       await api(`/api/journal-lists/${encodeURIComponent(list.id)}/dismiss`, { method: 'POST', body: '{}' });
@@ -2021,8 +2173,43 @@ function markCycle() { // "?" beside Today (when today is in the window) and Age
   put('section[data-sec="brief"] [data-sec-title]', [0, 1, 2, 3, 4].some(k => set.has(isoPlus(k))));
 }
 // ---------- wind & waves (home break, config-keyed) ----------
-function loadSurf() {
-  api('/api/surf').then(d => {
+// Spot selection: 'auto' geolocates (closest configured spot wins; timezone fallback when
+// geolocation is denied/blocked — e.g. plain-http on the LAN), or a manual pick that sticks
+// per-device via localStorage. The tz→spot fallback comes from each spot's optional `tz`
+// field in the server's roster — nothing location-specific lives in this file.
+let surfSpotsCache = null;
+async function surfQuery() {
+  const pick = localStorage.getItem('surfSpot') || 'auto';
+  if (pick !== 'auto') return '?spot=' + encodeURIComponent(pick);
+  const geo = await new Promise(r => {
+    if (!navigator.geolocation) return r(null);
+    const t = setTimeout(() => r(null), 2500);
+    navigator.geolocation.getCurrentPosition(
+      p => { clearTimeout(t); r(p.coords); }, () => { clearTimeout(t); r(null); },
+      { maximumAge: 3600000, timeout: 2200, enableHighAccuracy: false });
+  });
+  if (geo) return `?lat=${geo.latitude.toFixed(3)}&lon=${geo.longitude.toFixed(3)}`;
+  try {
+    if (!surfSpotsCache) surfSpotsCache = (await api('/api/surf/spots')).spots || [];
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const m = surfSpotsCache.find(s => s.tz && s.tz === tz);
+    if (m) return '?spot=' + encodeURIComponent(m.key);
+  } catch (e) {}
+  return '';
+}
+function wireSurfSel() {
+  const sel = $('surf-spot-sel'); if (!sel || sel.options.length) return;
+  api('/api/surf/spots').then(({ spots }) => {
+    if (!spots || spots.length < 2) { sel.style.display = 'none'; return; }
+    const cur = localStorage.getItem('surfSpot') || 'auto';
+    sel.innerHTML = `<option value="auto">📍 auto</option>` + spots.map(s => `<option value="${esc(s.key)}" ${s.key === cur ? 'selected' : ''}>${esc(s.name)}</option>`).join('');
+    if (cur === 'auto') sel.value = 'auto';
+    sel.onchange = () => { localStorage.setItem('surfSpot', sel.value); loadSurf(); };
+  }).catch(() => { sel.style.display = 'none'; });
+}
+async function loadSurf() {
+  wireSurfSel();
+  api('/api/surf' + await surfQuery()).then(d => {
     const el = $('surf'); if (!el) return;
     const lbl = $('surf-spot'); if (lbl && d && d.spot) lbl.textContent = d.spot;
     if (d && d.unconfigured) { el.innerHTML = `<div class="empty">${esc(d.hint)}</div>`; return; }
@@ -2091,7 +2278,9 @@ function renderLookahead() {
     .map(a => ({ _act: a.activity, _note: [a.venue, a.note].filter(Boolean).join(' · '), _url: a.url,
       summary: a.title + (a.venue ? ' @ ' + a.venue : ''),
       start: a.time ? { dateTime: a.date + 'T' + a.time } : { date: a.date } }));
-  const dayEvs = d => [...evOn(d), ...actOn(d)].sort((a, b) => evSal(b) - evSal(a) || evT(a) - evT(b));
+  // Suggestions stay OUT of the schedule (David 2026-07-31): only real calendar entries
+  // render here — an activity earns its place by being swiped right (→ calendar insert).
+  const dayEvs = d => [...evOn(d)].sort((a, b) => evSal(b) - evSal(a) || evT(a) - evT(b));
   const days = [];
   for (let i = 0; i < n; i++) {
     const d = new Date(from.getTime() + i * 86400000);
@@ -3268,6 +3457,27 @@ api('/api/calendar').then(r => {
 }).catch(() => { $('today').innerHTML = '<div class="err">Calendar unreachable</div>'; });
 
 api('/api/media').then(r => { mediaRows = r.media || []; renderMedia(); }).catch(() => { $('mediaq').innerHTML = '<div class="err">Media tab unreachable</div>'; });
+
+// Jobs board summary — NEW openings only (owner rule 2026-07-28): show what appeared
+// since the board was last opened on this device (fallback 48h); everything else is a
+// one-line count. Same jobs-last-visit stamp the /jobs page writes (shared origin).
+api('/api/jobs').then(r => {
+  const el = $('jobs-summary');
+  const open = (r.jobs || []).filter(j => j.status === 'open').sort((a, b) => (a.rank || 1e9) - (b.rank || 1e9));
+  const applied = (r.jobs || []).filter(j => j.status === 'applied').length;
+  if (!open.length) { el.innerHTML = `<div class="empty">No open roles${applied ? ` · ${applied} applied` : ''} — the search agent adds new ones daily. <a href="/jobs">board →</a></div>`; return; }
+  // same rule as the board: since last visit, and always the last 24h (glances can't consume the day)
+  const stamp = Date.parse(localStorage.getItem('jobs-last-visit') || '') || (Date.now() - 48 * 3600e3);
+  const cutoff = Math.min(stamp, Date.now() - 24 * 3600e3);
+  const fresh = open.filter(j => (Date.parse(j.created || '') || 0) > cutoff);
+  const counts = `${open.length} open${applied ? ` · ${applied} applied` : ''} · <a href="/jobs">full board →</a>`;
+  if (!fresh.length) { el.innerHTML = `<div class="tiny">no new openings since your last board visit · ${counts}</div>`; return; }
+  el.innerHTML = fresh.slice(0, 5).map(j =>
+    `<div style="margin:2px 0;border-left:2px solid var(--green);padding-left:6px">💼 ${j.url ? `<a href="${esc(j.url)}" target="_blank" rel="noopener"><b>${esc(j.title)}</b></a>` : `<b>${esc(j.title)}</b>`}
+     ${(j.flags || []).includes('hot') ? '<span style="font-size:9px;font-weight:700;color:#e9b949">⚡</span>' : ''}
+     <span class="muted">— ${esc(j.company)}${j.location ? ' · ' + esc(j.location) : ''}</span></div>`).join('')
+    + `<div class="tiny" style="margin-top:3px"><b style="color:var(--green)">${fresh.length} new</b>${fresh.length > 5 ? ` (top 5 shown)` : ''} since your last board visit · ${counts}</div>`;
+}).catch(() => { $('jobs-summary').innerHTML = '<div class="empty">Jobs board unreachable</div>'; });
 $('cfg-btn').onclick = cfgToggle;
 // plugin sections (plugins/*.js on the server — private, per-tier): each becomes a real
 // <section> in #secs, so ⚙ ordering/visibility/titles apply to them like anything else.
@@ -3602,6 +3812,22 @@ api('/api/agents/summary').then(d => {
   else $('agents-summary').innerHTML = '<div class="err">agents summary unavailable</div>';
 });
 })(0);
+// the full stable, back on the main page (nicknames = journal @-tags; see heartbeat spec)
+api('/api/agent-stable').then(d => {
+  const el = $('agents-table'); if (!el || !d || !Array.isArray(d.agents)) return;
+  const row = a => `<tr class="${a.status !== 'active' ? 'ag-standby' : ''}">
+    <td>${a.nick ? '<b>@' + esc(String(a.nick).split(' ')[0]) + '</b>' : ''}</td>
+    <td>${esc(a.name)}</td>
+    <td class="tiny">${esc(a.useCaseLabel || a.useCase || '')}</td>
+    <td class="tiny">${esc(shortModel(a.model))}${a.winner && a.winner !== a.model ? ' <span class="muted">(role: ' + esc(shortModel(a.winner)) + ')</span>' : ''}</td>
+    <td class="tiny">${a.tasks ? a.tasks + ' runs · ' + fmtTok((a.input || 0) + (a.output || 0)) : ''}${a.costUsd ? ' · $' + a.costUsd.toFixed(2) : ''}</td>
+    <td class="tiny muted">${esc(String(a.role || '').slice(0, 60))}</td></tr>`;
+  const modelTotals = (d.models || []).map(m =>
+    `<span style="margin-right:12px"><b>${esc(shortModel(m.model))}</b> ${fmtTok(m.input + m.output)} · $${m.costUsd.toFixed(2)}</span>`).join('');
+  el.innerHTML = `<table class="ag-tbl"><thead><tr><th>tag</th><th>agent</th><th>tier</th><th>model</th><th>7d tok · cost</th><th></th></tr></thead>
+    <tbody>${d.agents.map(row).join('')}</tbody></table>`
+    + (modelTotals ? `<div class="tiny" style="margin-top:5px"><span style="text-transform:uppercase;font-weight:700;color:var(--text3)">7d totals by model:</span> ${modelTotals}</div>` : '');
+}).catch(() => { const el = $('agents-table'); if (el) el.innerHTML = '<div class="tiny muted">stable table unavailable</div>'; });
 api('/api/filesystem').then(d => {
   if (d.unavailable) { $('filemgr').style.display = 'none'; return; }
   $('fm-meta').textContent = `(${d.totalFiles.toLocaleString()} tracked files · ${d.changed24h} changed 24h)`;
@@ -3624,6 +3850,7 @@ api('/api/filesystem').then(d => {
 // ---------- market signals — editable (＋ add, ✎ edit, ✕ drop; SSOT stays on the Sheet) ----------
 const SIG_TRENDS = ['', 'rising', 'up', 'flat', 'easing', 'falling'];
 let sigData = [];
+const qExpanded = new Set(); // session-local list expansions (⚙ collapsed-by-default)
 function sigFormHtml(s) {
   return `<div id="sig-form" data-id="${esc(s?.id || '')}" style="display:flex;flex-wrap:wrap;gap:5px;margin:6px 0;align-items:center">
     <input class="sf-signal" placeholder="signal — what to watch" value="${esc(s?.signal || '')}" style="flex:2;min-width:150px">
@@ -3657,6 +3884,7 @@ async function loadSignals() {
   const d = await api('/api/signals').catch(() => null);
   if (!d || d.error) { $('signals').innerHTML = '<div class="err">Signals tab unreachable</div>'; return; }
   sigData = d.signals || [];
+  if (allTasks.length) renderMatrix(); // Monitor renders signals inline
   ['sig-count', 'sig-count2'].forEach(id => { const el = document.getElementById(id); if (el) el.textContent = `(${sigData.length})`; });
   const TREND = { rising: ['↑', 'var(--red)'], up: ['↗', 'var(--amber)'], flat: ['→', 'var(--text2)'], easing: ['↘', 'var(--green)'], falling: ['↓', 'var(--green)'] };
   const srcLinks = s => String(s.source || '').split(/[\/,·]| and /).map(t => t.trim()).filter(Boolean)

@@ -140,7 +140,12 @@ async function grokAgent(prompt, { tools = ['x_search'] } = {}) {
     if (item.type === 'message' && Array.isArray(item.content)) for (const c of item.content) text += (c.text || c.output_text || '');
   }
   const u = j.usage || {};
-  logUsage({ module: 'grok', model: j.model || 'grok-4.3', input: u.input_tokens || u.prompt_tokens, output: u.output_tokens || u.completion_tokens, costUsd: '', note: 'xai+tools' }).catch(() => {});
+  // xAI bills agent live-search per source ON TOP of tokens — the token meter alone showed
+  // $0.07/day while the invoice ran ~$2/day at ~20 calls (2026-07-30 reconciliation). Until
+  // per-call source counts are exposed, book a flat estimated search fee per tools call.
+  const _in = u.input_tokens || u.prompt_tokens || 0, _out = u.output_tokens || u.completion_tokens || 0;
+  const _est = (_in * 0.2 + _out * 0.5) / 1e6 + 0.09;
+  logUsage({ module: 'grok', model: j.model || 'grok-4.3', input: _in, output: _out, costUsd: _est.toFixed(4), note: 'xai+tools (incl est. live-search fee)' }).catch(() => {});
   return text.trim();
 }
 

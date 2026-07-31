@@ -19,7 +19,8 @@
       ],
       "modules": [
         "orch-esc",
-        "ci-esc"
+        "ci-esc",
+        "intern"
       ]
     },
     "steeldust": {
@@ -42,7 +43,8 @@
         "summary",
         "brief",
         "apa-scan",
-        "news"
+        "news",
+        "intern-cheap"
       ]
     },
     "workhorse": {
@@ -77,6 +79,25 @@
         "grok"
       ],
       "special": "Capability stand-in, not a benchmark race: grok's x_search is the only live X API access \u2014 reserved for X per policy; no public benchmark measures this. Fallback is none (feature degrades gracefully)."
+    },
+    "secretariat": {
+      "label": "Secretariat \u2014 on steroids (top long-horizon)",
+      "primary": "METR Long-Horizon",
+      "benchmarks": [
+        "METR Long-Horizon",
+        "SWE-bench Verified",
+        "ARC-AGI",
+        "HLE",
+        "AA Intelligence"
+      ],
+      "winner": "claude-fable-5",
+      "fallbacks": [
+        "claude-opus-4-8"
+      ],
+      "modules": [
+        "intern-super"
+      ],
+      "special": "Long-horizon autonomous work: multi-hour agentic tasks, delegated todo execution. Named for the horse that won Belmont by 31 lengths."
     }
   },
   "all_benchmarks": [
@@ -94,7 +115,8 @@
     "LMArena Image (t2i)",
     "MMMU (image understanding)",
     "TTS Arena ELO",
-    "STT WER (lower is better)"
+    "STT WER (lower is better)",
+    "METR Long-Horizon"
   ],
   "track_non_us_os": 3
 }

@@ -35,6 +35,7 @@ const WRITE_SOURCE = 'web';
 const SCOPES = [
   'https://www.googleapis.com/auth/spreadsheets',
   'https://www.googleapis.com/auth/calendar', // rw: Today-card swipe-right inserts events (user action, never agent-initiated)
+  'https://www.googleapis.com/auth/drive',    // rw: /ranmali donate checklist reparents photos between shared Thriftr folders
 ];
 const auth = fs.existsSync(KEY_FILE)
   ? new google.auth.GoogleAuth({ keyFile: KEY_FILE, scopes: SCOPES })
@@ -84,7 +85,39 @@ const ALLOWED_EMAIL = CFG.allowedEmail;
 const GAME_GUEST_EMAILS = String(process.env.JUNGLEFARM_EMAILS || '').toLowerCase()
   .split(',').map(s => s.trim()).filter(Boolean);
 const isGamePath = p => p === '/junglefarm' || p.startsWith('/junglefarm/');
-const SESSION_SECRET = process.env.SESSION_SECRET || process.env.DASHBOARD_PASSWORD || 'dev-only-secret';
+// Biotech-tracker guests (CFG.bioEmails): same Google sign-in, but confined to the
+// tracker's page + its own API namespace. Same shape as the game guests above — a second
+// scoped identity, NOT a second auth system. The owner (ALLOWED_EMAIL) always has access.
+const BIO_ROUTE = CFG.bioRoute;
+const BIO_GUEST_EMAILS = CFG.bioEmails;
+const isBioPath = p => p === BIO_ROUTE || p.startsWith(BIO_ROUTE + '/') || p.startsWith('/api/bio/');
+// Hampr donate-checklist guests (CFG.ranmaliEmails): same Google sign-in, confined to
+// /ranmali + its own API namespace. Third instance of the scoped-guest shape above.
+const RANMALI_ROUTE = '/ranmali';
+const RANMALI_GUEST_EMAILS = CFG.ranmaliEmails;
+const isRanmaliPath = p => p === RANMALI_ROUTE || p.startsWith(RANMALI_ROUTE + '/') || p.startsWith('/api/ranmali/');
+// Google delivers the SAME account under several spellings: googlemail.com is an alias of
+// gmail.com (it is what some regions/older phones return), dots in a gmail local part are
+// ignored, and +tags are ignored. An exact string compare therefore locks out a legitimate
+// user depending on which device they signed in from — which is exactly what happened to a
+// guest on 2026-07-30. Normalise both sides before comparing. Non-Google domains are left
+// alone: dots and +tags ARE significant elsewhere.
+function normEmail(e) {
+  const s = String(e || '').trim().toLowerCase();
+  const at = s.lastIndexOf('@');
+  if (at < 1) return s;
+  let local = s.slice(0, at), domain = s.slice(at + 1);
+  if (domain === 'googlemail.com') domain = 'gmail.com';
+  if (domain === 'gmail.com') local = local.split('+')[0].replace(/\./g, '');
+  return `${local}@${domain}`;
+}
+const ALLOWED_EMAILS_N = String(ALLOWED_EMAIL || '').split(',').map(x => normEmail(x)).filter(Boolean); // comma list; first = owner
+const ALLOWED_EMAIL_N = ALLOWED_EMAILS_N[0] || '';
+const emailAllowed = e => ALLOWED_EMAILS_N.includes(normEmail(e || ''));
+const GAME_GUEST_N = GAME_GUEST_EMAILS.map(normEmail);
+const BIO_GUEST_N = BIO_GUEST_EMAILS.map(normEmail);
+const RANMALI_GUEST_N = RANMALI_GUEST_EMAILS.map(normEmail);
+const SESSION_SECRET =process.env.SESSION_SECRET || process.env.DASHBOARD_PASSWORD || 'dev-only-secret';
 
 const b64url = s => Buffer.from(s).toString('base64url');
 function signSession(email) {
@@ -145,14 +178,18 @@ app.get('/auth/callback', asyncRoute(async (req, res) => {
   const c = new OAuth2Client(OAUTH_ID, OAUTH_SECRET, redirectUri(req));
   const { tokens } = await c.getToken(req.query.code);
   const ticket = await c.verifyIdToken({ idToken: tokens.id_token, audience: OAUTH_ID });
-  const email = (ticket.getPayload().email || '').toLowerCase();
-  const isOwner = email === ALLOWED_EMAIL;
-  if (!isOwner && !GAME_GUEST_EMAILS.includes(email)) return res.status(403).send(`Not authorized: ${email}`);
+  const rawEmail = (ticket.getPayload().email || '').toLowerCase();
+  const email = normEmail(rawEmail);
+  const isOwner = email === ALLOWED_EMAIL_N;
+  if (!isOwner && !GAME_GUEST_N.includes(email) && !BIO_GUEST_N.includes(email) && !RANMALI_GUEST_N.includes(email)) return res.status(403).send(`Not authorized: ${rawEmail}`);
   const secure = (req.headers['x-forwarded-proto'] === 'https') ? '; Secure' : '';
   res.set('Set-Cookie', `dash_session=${encodeURIComponent(signSession(email))}; HttpOnly${secure}; SameSite=Lax; Max-Age=${30 * 24 * 3600}; Path=/${cookieDomain(req)}`);
   const next = safeNext(String(req.query.state || '').startsWith('next:') ? String(req.query.state).slice(5) : '');
   if (isOwner) return res.redirect(next || '/');
-  res.redirect(isGamePath(next.split('?')[0]) ? next : '/junglefarm/');
+  const nextPath = next.split('?')[0];
+  if (BIO_GUEST_N.includes(email)) return res.redirect(isBioPath(nextPath) ? next : BIO_ROUTE);
+  if (RANMALI_GUEST_N.includes(email)) return res.redirect(isRanmaliPath(nextPath) ? next : RANMALI_ROUTE);
+  res.redirect(isGamePath(nextPath) ? next : '/junglefarm/');
 }));
 app.get('/auth/logout', (req, res) => {
   // clear both scopes — sessions may predate the Domain-scoped cookie
@@ -169,14 +206,16 @@ app.get('/auth/logout', (req, res) => {
 app.get('/auth/gmail/connect', (req, res) => {
   if (!OAUTH_ID) return res.status(501).send('Set GOOGLE_OAUTH_CLIENT_ID/SECRET first (same as Sign-in-with-Google) — see .env.example.');
   const c = new OAuth2Client(OAUTH_ID, OAUTH_SECRET, redirectUri(req));
-  res.redirect(c.generateAuthUrl({ scope: ['https://www.googleapis.com/auth/gmail.readonly', 'email'], access_type: 'offline', prompt: 'consent', state: 'gmail' }));
+  // readonly (triage) + compose (Stage C drafts — create drafts only, NEVER send; the
+  // send scope is deliberately not requested). AT009: one re-consent covers both stages.
+  res.redirect(c.generateAuthUrl({ scope: ['https://www.googleapis.com/auth/gmail.readonly', 'https://www.googleapis.com/auth/gmail.compose', 'email'], access_type: 'offline', prompt: 'consent', state: 'gmail' }));
 });
 async function gmailConsentReturn(req, res) {
   const c = new OAuth2Client(OAUTH_ID, OAUTH_SECRET, redirectUri(req));
   const { tokens } = await c.getToken(req.query.code);
   const ticket = await c.verifyIdToken({ idToken: tokens.id_token, audience: OAUTH_ID }).catch(() => null);
   const email = (ticket?.getPayload()?.email || '').toLowerCase();
-  if (ALLOWED_EMAIL && email && email !== ALLOWED_EMAIL) return res.status(403).send(`Not authorized: ${email}`);
+  if (ALLOWED_EMAIL_N && email && !emailAllowed(email)) return res.status(403).send(`Not authorized: ${email}`);
   if (!tokens.refresh_token) return res.status(400).send('Google did not return a refresh token — revoke prior access at https://myaccount.google.com/permissions and try again (prompt=consent should force a fresh one).');
   if (HAS_JOURNAL) { // the durable primary host — write directly
     fs.mkdirSync(path.dirname(GMAIL_TOKEN_FILE), { recursive: true });
@@ -210,16 +249,32 @@ app.use((req, res, next) => {
   // everything else (all POSTs, all other pages/APIs) stays behind the gate. The payload is
   // allowlist-built in /api/public/agentstable; never widen this to a prefix match.
   if (req.method === 'GET' && PUBLIC_GETS.has(req.path)) return next();
+  // Shared-list bridge: token-authed per-list access for EXTERNAL helpers/agents (read,
+  // doer-complete, comment). The token IS the auth — checked inside the route; unknown
+  // tokens 404 without touching anything else behind the gate.
+  if (req.path.startsWith('/api/elists/ext/')) return next();
   if (OAUTH_ID && process.env.OAUTH_REDIRECT_BASE) {
     const sess = verifySession(cookieOf(req, 'dash_session'));
     if (sess) {
-      const email = String(sess.email || '').toLowerCase();
-      if (email === ALLOWED_EMAIL) return next();
+      const email = normEmail(sess.email);
+      if (emailAllowed(email)) return next();
       // game guests: /junglefarm only — anything else bounces back to the game
-      if (GAME_GUEST_EMAILS.includes(email)) {
+      if (GAME_GUEST_N.includes(email)) {
         if (isGamePath(req.path)) return next();
         if (req.path.startsWith('/api/')) return res.status(403).json({ error: 'game guests only have /junglefarm' });
         return res.redirect('/junglefarm/');
+      }
+      // biotech-tracker guests: the tracker page + /api/bio/* only
+      if (BIO_GUEST_N.includes(email)) {
+        if (isBioPath(req.path)) return next();
+        if (req.path.startsWith('/api/')) return res.status(403).json({ error: 'not authorized for this API' });
+        return res.redirect(BIO_ROUTE);
+      }
+      // Hampr donate-checklist guests: the /ranmali page + /api/ranmali/* only
+      if (RANMALI_GUEST_N.includes(email)) {
+        if (isRanmaliPath(req.path)) return next();
+        if (req.path.startsWith('/api/')) return res.status(403).json({ error: 'not authorized for this API' });
+        return res.redirect(RANMALI_ROUTE);
       }
       // valid signature but email no longer on any list (e.g. guest removed) → re-login
     }
@@ -382,6 +437,95 @@ app.get('/agentstable', (req, res) => {
   res.setHeader('Cache-Control', 'no-cache, must-revalidate');
   res.sendFile(path.join(__dirname, 'public', 'formguide.html'));
 });
+// Jobs board — clean path (dashyng.com/jobs); behind the same OAuth gate as everything else.
+app.get('/jobs', (req, res) => {
+  res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+  res.sendFile(path.join(__dirname, 'public', 'jobs.html'));
+});
+// Biotech clinical-trial tracker — mounts at CFG.bioRoute (default /bio). Same OAuth gate;
+// guests listed in CFG.bioEmails reach this path and nothing else.
+app.get(BIO_ROUTE, (req, res) => {
+  res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+  res.sendFile(path.join(__dirname, 'public', 'bio.html'));
+});
+
+// ---------- Hampr donate checklist (/ranmali) ----------
+// Phone page for the housekeeper: photos of the clothes in the Thriftr "Donate" Drive
+// folder, one checkbox each; "Done" reparents the checked ones into "Donated". The Drive
+// tree is shared Editor with this instance's service account (same SA the sheets use).
+// Guests in CFG.ranmaliEmails see only this page (gate above); the owner sees everything.
+const RANMALI_FOLDERS = {
+  donate: process.env.RANMALI_DONATE_ID || '1g8t8ejYrZRthbddL3KU7HR8e0ysc3udO',   // Thriftr/Donate
+  donated: process.env.RANMALI_DONATED_ID || '1Ol5S8px2W2dzJ9fWgRU9O2cWz_J5fwEE', // Thriftr/Donated
+};
+const driveClient = google.drive({ version: 'v3', auth });
+const RANMALI_DRIVE_OPTS = { supportsAllDrives: true };
+app.get(RANMALI_ROUTE, (req, res) => {
+  res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+  res.sendFile(path.join(__dirname, 'public', 'ranmali.html'));
+});
+app.get('/api/ranmali/items', asyncRoute(async (req, res) => {
+  const r = await driveClient.files.list({
+    q: `'${RANMALI_FOLDERS.donate}' in parents and trashed = false and mimeType contains 'image/'`,
+    orderBy: 'createdTime',
+    pageSize: 200,
+    fields: 'files(id,name)',
+    ...RANMALI_DRIVE_OPTS,
+  });
+  res.json({ items: (r.data.files || []).map(f => ({ id: f.id, name: f.name, imgUrl: `/api/ranmali/img/${f.id}` })) });
+}));
+// Image proxy, scoped: only files currently in Donate/Donated are served — the parent
+// check stops a guest from using the SA to read arbitrary Drive files by id.
+app.get('/api/ranmali/img/:id', asyncRoute(async (req, res) => {
+  const fileId = String(req.params.id);
+  const meta = await driveClient.files.get({ fileId, fields: 'parents,mimeType,thumbnailLink', ...RANMALI_DRIVE_OPTS });
+  const parents = meta.data.parents || [];
+  if (!parents.includes(RANMALI_FOLDERS.donate) && !parents.includes(RANMALI_FOLDERS.donated)) {
+    return res.status(404).json({ error: 'not found' });
+  }
+  // Drive's resized thumbnail keeps a 200-photo column light on a phone; fall back to
+  // the original bytes when a thumbnail isn't available (same approach as Hampr itself).
+  try {
+    let link = meta.data.thumbnailLink;
+    if (link) {
+      link = link.replace(/=s\d+(-c)?$/, '=s800');
+      const tok = await auth.getAccessToken();
+      const r = await fetch(link, { headers: { Authorization: `Bearer ${tok}` } });
+      if (r.ok) {
+        res.set('Content-Type', r.headers.get('content-type') || 'image/jpeg');
+        res.set('Cache-Control', 'private, max-age=86400');
+        return res.end(Buffer.from(await r.arrayBuffer()));
+      }
+    }
+  } catch (e) { /* fall through to original bytes */ }
+  res.set('Content-Type', meta.data.mimeType || 'image/jpeg');
+  res.set('Cache-Control', 'private, max-age=86400');
+  const stream = await driveClient.files.get({ fileId, alt: 'media', ...RANMALI_DRIVE_OPTS }, { responseType: 'stream' });
+  stream.data.on('error', e => { if (!res.headersSent) res.status(500).end(e.message); }).pipe(res);
+}));
+app.post('/api/ranmali/done', asyncRoute(async (req, res) => {
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(String).slice(0, 200) : [];
+  if (!ids.length) return res.status(400).json({ error: 'no ids' });
+  const moved = [], failed = [];
+  // parallel in small chunks — a 20-item batch finishes in a couple of seconds instead
+  // of freezing the phone's busy state for ~10s of sequential Drive round-trips
+  for (let i = 0; i < ids.length; i += 10) {
+    await Promise.all(ids.slice(i, i + 10).map(async fileId => {
+      try {
+        // verify the file really is in Donate before reparenting (same containment rule
+        // as the image proxy; also makes a double-submit harmless)
+        const meta = await driveClient.files.get({ fileId, fields: 'parents', ...RANMALI_DRIVE_OPTS });
+        if (!(meta.data.parents || []).includes(RANMALI_FOLDERS.donate)) { failed.push(fileId); return; }
+        await driveClient.files.update({
+          fileId, addParents: RANMALI_FOLDERS.donated, removeParents: RANMALI_FOLDERS.donate,
+          fields: 'id,parents', ...RANMALI_DRIVE_OPTS,
+        });
+        moved.push(fileId);
+      } catch (e) { failed.push(fileId); }
+    }));
+  }
+  res.json({ ok: failed.length === 0, moved, failed });
+}));
 
 // Capability flags — agent features need the claude CLI (subscription auth) and
 // the Obsidian vault, both Mac-only. On Cloud Run these report unavailable and
@@ -391,6 +535,22 @@ app.get('/agentstable', (req, res) => {
 const CLAUDE_BIN = process.env.CLAUDE_BIN === 'none' ? '' // explicit opt-out (also how tests simulate a claude-less machine)
   : [process.env.CLAUDE_BIN, '/opt/homebrew/bin/claude', '/usr/bin/claude', '/usr/local/bin/claude'].filter(Boolean).find(p => fs.existsSync(p)) || '';
 const HAS_CLAUDE = !!CLAUDE_BIN;
+// AT010 standing rule, automated: the claude CLI's auth is resolved when child processes
+// spawn with THIS process's env — a token refresh on disk never reaches a running server.
+// So (1) arm the long-lived token file at boot (same file heartbeat.sh uses), and (2) watch
+// it: on change, exit cleanly and let launchd (KeepAlive) / systemd (Restart) bring the
+// server back with the fresh credential. No manual restart to remember.
+const CLAUDE_TOK_FILE = path.join(os.homedir(), '.config', 'dashboard', 'claude-oauth-token');
+try {
+  const t = fs.readFileSync(CLAUDE_TOK_FILE, 'utf8').trim();
+  if (/^sk-ant-/.test(t) && !process.env.CLAUDE_CODE_OAUTH_TOKEN) process.env.CLAUDE_CODE_OAUTH_TOKEN = t;
+} catch (e) {}
+if (HAS_CLAUDE) fs.watchFile(CLAUDE_TOK_FILE, { interval: 60000 }, (cur, prev) => {
+  if (cur.mtimeMs !== prev.mtimeMs) {
+    console.error('claude token file changed — exiting for a supervised restart (AT010)');
+    setTimeout(() => process.exit(0), 500);
+  }
+});
 // Text-only LLM features run on either the claude CLI (subscription) or the Anthropic API
 // (key) — tool-needing agent features (WebFetch/WebSearch summaries, media find) are
 // CLI-only. With NEITHER, single-tier instances refuse cleanly instead of queueing forever;
@@ -1154,14 +1314,29 @@ app.get('/api/settings', asyncRoute(async (req, res) => res.json({
 // ---------- wind & waves (owner's home break): glanceable surf/kite check ----------
 // Open-Meteo forecast + marine APIs (free, keyless). Daylight hours only (06-20 local);
 // daily = the day's peak wind (that's what gates a session) + biggest wave w/ its period.
-let surfCache = { at: 0, data: null };
+// Spot roster: config surfSpots [{key,name,lat,lon}], else the legacy single spot. The
+// client sends its geolocation (?lat&lon → closest spot wins) or a manual ?spot=key.
+const SURF_SPOTS = (() => {
+  let s = Array.isArray(CFG.surfSpots) ? CFG.surfSpots.filter(x => x && +x.lat && +x.lon) : [];
+  if (!s.length && (CFG.surfSpotLat || CFG.surfSpotLon))
+    s = [{ key: 'home', name: CFG.surfSpotName || 'Home break', lat: CFG.surfSpotLat, lon: CFG.surfSpotLon }];
+  return s.map((x, i) => ({ key: String(x.key || 'spot' + i).slice(0, 24), name: String(x.name || x.key || 'Spot').slice(0, 60), lat: +x.lat, lon: +x.lon, tz: x.tz ? String(x.tz).slice(0, 40) : '' }));
+})();
+const surfDist = (a, b, lat, lon) => { const dl = (a - lat), dn = (b - lon) * Math.cos(lat * Math.PI / 180); return dl * dl + dn * dn; };
+app.get('/api/surf/spots', asyncRoute(async (req, res) => res.json({ spots: SURF_SPOTS.map(s => ({ key: s.key, name: s.name, tz: s.tz || undefined })) })));
+let surfCache = {}; // per spot key
 app.get('/api/surf', asyncRoute(async (req, res) => {
-  if (surfCache.data && Date.now() - surfCache.at < 60 * 60000) return res.json(surfCache.data);
-  const LAT = CFG.surfSpotLat, LON = CFG.surfSpotLon;
-  if (!LAT && !LON) return res.json({ unconfigured: true, hint: 'Set surfSpotName/surfSpotLat/surfSpotLon to enable the wind & waves check.' });
+  if (!SURF_SPOTS.length) return res.json({ unconfigured: true, hint: 'Set surfSpots (or surfSpotName/Lat/Lon) to enable the wind & waves check.' });
+  let spot = SURF_SPOTS.find(s => s.key === String(req.query.spot || ''));
+  if (!spot && isFinite(+req.query.lat) && isFinite(+req.query.lon) && req.query.lat !== '')
+    spot = [...SURF_SPOTS].sort((a, b) => surfDist(a.lat, a.lon, +req.query.lat, +req.query.lon) - surfDist(b.lat, b.lon, +req.query.lat, +req.query.lon))[0];
+  if (!spot) spot = SURF_SPOTS[0];
+  const c = surfCache[spot.key];
+  if (c && Date.now() - c.at < 60 * 60000) return res.json(c.data);
+  const LAT = spot.lat, LON = spot.lon;
   const [w, m] = await Promise.all([
-    fetch(`https://api.open-meteo.com/v1/forecast?latitude=${LAT}&longitude=${LON}&hourly=wind_speed_10m,wind_direction_10m&wind_speed_unit=kn&forecast_days=7&timezone=Europe%2FParis`).then(r => r.json()),
-    fetch(`https://marine-api.open-meteo.com/v1/marine?latitude=${LAT}&longitude=${LON}&hourly=wave_height,wave_period&forecast_days=7&timezone=Europe%2FParis`).then(r => r.json()).catch(() => null),
+    fetch(`https://api.open-meteo.com/v1/forecast?latitude=${LAT}&longitude=${LON}&hourly=wind_speed_10m,wind_direction_10m&wind_speed_unit=kn&forecast_days=7&timezone=auto`).then(r => r.json()),
+    fetch(`https://marine-api.open-meteo.com/v1/marine?latitude=${LAT}&longitude=${LON}&hourly=wave_height,wave_period&forecast_days=7&timezone=auto`).then(r => r.json()).catch(() => null),
   ]);
   const wt = w?.hourly?.time || [];
   if (!wt.length) { track('surf', false, 'open-meteo empty'); return res.json({ error: 'forecast unavailable' }); }
@@ -1184,10 +1359,111 @@ app.get('/api/surf', asyncRoute(async (req, res) => {
     return { date, wind: top.wind, dir: top.dir, wave: wv.wave, period: wv.period };
   });
   const hours = dates.slice(0, 2).map(date => ({ date, slots: byDay[date].filter(x => x.h % 3 === 0) })); // 06 09 12 15 18
-  const data = { at: nowIso(), spot: CFG.surfSpotName || 'Home break', daily, hours };
+  const data = { at: nowIso(), spot: spot.name, spotKey: spot.key, daily, hours };
   track('surf', true, `${daily.length}d / ${hours.length}×3h`);
-  surfCache = { at: Date.now(), data };
+  surfCache[spot.key] = { at: Date.now(), data };
   res.json(data);
+}));
+
+// ---------- API key management (🔑 in ⚙): stored keys hydrate process.env at boot ----------
+// Disk tiers (Mac/VM): ~/.config/dashboard/api-keys.json, mode 600 — outside every repo.
+// Cloud Run (ephemeral fs): GCP Secret Manager, secret 'dashboard-api-keys', one JSON payload.
+// Keys are verified against the provider BEFORE saving, never echoed back (masked last-4 only),
+// and never logged. Providers read process.env, so everything downstream just works.
+const KEYS_FILE = path.join(os.homedir(), '.config', 'dashboard', 'api-keys.json');
+const ON_CLOUD_RUN = !!process.env.K_SERVICE;
+const KEYS_SECRET = 'dashboard-api-keys';
+const KEY_PROVIDERS = {
+  anthropic: { env: 'ANTHROPIC_API_KEY', label: 'Anthropic (Claude)',
+    verify: k => fetch('https://api.anthropic.com/v1/models', { headers: { 'x-api-key': k, 'anthropic-version': '2023-06-01' }, signal: AbortSignal.timeout(10000) }) },
+  google: { env: 'GEMINI_API_KEY', label: 'Google (Gemini)',
+    verify: k => fetch('https://generativelanguage.googleapis.com/v1beta/models?key=' + encodeURIComponent(k), { signal: AbortSignal.timeout(10000) }) },
+  openai: { env: 'OPENAI_API_KEY', label: 'OpenAI',
+    verify: k => fetch('https://api.openai.com/v1/models', { headers: { Authorization: 'Bearer ' + k }, signal: AbortSignal.timeout(10000) }) },
+  xai: { env: 'XAI_API_KEY', label: 'xAI (Grok)',
+    verify: k => fetch('https://api.x.ai/v1/models', { headers: { Authorization: 'Bearer ' + k }, signal: AbortSignal.timeout(10000) }) },
+  openrouter: { env: 'OPENROUTER_API_KEY', label: 'OpenRouter',
+    // /auth/key validates the key itself (the models list is public and would pass any string)
+    verify: k => fetch('https://openrouter.ai/api/v1/auth/key', { headers: { Authorization: 'Bearer ' + k }, signal: AbortSignal.timeout(10000) }) },
+};
+async function smAccess() {
+  const auth = new (require('google-auth-library').GoogleAuth)({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
+  return { auth, projectId: await auth.getProjectId(), client: await auth.getClient() };
+}
+async function smFetch(method, url, body) {
+  const { client } = await smAccess();
+  const h = await client.getRequestHeaders();
+  const r = await fetch(url, { method, headers: { ...h, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+  if (!r.ok) throw new Error(`secret-manager ${r.status}: ${(await r.text()).slice(0, 120)}`);
+  return r.json();
+}
+function readKeysFile() { try { return JSON.parse(fs.readFileSync(KEYS_FILE, 'utf8')); } catch (e) { return {}; } }
+async function readStoredKeys() {
+  if (!ON_CLOUD_RUN) return readKeysFile();
+  try {
+    const { projectId } = await smAccess();
+    const r = await smFetch('GET', `https://secretmanager.googleapis.com/v1/projects/${projectId}/secrets/${KEYS_SECRET}/versions/latest:access`);
+    return JSON.parse(Buffer.from(r.payload.data, 'base64').toString());
+  } catch (e) { return {}; }
+}
+async function persistStoredKeys(keys) {
+  if (!ON_CLOUD_RUN) {
+    fs.mkdirSync(path.dirname(KEYS_FILE), { recursive: true });
+    fs.writeFileSync(KEYS_FILE, JSON.stringify(keys, null, 1), { mode: 0o600 });
+    fs.chmodSync(KEYS_FILE, 0o600);
+    return 'config file (mode 600)';
+  }
+  const { projectId } = await smAccess();
+  try { await smFetch('POST', `https://secretmanager.googleapis.com/v1/projects/${projectId}/secrets?secretId=${KEYS_SECRET}`, { replication: { automatic: {} } }); }
+  catch (e) { if (!/409/.test(e.message)) throw e; } // exists = fine
+  await smFetch('POST', `https://secretmanager.googleapis.com/v1/projects/${projectId}/secrets/${KEYS_SECRET}:addVersion`,
+    { payload: { data: Buffer.from(JSON.stringify(keys)).toString('base64') } });
+  return 'GCP Secret Manager';
+}
+let keyMeta = {}; // provider → last4 of STORED keys (full keys only in env + storage)
+readStoredKeys().then(keys => {
+  for (const [p, def] of Object.entries(KEY_PROVIDERS)) if (keys[p] && !process.env[def.env]) process.env[def.env] = keys[p];
+  keyMeta = Object.fromEntries(Object.entries(keys).map(([p, v]) => [p, String(v).slice(-4)]));
+}).catch(() => {});
+app.get('/api/keys', asyncRoute(async (req, res) => res.json({
+  storage: ON_CLOUD_RUN ? 'GCP Secret Manager' : '~/.config/dashboard/api-keys.json (600)',
+  providers: Object.entries(KEY_PROVIDERS).map(([id, d]) => ({
+    id, label: d.label,
+    stored: keyMeta[id] ? '••••' + keyMeta[id] : null,        // masked — the key itself never leaves
+    fromEnv: !!process.env[d.env] && !keyMeta[id],            // set at deploy time rather than via the panel
+  })),
+})));
+app.post('/api/keys/verify', asyncRoute(async (req, res) => {
+  const { provider, key } = req.body || {};
+  const d = KEY_PROVIDERS[provider];
+  if (!d || !String(key || '').trim()) return res.status(400).json({ error: 'provider + key required' });
+  try { const r = await d.verify(String(key).trim()); res.json({ ok: r.ok, status: r.status }); }
+  catch (e) { res.json({ ok: false, status: 0, error: e.message.slice(0, 100) }); }
+}));
+app.post('/api/keys', asyncRoute(async (req, res) => {
+  const { provider, key } = req.body || {};
+  const d = KEY_PROVIDERS[provider];
+  const k = String(key || '').trim();
+  if (!d || !k) return res.status(400).json({ error: 'provider + key required' });
+  const v = await d.verify(k).catch(() => null);
+  if (!v || !v.ok) return res.status(400).json({ error: `key failed verification (${v ? 'HTTP ' + v.status : 'network'})` });
+  const keys = await readStoredKeys();
+  keys[provider] = k;
+  let where;
+  try { where = await persistStoredKeys(keys); }
+  catch (e) { return res.status(502).json({ error: 'verified OK but could not persist: ' + e.message.slice(0, 140) }); }
+  process.env[d.env] = k;
+  keyMeta[provider] = k.slice(-4);
+  res.json({ ok: true, stored: '••••' + k.slice(-4), where });
+}));
+app.delete('/api/keys/:provider', asyncRoute(async (req, res) => {
+  const p = req.params.provider, d = KEY_PROVIDERS[p];
+  if (!d) return res.status(400).json({ error: 'unknown provider' });
+  const keys = await readStoredKeys();
+  delete keys[p];
+  try { await persistStoredKeys(keys); } catch (e) { return res.status(502).json({ error: e.message.slice(0, 140) }); }
+  delete keyMeta[p]; delete process.env[d.env];
+  res.json({ ok: true });
 }));
 
 // ---------- plugin sections (plugins/*.js — private, gitignored; see plugins/README.md) ----------
@@ -1273,6 +1549,12 @@ app.post('/api/settings', asyncRoute(async (req, res) => {
       if (typeof v === 'string' && v.trim()) next.newsSubtitles[k] = v.trim().slice(0, 90);
   }
   if (typeof s.briefHook === 'string') next.briefHook = s.briefHook.trim().slice(0, 300); // '' = off
+  if (s.listShares && typeof s.listShares === 'object') { // shared-list tokens {slug:{token,name}}
+    next.listShares = {};
+    for (const [k, v] of Object.entries(s.listShares))
+      if (v && v.token) next.listShares[String(k).slice(0, 60)] = { token: String(v.token).slice(0, 64), name: String(v.name || '').slice(0, 40),
+        ...(v.label ? { label: String(v.label).slice(0, 60) } : {}), ...(v.sheetId ? { sheetId: String(v.sheetId).slice(0, 60) } : {}), ...(v.tab ? { tab: String(v.tab).slice(0, 40) } : {}) };
+  }
   if (Array.isArray(s.clearedLeads)) next.clearedLeads = s.clearedLeads.filter(x => typeof x === 'string').slice(-100);
   if (typeof s.locInputSync === 'boolean') next.locInputSync = s.locInputSync; // sticky "sync to calendar" default
   if (Array.isArray(s.links)) next.links = s.links.filter(l => l && typeof l.url === 'string' && l.url.trim())
@@ -2154,11 +2436,15 @@ async function readFollowingCell() {
   } catch (e) { return { at: 0, items: [] }; }
 }
 async function getFollowing() {
-  const FRESH = 60 * 60 * 1000;
+  // ONCE A DAY, morning-gated (David 2026-07-30): the hourly rebuild was ~20 grok x_search
+  // calls/day, and xAI bills live search PER SOURCE outside the token meter — the invisible
+  // ~$2/day. One morning pull serves all tiers all day via the cross-tier cell.
+  const FRESH = 24 * 60 * 60 * 1000;
   if (followingCache.items.length && Date.now() - followingCache.at < FRESH) return followingCache.items;
   const cell = await readFollowingCell();               // pull whatever the Mac/VM last built
   if (cell.items.length && cell.at > followingCache.at) followingCache = { at: cell.at, items: cell.items };
-  if (HAS_CLAUDE && Date.now() - followingCache.at > FRESH && !followingBusy) { // only Mac/VM rebuild
+  const morningWindow = (h => h >= 5 && h < 12)(new Date().getHours());
+  if (HAS_CLAUDE && Date.now() - followingCache.at > FRESH && !followingBusy && morningWindow) { // only Mac/VM rebuild
     followingBusy = true;
     buildFollowing().then(items => {
       if (items && items.length) {
@@ -2538,7 +2824,23 @@ const SIGNAL_BY_KIND = {
   event_scheduled: 4, // swiped an event onto the ACTUAL calendar — strongest event signal
   event_skipped: -0.5, // swipe left = "just not scheduled" — barely negative by design
   comment: 0, // freeform note the owner types for the CI to read — context, not a vote
+  // Jobs board (/jobs) — the same Tinder-style label stream, applied to job openings.
+  // subjects[] carries the job's Category so CI/searcher credit-assign per category.
+  job_not_interested: -1, // swipe left / ✕ — wrong kind of role, don't refill with similar
+  job_ranked_up: 1, // dragged higher in the list — mild "more like this"
+  job_more_like_this: 2, // explicit 👍 — strong "more like this"
+  job_applied: 3, // actually applied — the strongest job signal there is
+  job_comment: 0, // freeform note typed on the /jobs board — add-job requests, new categories,
+  // search steering; consumed by the daily search agent and the nightly CI, not a vote
+  job_maybe: 0.5, // parked in the Maybe section — deferred interest, mildly positive
 };
+// Shared writer: Mac appends to the CI's JSONL directly; stateless tiers queue on the
+// Feedback Queue tab for the heartbeat to drain (identical semantics to /api/feedback).
+async function writeFeedbackEntry(entry) {
+  const line = JSON.stringify(entry);
+  if (HAS_JOURNAL) fs.appendFileSync(FEEDBACK_FILE, line + '\n');
+  else await appendTabRow(FB_TAB, FB_HEADERS, [line, nowIso(), '']);
+}
 app.post('/api/feedback', asyncRoute(async (req, res) => {
   const { kind, title, url, source, context, subjects, person, author } = req.body || {};
   if (!kind) return res.status(400).json({ error: 'kind required' });
@@ -2548,21 +2850,197 @@ app.post('/api/feedback', asyncRoute(async (req, res) => {
     subjects: Array.isArray(subjects) ? subjects : [], person: person || '', author: author || '',
     context: context || '',
   };
-  const line = JSON.stringify(entry);
-  if (HAS_JOURNAL) {
-    fs.appendFileSync(FEEDBACK_FILE, line + '\n'); // Mac: CI reads this directly
-    // a freeform CI comment also lands in the journal's ## CI Log so it's visible there
-    if (kind === 'comment' && context) appendToJournal(`- ${nowIso().slice(11, 16)} ${String(context).replace(/\n+/g, ' ')}`, { section: 'CI Log' });
-  } else {
-    await appendTabRow(FB_TAB, FB_HEADERS, [line, nowIso(), '']); // cloud: durable; Mac drains
-  }
+  await writeFeedbackEntry(entry); // Mac: CI reads the JSONL directly; cloud: queued, Mac drains
+  // a freeform CI comment also lands in the journal's ## CI Log so it's visible there
+  if (HAS_JOURNAL && kind === 'comment' && context) appendToJournal(`- ${nowIso().slice(11, 16)} ${String(context).replace(/\n+/g, ' ')}`, { section: 'CI Log' });
   // swipe-left → also persist to the durable dismissal store so the story is
   // filtered out of every future render/rebuild (any instance). url OR title is enough.
   if (kind === 'not_interested' && (url || title)) {
     await appendTabRow(DISMISS_TAB, DISMISS_HEADERS, [url || '', title || '', nowIso()]).catch(() => {});
     dismissedCache.at = 0; // take effect immediately
   }
+  // Activity-event swipes are durable too (David 2026-07-31: phone swipes were resurfacing
+  // on the Mac): ANY resolving swipe — skip, down, or scheduled — permanently retires the
+  // suggestion across tiers. Key = evt:<norm title>|<activity> in the URL column.
+  if (['event_skipped', 'event_down', 'event_scheduled'].includes(kind) && title) {
+    await appendTabRow(DISMISS_TAB, DISMISS_HEADERS, ['evt:' + normTitle(title) + '|' + (source || ''), title, nowIso()]).catch(() => {});
+    dismissedCache.at = 0;
+  }
   res.json({ ok: true });
+}));
+
+// ---------- Jobs board (/jobs) ----------
+// Job openings tracked on their own Sheet tab (durable, cross-instance). A daily headless
+// agent (bin/jobsearch.sh, Sonnet-tier with web search) appends new openings via POST
+// /api/jobs; the owner curates on the /jobs page — drag to re-rank, swipe left to remove,
+// 👍 = more like this, checkbox = application done. Every curation action emits a CI
+// feedback signal (job_* kinds above) so the searcher's taste improves.
+// Est = comma-list of LLM-ESTIMATED field names (remote,salary,deadline,posted) — the UI
+// renders those values in purple to keep estimates visually distinct from stated facts.
+const JOBS_TAB = 'Jobs';
+const JOBS_HEADERS = ['Title', 'URL', 'Company', 'CompanyURL', 'Category', 'Location', 'Remote', 'Salary', 'Deadline', 'Posted', 'Est', 'Status', 'Rank', 'Notes', 'Source', 'Created', 'Updated', 'ID', 'Flags'];
+// hint a stable subset so optional new columns (Flags) never break reads of an older tab
+const JOBS_HINT = ['Title', 'Company', 'Status', 'ID'];
+const readJobsTab = () => readTab(TODO_SHEET_ID, JOBS_TAB, JOBS_HINT);
+const jobOut = r => ({
+  id: r.ID, title: r.Title, url: r.URL, company: r.Company, companyUrl: r.CompanyURL,
+  category: r.Category || 'Uncategorized', location: r.Location, remote: r.Remote,
+  salary: r.Salary, deadline: r.Deadline, posted: r.Posted,
+  est: String(r.Est || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean),
+  status: r.Status || 'open', rank: parseFloat(r.Rank) || 0,
+  notes: r.Notes, source: r.Source, created: r.Created, updated: r.Updated,
+  // flags: csv of UI markers; 'hot' = energy-team role AT an AI/compute company (labs,
+  // hyperscalers, GPU clouds, DC operators) — rendered prominently on the board
+  flags: String(r.Flags || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean),
+  // ★ tier from the fav token: 0 none / 1 ★ / 2 ★★, plus first-starred epoch for ordering
+  fav: (t => t ? (t.startsWith('fav2') ? 2 : 1) : 0)(String(r.Flags || '').toLowerCase().split(',').map(s => s.trim()).find(t => t.startsWith('fav'))),
+  favAt: (t => t && t.includes(':') ? Number(t.split(':')[1]) : 0)(String(r.Flags || '').toLowerCase().split(',').map(s => s.trim()).find(t => t.startsWith('fav'))),
+});
+const jobFeedback = (kind, r, context) => writeFeedbackEntry({
+  at: nowIso(), kind, signal: SIGNAL_BY_KIND[kind] ?? 0,
+  title: `${r.Title || ''} @ ${r.Company || ''}`, url: r.URL || '', source: 'jobs',
+  subjects: [r.Category || ''].filter(Boolean), context: context || '',
+}).catch(e => console.error('job feedback:', e.message));
+
+app.get('/api/jobs', asyncRoute(async (req, res) => {
+  let rows = [];
+  try { rows = (await readJobsTab()).rows; }
+  catch (e) { if (!/Header row not found|Unable to parse range/i.test(e.message)) throw e; } // tab not created yet = empty board
+  const all = String(req.query.all || '') === '1'; // agent dedup wants removed rows too
+  const jobs = rows.map(jobOut).filter(j => all || j.status !== 'removed')
+    .sort((a, b) => (a.rank || 1e9) - (b.rank || 1e9));
+  res.json({ jobs });
+}));
+
+// Add one opening (daily agent, or a manual paste from the page). Dedup: URL match, or
+// same Title+Company, against ALL rows including removed — a swiped-away job must never
+// be re-added by the next day's search.
+app.post('/api/jobs', asyncRoute(async (req, res) => {
+  const b = req.body || {};
+  if (!b.title || !b.company) return res.status(400).json({ error: 'title and company required' });
+  let existing = [];
+  try { existing = (await readJobsTab()).rows; } catch (e) {}
+  const norm = s => String(s || '').trim().toLowerCase().replace(/\/+$/, '');
+  const dup = existing.find(r => (b.url && norm(r.URL) === norm(b.url))
+    || (norm(r.Title) === norm(b.title) && norm(r.Company) === norm(b.company)));
+  if (dup) return res.json({ ok: true, deduped: true, id: dup.ID });
+  const id = crypto.randomUUID();
+  const est = Array.isArray(b.est) ? b.est.join(',') : String(b.est || '');
+  const flags = Array.isArray(b.flags) ? b.flags.join(',') : String(b.flags || '');
+  // default rank: after the current bottom of the job's category
+  const catRanks = existing.filter(r => (r.Category || '') === (b.category || '') && r.Status !== 'removed')
+    .map(r => parseFloat(r.Rank) || 0);
+  const rank = b.rank !== undefined ? Number(b.rank) : (catRanks.length ? Math.max(...catRanks) + 1 : 1);
+  await appendTabRow(JOBS_TAB, JOBS_HEADERS, [
+    b.title, b.url || '', b.company, b.companyUrl || '', b.category || '', b.location || '',
+    b.remote || '', b.salary || '', b.deadline || '', b.posted || '', est,
+    'open', String(rank), b.notes || '', b.source || WRITE_SOURCE, nowIso(), nowIso(), id, flags,
+  ]);
+  res.json({ ok: true, id });
+}));
+
+// Update named columns of one job row, located fresh by ID (same pattern as tasks).
+async function updateJobById(id, changes) {
+  const { headers, rows } = await readJobsTab();
+  const row = rows.find(r => r.ID === id);
+  if (!row) return null;
+  changes.Updated = nowIso();
+  const data = Object.entries(changes)
+    .filter(([f]) => headers.indexOf(f) !== -1)
+    .map(([f, v]) => ({ range: `'${JOBS_TAB}'!${colLetter(headers.indexOf(f))}${row._row}`, values: [[v]] }));
+  if (data.length) await store.values.batchUpdate({ spreadsheetId: TODO_SHEET_ID, requestBody: { valueInputOption: 'RAW', data } });
+  return { ...row, ...changes };
+}
+
+app.patch('/api/jobs/:id', asyncRoute(async (req, res) => {
+  const allowed = ['Title', 'URL', 'Company', 'CompanyURL', 'Category', 'Location', 'Remote', 'Salary', 'Deadline', 'Posted', 'Est', 'Status', 'Rank', 'Notes', 'Flags'];
+  const changes = {};
+  for (const [k, v] of Object.entries(req.body || {})) {
+    const f = allowed.find(a => a.toLowerCase() === k.toLowerCase());
+    if (f) changes[f] = String(v);
+  }
+  if (!Object.keys(changes).length) return res.status(400).json({ error: 'no updatable fields' });
+  const updated = await updateJobById(req.params.id, changes);
+  if (!updated) return res.status(404).json({ error: 'job not found: ' + req.params.id });
+  res.json({ ok: true, job: jobOut(updated) });
+}));
+
+// swipe left / ✕ — hide forever + negative CI signal
+app.post('/api/jobs/:id/remove', asyncRoute(async (req, res) => {
+  const updated = await updateJobById(req.params.id, { Status: 'removed' });
+  if (!updated) return res.status(404).json({ error: 'job not found' });
+  await jobFeedback('job_not_interested', updated, req.body?.context || '');
+  res.json({ ok: true });
+}));
+
+// checkbox — application completed (toggle; un-checking restores 'open', no signal)
+app.post('/api/jobs/:id/applied', asyncRoute(async (req, res) => {
+  const applied = req.body?.applied !== false;
+  const updated = await updateJobById(req.params.id, { Status: applied ? 'applied' : 'open' });
+  if (!updated) return res.status(404).json({ error: 'job not found' });
+  if (applied) await jobFeedback('job_applied', updated);
+  res.json({ ok: true });
+}));
+
+// 👍 — strong "more like this" (legacy button; the board now uses /star below)
+app.post('/api/jobs/:id/up', asyncRoute(async (req, res) => {
+  const { rows } = await readJobsTab();
+  const row = rows.find(r => r.ID === req.params.id);
+  if (!row) return res.status(404).json({ error: 'job not found' });
+  await jobFeedback('job_more_like_this', row);
+  res.json({ ok: true });
+}));
+
+// ★ tri-state — level 0 (none) / 1 (★ favorite) / 2 (★★ favorite-favorite). The flag
+// token carries the FIRST-starred epoch (fav:<ts> / fav2:<ts>) so the Favorites section
+// can keep click-chronological order across devices; upgrades preserve the timestamp.
+// Owner-set; the search agent never touches fav tokens. Any upward transition fires the
+// strong "more like this" signal; downgrades/unstars are silent (a de-pin, not a downvote).
+app.post('/api/jobs/:id/star', asyncRoute(async (req, res) => {
+  const { rows } = await readJobsTab();
+  const row = rows.find(r => r.ID === req.params.id);
+  if (!row) return res.status(404).json({ error: 'job not found' });
+  const level = Math.max(0, Math.min(2, Number(req.body?.level ?? (req.body?.starred === false ? 0 : 1))));
+  const tokens = String(row.Flags || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+  const old = tokens.find(t => t === 'fav' || t.startsWith('fav:') || t === 'fav2' || t.startsWith('fav2:'));
+  const oldLevel = old ? (old.startsWith('fav2') ? 2 : 1) : 0;
+  const ts = old && old.includes(':') ? old.split(':')[1] : String(Date.now());
+  const rest = tokens.filter(t => t !== old);
+  if (level) rest.push(`${level === 2 ? 'fav2' : 'fav'}:${ts}`);
+  await updateJobById(req.params.id, { Flags: rest.join(',') });
+  if (level > oldLevel) await jobFeedback('job_more_like_this', row, level === 2 ? 'double-star' : 'star');
+  res.json({ ok: true, flags: rest });
+}));
+
+// 🤔 maybe — park the role in the board's collapsed Maybe section (deferred, mildly
+// positive signal when parking; un-parking is silent)
+app.post('/api/jobs/:id/maybe', asyncRoute(async (req, res) => {
+  const maybe = req.body?.maybe !== false;
+  const updated = await updateJobById(req.params.id, { Status: maybe ? 'maybe' : 'open' });
+  if (!updated) return res.status(404).json({ error: 'job not found' });
+  if (maybe) await jobFeedback('job_maybe', updated);
+  res.json({ ok: true });
+}));
+
+// Drag re-rank: updates[]={id,rank}; movedUp names the dragged job when it moved HIGHER,
+// which doubles as a mild "more like this" signal (owner rule: drag-higher ≈ thumbs up).
+app.post('/api/jobs/reorder', asyncRoute(async (req, res) => {
+  const updates = req.body?.updates;
+  if (!Array.isArray(updates) || !updates.length) return res.status(400).json({ error: 'updates[] required' });
+  const { headers, rows } = await readJobsTab();
+  const byId = new Map(rows.map(r => [r.ID, r]));
+  const ts = nowIso(); const data = []; const missing = [];
+  const rankCol = headers.indexOf('Rank'), updCol = headers.indexOf('Updated');
+  for (const u of updates) {
+    const row = u.id && byId.get(u.id);
+    if (!row) { missing.push(u.id || '(blank)'); continue; }
+    data.push({ range: `'${JOBS_TAB}'!${colLetter(rankCol)}${row._row}`, values: [[String(u.rank)]] });
+    if (updCol !== -1) data.push({ range: `'${JOBS_TAB}'!${colLetter(updCol)}${row._row}`, values: [[ts]] });
+  }
+  if (data.length) await store.values.batchUpdate({ spreadsheetId: TODO_SHEET_ID, requestBody: { valueInputOption: 'RAW', data } });
+  const moved = req.body?.movedUp && byId.get(req.body.movedUp);
+  if (moved) await jobFeedback('job_ranked_up', moved);
+  res.json({ ok: true, applied: updates.length - missing.length, missing });
 }));
 
 // ---------- habits / reminders ----------
@@ -2573,6 +3051,882 @@ app.post('/api/feedback', asyncRoute(async (req, res) => {
 // | 'monthly:<1-31>' | 'custom:<json>' where json is one of
 //   {"dow":[0-6,...]} | {"dom":[1-31,...]} | {"interval":{"days":N,"anchor":"YYYY-MM-DD"}}
 // Track: '' | 'checkbox' (default — ✓ logs true) | 'number' | 'string' | 'untracked'.
+// ---------- Biotech clinical-trial tracker (CFG.bioRoute, default /bio) ----------
+// One Sheet tab, same durable cross-tier story as the jobs board: the stateless Cloud Run
+// tier and the Mac both read/write the same rows, so nothing depends on container disk.
+// Column split that matters: TRIAL FACTS (Phase/TrialStatus/Enrollment/dates/NCTId) are
+// machine-refreshed from clinicaltrials.gov and must never be hand-edited — the Tier-1 poll
+// overwrites them. ANALYSIS fields (Outcomes/Competition/MarketSize/Background) are
+// agent- or human-written estimates the poll never touches.
+// The tracker can live on its OWN spreadsheet (CFG.bioSheetId) so the second reader gets
+// direct spreadsheet access without seeing the owner's task hub. Empty config falls back to
+// the main sheet — same pre-split pattern as STABLE_SHEET_ID. (The service account cannot
+// create spreadsheets: the owner creates one, shares it with the SA, sets the id.)
+const BIO_SHEET_ID = CFG.bioSheetId || TODO_SHEET_ID;
+const BIO_TAB = 'Biotech Trials';
+// NOTE (>20 columns, flagged 2026-07-30): this row is already wide. Per-field analysis
+// provenance is therefore ONE json column, not four more columns per analysed field —
+// {field: {tier, model, confidence, at}}. Anything else per-field goes in there too.
+const BIO_HEADERS = [
+  'Company', 'Ticker', 'Public', 'Drug', 'DrugType', 'Indication', 'Phase', 'TrialStatus',
+  'NCTId', 'TrialTitle', 'Enrollment', 'PhaseHistory', 'NextMilestone', 'Outcomes',
+  'Competition', 'MarketSize', 'Background', 'Sources', 'Notes', 'Status', 'Source',
+  'Created', 'Updated', 'ID', 'Provenance', 'PriceTargets',
+];
+const BIO_HINT = ['Company', 'Drug', 'Phase', 'ID'];
+const readBioTab = () => readTab(BIO_SHEET_ID, BIO_TAB, BIO_HINT);
+// ensureTab only writes headers when it CREATES a tab, so a column added after the tab
+// already exists is silently dropped on every write (Provenance was, for one run). Append
+// any missing header to the live row — additive only, never reorders or removes.
+const bioMigrated = new Set();
+async function ensureColumns(tab, wanted, hint) {
+  if (bioMigrated.has(tab)) return;
+  const t = await readTab(BIO_SHEET_ID, tab, hint).catch(() => null);
+  if (!t) return; // tab not created yet — ensureTab will write the full header row
+  const missing = wanted.filter(h => !t.headers.includes(h));
+  if (missing.length) {
+    await store.values.update({
+      spreadsheetId: BIO_SHEET_ID,
+      range: `'${tab}'!${colLetter(t.headers.length)}${t.headerRow}`, // readTab's headerRow is already 1-based
+      valueInputOption: 'RAW', requestBody: { values: [missing] },
+    });
+    console.log(`[bio] ${tab}: added missing columns ${missing.join(', ')}`);
+  }
+  bioMigrated.add(tab);
+}
+const ensureBioColumns = () => ensureColumns(BIO_TAB, BIO_HEADERS, BIO_HINT);
+const ensureFeedbackColumns = () => ensureColumns(BIOFB_TAB, BIOFB_HEADERS, BIOFB_HINT);
+const bioOut = r => ({
+  id: r.ID, company: r.Company, ticker: r.Ticker || '', public: String(r.Public || '') === '1',
+  drug: r.Drug, drugType: r.DrugType || '', indication: r.Indication || '',
+  phase: r.Phase || '', trialStatus: r.TrialStatus || '', nctId: r.NCTId || '',
+  trialTitle: r.TrialTitle || '', enrollment: Number(r.Enrollment) || 0,
+  phaseHistory: r.PhaseHistory || '', nextMilestone: r.NextMilestone || '',
+  outcomes: r.Outcomes || '', competition: r.Competition || '', marketSize: r.MarketSize || '',
+  background: r.Background || '', notes: r.Notes || '',
+  sources: String(r.Sources || '').split(/[\s,]+/).filter(s => /^https?:/.test(s)),
+  status: r.Status || 'tracked', source: r.Source || '', created: r.Created || '', updated: r.Updated || '',
+  // Per-firm analyst targets, e.g. "JPM $52 (2026-06-12); MS $38 (2026-05-30)". No free feed
+  // publishes per-bank targets, so the Sonnet/Opus tiers research and cite them; the UI shows
+  // them as analyst-sourced with a date, never as live data.
+  // [{firm, rating, target, date, source}] — no free feed publishes per-bank targets, so the
+  // research tiers scan for them and cite each one. Legacy plain text is passed through as a note.
+  priceTargets: (() => {
+    const raw = String(r.PriceTargets || '').trim();
+    if (!raw) return [];
+    try { const p = JSON.parse(raw); return Array.isArray(p) ? p : []; } catch (e) { return [{ firm: '', note: raw }]; }
+  })(),
+  // per-field {tier, model, confidence, at} — the UI badges each analysis cell with it
+  provenance: (() => { try { return JSON.parse(r.Provenance || '{}'); } catch (e) { return {}; } })(),
+});
+
+// clinicaltrials.gov API v2 — free, keyless. One study → our flat shape.
+const CTG_FIELDS = ['NCTId', 'BriefTitle', 'OverallStatus', 'Phase', 'LeadSponsorName',
+  'Condition', 'StartDate', 'PrimaryCompletionDate', 'CompletionDate', 'LastUpdatePostDate',
+  'InterventionName', 'EnrollmentCount'].join(',');
+// CT.gov's phase vocabulary stops at Phase 3 — 'FDA Review'/'Approved'/'Preclinical' are
+// ours and live only in the sheet, so the poll must never clobber a row sitting in one.
+const BIO_PHASE_ORDER = ['Preclinical', 'Phase 1', 'Phase 1/2', 'Phase 2', 'Phase 2/3', 'Phase 3', 'FDA Review', 'Approved'];
+const BEYOND_CTG = new Set(['FDA Review', 'Approved', 'Preclinical']);
+function ctgPhase(phases) {
+  const p = (phases || []).map(s => String(s).replace('PHASE', '')).filter(s => /^\d$/.test(s)).sort();
+  if (!p.length) return '';
+  if (p.length === 1) return 'Phase ' + p[0];
+  return 'Phase ' + p[0] + '/' + p[p.length - 1];
+}
+function ctgFlat(study) {
+  const ps = study.protocolSection || {};
+  const id = ps.identificationModule || {}, st = ps.statusModule || {}, de = ps.designModule || {};
+  const date = k => (st[k] || {}).date || '';
+  return {
+    nctId: id.nctId || '',
+    trialTitle: id.briefTitle || '',
+    trialStatus: st.overallStatus || '',
+    phase: ctgPhase((de.phases || [])),
+    sponsor: ((ps.sponsorCollaboratorsModule || {}).leadSponsor || {}).name || '',
+    conditions: (ps.conditionsModule || {}).conditions || [],
+    interventions: ((ps.armsInterventionsModule || {}).interventions || []).map(i => i.name).filter(Boolean),
+    enrollment: ((de.enrollmentInfo || {}).count) || 0,
+    startDate: date('startDateStruct'),
+    primaryCompletion: date('primaryCompletionDateStruct'),
+    completion: date('completionDateStruct'),
+    lastUpdate: date('lastUpdatePostDateStruct'),
+  };
+}
+async function ctgFetch(params) {
+  const url = 'https://clinicaltrials.gov/api/v2/studies?' + new URLSearchParams({ fields: CTG_FIELDS, ...params });
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 15000);
+  try {
+    const r = await fetch(url, { headers: { 'User-Agent': 'dashboard-biotracker' }, signal: ctl.signal });
+    if (!r.ok) throw new Error(`clinicaltrials.gov ${r.status}`);
+    return ((await r.json()).studies || []).map(ctgFlat);
+  } finally { clearTimeout(timer); }
+}
+
+// Who is looking: the page hides owner-only affordances (the link back to the dashboard)
+// for guests, who would only get bounced by the gate.
+app.get('/api/bio/me', (req, res) => {
+  const sess = verifySession(cookieOf(req, 'dash_session'));
+  const email = normEmail((sess || {}).email);
+  const gated = !!(OAUTH_ID && process.env.OAUTH_REDIRECT_BASE);
+  res.json({ email, owner: !gated || email === ALLOWED_EMAIL_N, route: BIO_ROUTE });
+});
+
+app.get('/api/bio/trials', asyncRoute(async (req, res) => {
+  await ensureBioColumns().catch(e => console.error('[bio] column migration:', e.message));
+  let rows = [];
+  try { rows = (await readBioTab()).rows; }
+  catch (e) { if (!/Header row not found|Unable to parse range/i.test(e.message)) throw e; } // tab not created yet = empty tracker
+  const all = String(req.query.all || '') === '1';
+  const scope = String(req.query.scope || 'all'); // all (universe, the default) | tracked
+  let trials = rows.map(bioOut).filter(t => all || t.status !== 'removed');
+  if (!all && scope !== 'all') trials = trials.filter(t => t.status === 'tracked');
+  const counts = rows.reduce((a2, r) => { const k = r.Status || 'tracked'; a2[k] = (a2[k] || 0) + 1; return a2; }, {});
+  res.json({ trials, phases: BIO_PHASE_ORDER, counts, scope });
+}));
+
+// Search clinicaltrials.gov by company, drug or condition — powers the "add" box.
+app.get('/api/bio/search', asyncRoute(async (req, res) => {
+  const q = String(req.query.q || '').trim();
+  if (!q) return res.json({ results: [] });
+  const params = /^NCT\d{8}$/i.test(q) ? { 'query.id': q.toUpperCase() } : { 'query.term': q, sort: 'LastUpdatePostDate:desc' };
+  const results = await ctgFetch({ ...params, pageSize: '20' });
+  res.json({ results });
+}));
+
+app.post('/api/bio/trials', asyncRoute(async (req, res) => {
+  const b = req.body || {};
+  if (!b.company || !b.drug) return res.status(400).json({ error: 'company and drug required' });
+  let existing = [];
+  try { existing = (await readBioTab()).rows; } catch (e) {}
+  const norm = s => String(s || '').trim().toLowerCase();
+  // dedup against removed rows too — a deliberately dropped program must not come back
+  // on the next agent run
+  const dup = existing.find(r => (b.nctId && norm(r.NCTId) === norm(b.nctId))
+    || (norm(r.Company) === norm(b.company) && norm(r.Drug) === norm(b.drug)));
+  if (dup) return res.json({ ok: true, deduped: true, id: dup.ID });
+  const id = crypto.randomUUID();
+  await appendTabRow(BIO_TAB, BIO_HEADERS, [
+    b.company, b.ticker || '', b.public ? '1' : '', b.drug, b.drugType || '', b.indication || '',
+    b.phase || '', b.trialStatus || '', b.nctId || '', b.trialTitle || '',
+    b.enrollment ? String(b.enrollment) : '', b.phaseHistory || '', b.nextMilestone || '',
+    b.outcomes || '', b.competition || '', b.marketSize || '', b.background || '',
+    Array.isArray(b.sources) ? b.sources.join(' ') : String(b.sources || ''), b.notes || '',
+    'tracked', b.source || WRITE_SOURCE, nowIso(), nowIso(), id, '', b.priceTargets || '',
+  ], BIO_SHEET_ID);
+  res.json({ ok: true, id });
+}));
+
+async function updateBioById(id, changes) {
+  const { headers, rows } = await readBioTab();
+  const row = rows.find(r => r.ID === id);
+  if (!row) return null;
+  changes.Updated = nowIso();
+  const data = Object.entries(changes)
+    .filter(([f]) => headers.indexOf(f) !== -1)
+    .map(([f, v]) => ({ range: `'${BIO_TAB}'!${colLetter(headers.indexOf(f))}${row._row}`, values: [[v]] }));
+  if (data.length) await store.values.batchUpdate({ spreadsheetId: BIO_SHEET_ID, requestBody: { valueInputOption: 'RAW', data } });
+  return { ...row, ...changes };
+}
+
+const BIO_EDITABLE = new Set(['Company', 'Ticker', 'Public', 'Drug', 'DrugType', 'Indication',
+  'Phase', 'NCTId', 'PhaseHistory', 'NextMilestone', 'Outcomes', 'Competition', 'MarketSize',
+  'Background', 'Sources', 'Notes', 'Status', 'Provenance', 'PriceTargets']);
+// A human editing an analysis field supersedes whatever tier wrote it — drop that field's
+// provenance so the UI stops attributing the reader's own text to a model.
+async function bioClearProvenance(row, changedFields) {
+  const analysis = changedFields.filter(f => BIO_ANALYSIS_FIELDS.includes(f));
+  if (!analysis.length) return null;
+  let prov = {};
+  try { prov = JSON.parse(row.Provenance || '{}'); } catch (e) {}
+  let touched = false;
+  for (const f of analysis) if (prov[f]) { delete prov[f]; touched = true; }
+  return touched ? JSON.stringify(prov) : null;
+}
+const BIO_ANALYSIS_FIELDS = ['Outcomes', 'Competition', 'MarketSize', 'Background', 'NextMilestone', 'PriceTargets'];
+app.patch('/api/bio/trials/:id', asyncRoute(async (req, res) => {
+  const changes = {};
+  for (const [k, v] of Object.entries(req.body || {})) {
+    const col = k.charAt(0).toUpperCase() + k.slice(1);
+    const name = col === 'NctId' ? 'NCTId' : col;
+    if (BIO_EDITABLE.has(name)) changes[name] = Array.isArray(v) ? v.join(' ') : String(v);
+  }
+  if (!Object.keys(changes).length) return res.status(400).json({ error: 'no editable fields' });
+  if (changes.Provenance === undefined) {
+    const { rows } = await readBioTab().catch(() => ({ rows: [] }));
+    const cur = rows.find(r => r.ID === req.params.id);
+    const prov = cur && await bioClearProvenance(cur, Object.keys(changes));
+    if (prov !== null && prov !== undefined) changes.Provenance = prov;
+  }
+  const row = await updateBioById(req.params.id, changes);
+  if (!row) return res.status(404).json({ error: 'not found' });
+  res.json({ ok: true });
+}));
+// Soft-delete only (Sheet protocol: never delete rows).
+app.post('/api/bio/trials/:id/remove', asyncRoute(async (req, res) => {
+  const row = await updateBioById(req.params.id, { Status: 'removed' });
+  if (!row) return res.status(404).json({ error: 'not found' });
+  res.json({ ok: true });
+}));
+
+// Tier 1 of the refresh pipeline: pure clinicaltrials.gov polling, no LLM, ~$0/run.
+// Rewrites only the machine-owned trial-fact columns, and only when they actually changed,
+// so the response doubles as the day's change feed (what Tier 3 would be triggered on).
+app.post('/api/bio/refresh', asyncRoute(async (req, res) => {
+  let rows = [];
+  try { rows = (await readBioTab()).rows; } catch (e) { return res.json({ checked: 0, changes: [] }); }
+  const live = rows.filter(r => r.Status !== 'removed' && /^NCT\d{8}$/i.test(String(r.NCTId || '').trim()));
+  const changes = [];
+  for (const r of live) {
+    let s;
+    try { s = (await ctgFetch({ 'query.id': String(r.NCTId).trim().toUpperCase(), pageSize: '1' }))[0]; }
+    catch (e) { changes.push({ id: r.ID, nctId: r.NCTId, error: e.message }); continue; }
+    if (!s) continue;
+    const upd = {}, diff = [];
+    const set = (col, val) => { if (val && String(val) !== String(r[col] || '')) { upd[col] = String(val); diff.push(`${col}: ${r[col] || '—'} → ${val}`); } };
+    set('TrialStatus', s.trialStatus);
+    set('TrialTitle', s.trialTitle);
+    set('Enrollment', s.enrollment || '');
+    // never demote a row the sheet has already moved past CT.gov's vocabulary
+    if (!BEYOND_CTG.has(String(r.Phase || '').trim())) set('Phase', s.phase);
+    // dated milestones accumulate in PhaseHistory rather than overwriting the analyst's text
+    const stamp = [s.startDate && `start ${s.startDate}`, s.primaryCompletion && `primary completion ${s.primaryCompletion}`]
+      .filter(Boolean).join('; ');
+    if (stamp && !String(r.PhaseHistory || '').includes(s.startDate || ' ')) {
+      upd.PhaseHistory = [String(r.PhaseHistory || '').trim(), `[${s.nctId}] ${stamp}`].filter(Boolean).join(' | ');
+    }
+    if (Object.keys(upd).length) {
+      await updateBioById(r.ID, upd);
+      if (diff.length) changes.push({ id: r.ID, company: r.Company, drug: r.Drug, nctId: s.nctId, diff });
+    }
+  }
+  track('biotech-refresh', true, `${live.length} trials, ${changes.length} changed`);
+  res.json({ checked: live.length, changes });
+}));
+
+app.get('/api/bio/trials.csv', asyncRoute(async (req, res) => {
+  let rows = [];
+  try { rows = (await readBioTab()).rows; } catch (e) {}
+  const cell = v => { const s = String(v == null ? '' : v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+  const body = [BIO_HEADERS.join(',')]
+    .concat(rows.filter(r => r.Status !== 'removed').map(r => BIO_HEADERS.map(h => cell(r[h])).join(',')))
+    .join('\n');
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="biotech-tracker-${today()}.csv"`);
+  res.send(body);
+}));
+
+// ---------- design-input loop ----------
+// The tracker is co-designed with its reader, so feedback is a first-class object, not a
+// mailto: link. Anyone with access types here; a CI-style agent (bin/bio-ci.sh) reads the
+// open rows, proposes a change per item, and writes the proposal back onto the same row.
+// Nothing is auto-applied — a proposal is a suggestion the humans accept or reject.
+const BIOFB_TAB = 'Bio Feedback';
+const BIOFB_HEADERS = ['At', 'Author', 'Kind', 'Text', 'Status', 'Proposal', 'ProposedAt', 'Resolution', 'ID', 'Thread'];
+const BIOFB_HINT = ['At', 'Text', 'Status', 'ID'];
+const bioFbOut = r => ({
+  id: r.ID, at: r.At, author: r.Author || '', kind: r.Kind || 'idea', text: r.Text || '',
+  status: r.Status || 'open', proposal: r.Proposal || '', proposedAt: r.ProposedAt || '',
+  resolution: r.Resolution || '',
+  // [{role:'agent'|'reader', text, at}] — the iteration on this one request
+  thread: (() => { try { const p = JSON.parse(r.Thread || '[]'); return Array.isArray(p) ? p : []; } catch (e) { return []; } })(),
+});
+app.get('/api/bio/feedback', asyncRoute(async (req, res) => {
+  await ensureFeedbackColumns().catch(e => console.error('[bio] feedback migration:', e.message));
+  let rows = [];
+  try { rows = (await readTab(BIO_SHEET_ID, BIOFB_TAB, BIOFB_HINT)).rows; }
+  catch (e) { if (!/Header row not found|Unable to parse range/i.test(e.message)) throw e; }
+  const all = String(req.query.all || '') === '1';
+  res.json({ feedback: rows.map(bioFbOut).filter(f => all || f.status !== 'closed').reverse() });
+}));
+app.post('/api/bio/feedback', asyncRoute(async (req, res) => {
+  const b = req.body || {};
+  const text = String(b.text || '').trim();
+  if (!text) return res.status(400).json({ error: 'text required' });
+  const sess = verifySession(cookieOf(req, 'dash_session'));
+  // author comes from the signed session, never from the request body — a feedback row
+  // must not be attributable to someone who did not write it
+  const author = String((sess || {}).email || 'local').toLowerCase();
+  const kind = ['idea', 'bug', 'question', 'data'].includes(b.kind) ? b.kind : 'idea';
+  // one guest cannot spend the owner's subscription in a loop
+  const now = Date.now();
+  const hits = (bioProposeRate.get(author) || []).filter(t => now - t < 3600000);
+  const mayPropose = hits.length < BIO_LIMIT_PROPOSE_HOUR;
+  if (mayPropose) { hits.push(now); bioProposeRate.set(author, hits); }
+  const id = crypto.randomUUID();
+  await appendTabRow(BIOFB_TAB, BIOFB_HEADERS,
+    [nowIso(), author, kind, text.slice(0, 2000), 'open', '', '', '', id, '[]'], BIO_SHEET_ID);
+  res.json({ ok: true, id });
+  // Answer it in the background on the free transport. A guest's message therefore reaches a
+  // model on the OWNER's subscription — deliberate, but bounded: one Sonnet call per item,
+  // rate-limited per author, and the reply is a PROPOSAL written back to the row. It never
+  // edits code, never escalates to Opus on its own, and on a host with no CLI it simply does
+  // not run (the VM's daily bio-ci timer picks the item up instead).
+  await bioAudit(author, 'feedback', `[${kind}] ${text}`, mayPropose ? 'accepted' : 'rate-limited', id);
+  if (mayPropose) bioRespondTo({ id, kind, text, author }).catch(e => console.error('[bio] respond:', e.message));
+}));
+// ---------- audit: every reader input, every action taken on it ----------
+// A guest can trigger an agent that edits source, so "what did they ask for and what did the
+// machine then do" has to be a durable record, not a log line on one host. One append-only tab.
+const BIOAUD_TAB = 'Bio Audit';
+const BIOAUD_HEADERS = ['At', 'Author', 'Event', 'Detail', 'Outcome', 'Ref'];
+async function bioAudit(author, event, detail, outcome, ref) {
+  await appendTabRow(BIOAUD_TAB, BIOAUD_HEADERS,
+    [nowIso(), author || '', event, String(detail || '').slice(0, 900), outcome || '', ref || ''], BIO_SHEET_ID)
+    .catch(e => console.error('[bio] audit:', e.message));
+}
+// bin/bio-apply.sh reports its own outcome here; author comes from the session when a human
+// is driving, and is blank for the local agent.
+app.post('/api/bio/audit', asyncRoute(async (req, res) => {
+  const b = req.body || {};
+  const sess = verifySession(cookieOf(req, 'dash_session'));
+  await bioAudit(normEmail((sess || {}).email) || 'agent', String(b.event || 'note').slice(0, 40),
+    b.detail, b.outcome, b.ref);
+  res.json({ ok: true });
+}));
+app.get('/api/bio/audit', asyncRoute(async (req, res) => {
+  let rows = [];
+  try { rows = (await readTab(BIO_SHEET_ID, BIOAUD_TAB, ['At', 'Event'])).rows; }
+  catch (e) { if (!/Header row not found|Unable to parse range/i.test(e.message)) throw e; }
+  res.json({
+    audit: rows.map(r => ({ at: r.At, author: r.Author, event: r.Event, detail: r.Detail, outcome: r.Outcome, ref: r.Ref }))
+      .reverse().slice(0, Number(req.query.limit) || 100),
+    limits: { proposalsPerHour: BIO_LIMIT_PROPOSE_HOUR, appliesPerDay: BIO_LIMIT_APPLY_DAY },
+  });
+}));
+// Ring fence, stated in one place so it can be checked rather than assumed:
+//  · a guest reaches the tracker route and /api/bio/* only (the gate enforces this)
+//  · a reader-triggered agent may write exactly one file, public/bio.html, and it runs with
+//    Read/Edit tools only — no shell, no network (bin/bio-apply.sh)
+//  · rate limits below bound how often either path can fire
+const BIO_LIMIT_PROPOSE_HOUR = 6;
+const BIO_LIMIT_APPLY_DAY = CFG.bioApplyPerDay;
+const bioApplyRate = new Map(); // author → [timestamps]
+const bioProposeRate = new Map(); // author → [timestamps]
+async function bioSetFields(id, changes) {
+  const { headers, rows } = await readTab(BIO_SHEET_ID, BIOFB_TAB, BIOFB_HINT);
+  const row = rows.find(r => r.ID === id);
+  if (!row) return null;
+  const data = Object.entries(changes).filter(([f]) => headers.indexOf(f) !== -1)
+    .map(([f, v]) => ({ range: `'${BIOFB_TAB}'!${colLetter(headers.indexOf(f))}${row._row}`, values: [[v]] }));
+  if (data.length) await store.values.batchUpdate({ spreadsheetId: BIO_SHEET_ID, requestBody: { valueInputOption: 'RAW', data } });
+  return row;
+}
+// Two ways to answer a reader: PROPOSE (write a plan onto the row) or APPLY (an Opus run that
+// actually edits the page and deploys it). Apply is the owner's explicit choice via
+// bioAutoApply, because it turns a guest's sentence into a source change — bin/bio-apply.sh
+// carries the rails that make that safe to mean.
+async function bioRespondTo(item) {
+  const apply = String(CFG.bioAutoApply) === '1' || CFG.bioAutoApply === true || String(CFG.bioAutoApply) === 'true';
+  if (!apply) return bioProposeFor(item);
+  const script = path.join(__dirname, 'bin', 'bio-apply.sh');
+  if (!fs.existsSync(script)) return bioProposeFor(item); // e.g. the stateless tier
+  // an APPLY edits source and deploys, so it is capped far tighter than a proposal
+  const now = Date.now();
+  const hits = (bioApplyRate.get(item.author) || []).filter(t => now - t < 86400000);
+  if (hits.length >= BIO_LIMIT_APPLY_DAY) {
+    await bioAudit(item.author, 'apply', item.text, `refused — ${BIO_LIMIT_APPLY_DAY}/day cap reached`, item.id);
+    return bioProposeFor(item); // still answer them, just without touching code
+  }
+  hits.push(now); bioApplyRate.set(item.author, hits);
+  await bioAudit(item.author, 'apply', item.text, 'dispatched to bin/bio-apply.sh', item.id);
+  // detached: an Opus edit plus a Cloud Run build outlives any request, and every result is
+  // written back onto the feedback row rather than returned to a listener
+  const child = require('child_process').spawn('/bin/bash', [script, item.id], {
+    cwd: __dirname, detached: true, stdio: 'ignore',
+    env: { ...process.env, BIO_API: `http://localhost:${PORT}` },
+  });
+  child.unref();
+  console.log(`[bio] layout change requested (${item.id}) — bio-apply.sh running detached`);
+  return Promise.resolve();
+}
+async function bioProposeFor(item) {
+  const { id, kind, text } = item;
+  const { callModel } = require('./bio-pipeline');
+  const prompt = `You are the design-input agent for a biotech clinical-trial tracker. A reader filed this ${kind}:
+
+"${text.slice(0, 1200)}"
+
+Reply with ONE concrete proposal of 2-5 sentences: what specifically to change, roughly how much work it is, what it would break or slow down, and — if the request is vague — the single question that would settle it. If the thing is already possible today, say exactly how to do it instead of proposing new work. If it conflicts with a guardrail (sending mail, moving money, auto-applying changes, publishing data), say so plainly and offer the nearest safe alternative.
+
+You are proposing, not deciding: a human accepts or rejects this. Return the proposal as plain prose, no preamble, no JSON.`;
+  let out;
+  try { out = await callModel('sonnet', prompt); }
+  catch (e) {
+    // No CLI on this tier (Cloud Run). Mark it queued so the drain on a capable host picks
+    // it up, and record it — a silent return is how a reader's request vanishes.
+    console.warn('[bio] no free transport here — queued for a host with the CLI:', e.message.slice(0, 120));
+    await bioSetFields(id, { Status: 'queued', Resolution: 'queued — waiting for a host that can run the agent' }).catch(() => {});
+    await bioAudit(item && item.author, 'queued', text, 'no LLM transport on this tier', id);
+    return;
+  }
+  const { headers, rows } = await readTab(BIO_SHEET_ID, BIOFB_TAB, BIOFB_HINT);
+  const row = rows.find(r => r.ID === id);
+  if (!row) return;
+  const data = [['Proposal', String(out.text || '').trim().slice(0, 3000)], ['ProposedAt', nowIso()]]
+    .filter(([f]) => headers.indexOf(f) !== -1)
+    .map(([f, v]) => ({ range: `'${BIOFB_TAB}'!${colLetter(headers.indexOf(f))}${row._row}`, values: [[v]] }));
+  if (data.length) await store.values.batchUpdate({ spreadsheetId: BIO_SHEET_ID, requestBody: { valueInputOption: 'RAW', data } });
+  await bioAudit(row.Author, 'proposal', text, `written by ${out.model || 'model'}`, id);
+}
+
+app.patch('/api/bio/feedback/:id', asyncRoute(async (req, res) => {
+  const { headers, rows } = await readTab(BIO_SHEET_ID, BIOFB_TAB, BIOFB_HINT);
+  const row = rows.find(r => r.ID === req.params.id);
+  if (!row) return res.status(404).json({ error: 'not found' });
+  const changes = {};
+  for (const f of ['Status', 'Proposal', 'ProposedAt', 'Resolution', 'Thread']) {
+    const k = f.charAt(0).toLowerCase() + f.slice(1);
+    if (req.body && req.body[k] !== undefined) changes[f] = String(req.body[k]);
+  }
+  if (!Object.keys(changes).length) return res.status(400).json({ error: 'no editable fields' });
+  const data = Object.entries(changes).filter(([f]) => headers.indexOf(f) !== -1)
+    .map(([f, v]) => ({ range: `'${BIOFB_TAB}'!${colLetter(headers.indexOf(f))}${row._row}`, values: [[v]] }));
+  if (data.length) await store.values.batchUpdate({ spreadsheetId: BIO_SHEET_ID, requestBody: { valueInputOption: 'RAW', data } });
+  // closing or resolving an item is an action on a reader's input — it belongs in the record
+  await bioAudit(normEmail((verifySession(cookieOf(req, 'dash_session')) || {}).email) || 'agent',
+    'feedback-update', `${row.Kind || ''} ${row.Text || ''}`,
+    Object.entries(changes).map(([k, v]) => `${k}=${String(v).slice(0, 80)}`).join(' · '), req.params.id);
+  res.json({ ok: true });
+}));
+
+// The agent asking the reader something, rather than guessing. Appends to the thread.
+app.post('/api/bio/feedback/:id/ask', asyncRoute(async (req, res) => {
+  const question = String((req.body || {}).question || '').trim();
+  if (!question) return res.status(400).json({ error: 'question required' });
+  await ensureFeedbackColumns().catch(() => {});
+  const { headers, rows } = await readTab(BIO_SHEET_ID, BIOFB_TAB, BIOFB_HINT);
+  const row = rows.find(r => r.ID === req.params.id);
+  if (!row) return res.status(404).json({ error: 'not found' });
+  let thread = [];
+  try { thread = JSON.parse(row.Thread || '[]'); } catch (e) {}
+  thread.push({ role: 'agent', text: question.slice(0, 1000), at: nowIso() });
+  const data = [['Thread', JSON.stringify(thread.slice(-20))]]
+    .filter(([f]) => headers.indexOf(f) !== -1)
+    .map(([f, v]) => ({ range: `'${BIOFB_TAB}'!${colLetter(headers.indexOf(f))}${row._row}`, values: [[v]] }));
+  if (data.length) await store.values.batchUpdate({ spreadsheetId: BIO_SHEET_ID, requestBody: { valueInputOption: 'RAW', data } });
+  await bioAudit('agent', 'question', question, 'waiting on the reader', req.params.id);
+  res.json({ ok: true });
+}));
+
+app.post('/api/bio/feedback/:id/claim', asyncRoute(async (req, res) => {
+  const { headers, rows } = await readTab(BIO_SHEET_ID, BIOFB_TAB, BIOFB_HINT);
+  const row = rows.find(r => r.ID === req.params.id);
+  if (!row) return res.status(404).json({ error: 'not found' });
+  if (!['open', 'queued'].includes(row.Status || 'open')) return res.json({ claimed: false, status: row.Status });
+  const host = String((req.body || {}).host || 'unknown').slice(0, 40);
+  const i = headers.indexOf('Status');
+  if (i === -1) return res.json({ claimed: true }); // no Status column: nothing to race on
+  await store.values.update({
+    spreadsheetId: BIO_SHEET_ID, range: `'${BIOFB_TAB}'!${colLetter(i)}${row._row}`,
+    valueInputOption: 'RAW', requestBody: { values: [['running']] },
+  });
+  await bioAudit('agent', 'claim', row.Text || '', `claimed by ${host}`, req.params.id);
+  res.json({ claimed: true });
+}));
+
+// A reader answering the agent's question. Appends to the thread and re-runs the agent with
+// the whole exchange, so an ambiguous request converges instead of being guessed at.
+app.post('/api/bio/feedback/:id/reply', asyncRoute(async (req, res) => {
+  const text = String((req.body || {}).text || '').trim();
+  if (!text) return res.status(400).json({ error: 'text required' });
+  await ensureFeedbackColumns().catch(() => {});
+  const { headers, rows } = await readTab(BIO_SHEET_ID, BIOFB_TAB, BIOFB_HINT);
+  const row = rows.find(r => r.ID === req.params.id);
+  if (!row) return res.status(404).json({ error: 'not found' });
+  const sess = verifySession(cookieOf(req, 'dash_session'));
+  const author = normEmail((sess || {}).email) || 'local';
+  let thread = [];
+  try { thread = JSON.parse(row.Thread || '[]'); } catch (e) {}
+  thread.push({ role: 'reader', text: text.slice(0, 2000), at: nowIso() });
+  const data = [['Thread', JSON.stringify(thread.slice(-20))], ['Status', 'open']]
+    .filter(([f]) => headers.indexOf(f) !== -1)
+    .map(([f, v]) => ({ range: `'${BIOFB_TAB}'!${colLetter(headers.indexOf(f))}${row._row}`, values: [[v]] }));
+  if (data.length) await store.values.batchUpdate({ spreadsheetId: BIO_SHEET_ID, requestBody: { valueInputOption: 'RAW', data } });
+  await bioAudit(author, 'reply', text, 'answered the agent — re-dispatching', req.params.id);
+  res.json({ ok: true });
+  bioRespondTo({ id: req.params.id, kind: row.Kind || 'idea', text: row.Text || '', author })
+    .catch(e => console.error('[bio] re-dispatch:', e.message));
+}));
+
+// ---------- analysis pipeline: log + triggers ----------
+// Every tier's verdict is logged with its confidence and why it escalated (or didn't).
+// That log IS the calibration dataset: once humans start marking analyses right or wrong
+// (HumanAgreed), the 0.80 threshold can be tuned against evidence instead of taste.
+const BIOLOG_TAB = 'Bio Analysis Log';
+const BIOLOG_HEADERS = ['At', 'RunId', 'Tier', 'Model', 'TrialId', 'NCTId', 'Company', 'Drug',
+  'Confidence', 'Escalated', 'EscalateReason', 'RuleFired', 'CircuitBreaker', 'HumanAgreed', 'Cost', 'ID'];
+const BIOLOG_HINT = ['At', 'Tier', 'Confidence', 'ID'];
+app.get('/api/bio/analysis-log', asyncRoute(async (req, res) => {
+  let rows = [];
+  try { rows = (await readTab(BIO_SHEET_ID, BIOLOG_TAB, BIOLOG_HINT)).rows; }
+  catch (e) { if (!/Header row not found|Unable to parse range/i.test(e.message)) throw e; }
+  const out = rows.map(r => ({
+    id: r.ID, at: r.At, runId: r.RunId, tier: r.Tier, model: r.Model, trialId: r.TrialId,
+    nctId: r.NCTId, company: r.Company, drug: r.Drug, confidence: Number(r.Confidence) || 0,
+    escalated: String(r.Escalated) === '1', escalateReason: r.EscalateReason || '',
+    ruleFired: r.RuleFired || '', circuitBreaker: String(r.CircuitBreaker) === '1',
+    humanAgreed: r.HumanAgreed || '', cost: Number(r.Cost) || 0,
+  })).reverse();
+  // calibration summary: what the threshold is actually doing, so drift is visible
+  const scored = out.filter(r => r.confidence > 0);
+  const judged = out.filter(r => r.humanAgreed === 'yes' || r.humanAgreed === 'no');
+  res.json({
+    log: out.slice(0, Number(req.query.limit) || 200),
+    calibration: {
+      threshold: CFG.bioConfidenceThreshold, breakerAt: CFG.bioEscalationCircuitBreaker,
+      n: scored.length,
+      meanConfidence: scored.length ? +(scored.reduce((a, r) => a + r.confidence, 0) / scored.length).toFixed(3) : null,
+      escalationRate: out.length ? +(out.filter(r => r.escalated).length / out.length).toFixed(3) : null,
+      judged: judged.length,
+      agreedRate: judged.length ? +(judged.filter(r => r.humanAgreed === 'yes').length / judged.length).toFixed(3) : null,
+    },
+  });
+}));
+// Human verdict on one analysis — the label that makes the confidence log trainable.
+app.post('/api/bio/analysis-log/:id/judge', asyncRoute(async (req, res) => {
+  const verdict = String((req.body || {}).agreed || '').toLowerCase();
+  if (!['yes', 'no'].includes(verdict)) return res.status(400).json({ error: 'agreed must be yes or no' });
+  const { headers, rows } = await readTab(BIO_SHEET_ID, BIOLOG_TAB, BIOLOG_HINT);
+  const row = rows.find(r => r.ID === req.params.id);
+  if (!row) return res.status(404).json({ error: 'not found' });
+  await store.values.update({
+    spreadsheetId: BIO_SHEET_ID,
+    range: `'${BIOLOG_TAB}'!${colLetter(headers.indexOf('HumanAgreed'))}${row._row}`,
+    valueInputOption: 'RAW', requestBody: { values: [[verdict]] },
+  });
+  res.json({ ok: true });
+}));
+
+// Manual pipeline trigger (the UI's "run now" for the Opus review). Scheduled runs go
+// through Cloud Scheduler → a Cloud Run Job executing the same module; this path exists so
+// a human can force a run from the page, on any tier, on any host.
+const bioRuns = new Map(); // runId → {tier, startedAt, done, error, summary}
+app.post('/api/bio/pipeline/run', asyncRoute(async (req, res) => {
+  const tier = String((req.body || {}).tier || 'daily');
+  if (!['daily', 'weekly', 'monthly'].includes(tier)) return res.status(400).json({ error: 'tier must be daily, weekly or monthly' });
+  const active = [...bioRuns.values()].find(r => !r.done);
+  if (active) return res.status(409).json({ error: `a ${active.tier} run is already in progress`, runId: active.runId });
+  const pipeline = require('./bio-pipeline');
+  const runId = crypto.randomUUID().slice(0, 8);
+  const rec = { runId, tier, startedAt: nowIso(), done: false, error: '', summary: null };
+  bioRuns.set(runId, rec);
+  // fire and forget: a monthly Opus pass outlives any sane request timeout, and every
+  // result is durable on the Sheet regardless of who is still listening
+  pipeline.run({ tier, runId, deps: bioPipelineDeps() })
+    .then(s => { rec.summary = s; rec.done = true; })
+    .catch(e => { rec.error = e.message; rec.done = true; console.error('bio pipeline:', e); });
+  res.json({ ok: true, runId, tier });
+}));
+app.get('/api/bio/pipeline/run/:id', (req, res) => {
+  const rec = bioRuns.get(req.params.id);
+  if (!rec) return res.status(404).json({ error: 'unknown run' });
+  res.json(rec);
+});
+
+// Everything the pipeline needs from the server, injected — so the same module runs
+// in-process here and standalone in a Cloud Run Job without importing this file.
+function bioPipelineDeps() {
+  return {
+    sheetId: BIO_SHEET_ID, tab: BIO_TAB, headers: BIO_HEADERS, hint: BIO_HINT,
+    logTab: BIOLOG_TAB, logHeaders: BIOLOG_HEADERS,
+    analysisFields: BIO_ANALYSIS_FIELDS,
+    confidenceThreshold: CFG.bioConfidenceThreshold,
+    breakerRatio: CFG.bioEscalationCircuitBreaker,
+    readTrials: async () => {
+      await ensureBioColumns().catch(e => console.error('[bio] column migration:', e.message));
+      // The whole universe is analysed; bio-pipeline's per-row ceiling reserves Opus for
+      // starred rows, so hundreds of screened rows cost Sonnet time and nothing more.
+      try { return (await readBioTab()).rows.filter(r => r.Status !== 'removed'); } catch (e) { return []; }
+    },
+    updateTrial: updateBioById,
+    appendLog: rows => appendTabRows(BIOLOG_TAB, BIOLOG_HEADERS, rows, BIO_SHEET_ID),
+    ctgFetch, nowIso,
+  };
+}
+
+// ---------- bulk screening import ----------
+// The tracker has two populations, and conflating them is what makes a screener either
+// useless or ruinous:
+//   Status=screened — the imported universe (hundreds). Registry facts only. No LLM ever
+//                     touches these, so the universe is free to be large.
+//   Status=tracked  — the watchlist. The analyst tiers run on these, so it stays small.
+// A screened row is promoted to tracked with one click; the pipeline reads only `tracked`.
+async function ctgPage(params, pageToken) {
+  const url = 'https://clinicaltrials.gov/api/v2/studies?' + new URLSearchParams({
+    fields: CTG_FIELDS, pageSize: '200', ...(pageToken ? { pageToken } : {}), ...params,
+  });
+  const r = await fetch(url, { headers: { 'User-Agent': 'dashboard-biotracker' }, signal: AbortSignal.timeout(30000) });
+  if (!r.ok) throw new Error(`clinicaltrials.gov ${r.status}`);
+  const j = await r.json();
+  return { studies: (j.studies || []).map(ctgFlat), nextPageToken: j.nextPageToken };
+}
+app.post('/api/bio/import', asyncRoute(async (req, res) => {
+  const b = req.body || {};
+  const max = Math.min(Number(b.max) || 300, 1000);
+  // Default screen: industry-sponsored interventional trials still in flight at Phase 2/3 —
+  // i.e. the population where a phase transition is actually a tradeable event.
+  const params = {
+    'query.term': String(b.query || '').trim() || undefined,
+    'filter.overallStatus': (b.status || ['RECRUITING', 'ACTIVE_NOT_RECRUITING', 'ENROLLING_BY_INVITATION']).join(','),
+    'filter.advanced': b.advanced || 'AREA[LeadSponsorClass]INDUSTRY',
+    aggFilters: b.aggFilters || 'phase:2 3,studyType:int',
+    sort: 'LastUpdatePostDate:desc',
+  };
+  Object.keys(params).forEach(k => params[k] === undefined && delete params[k]);
+
+  let existing = [];
+  try { existing = (await readBioTab()).rows; } catch (e) {}
+  const known = new Set(existing.map(r => String(r.NCTId || '').trim().toUpperCase()).filter(Boolean));
+
+  const fresh = [];
+  let token = null;
+  do {
+    const page = await ctgPage(params, token);
+    for (const s of page.studies) {
+      const id = (s.nctId || '').toUpperCase();
+      if (!id || known.has(id)) continue;
+      known.add(id);
+      const drug = (s.interventions || []).find(n => !/placebo|saline|vehicle/i.test(n)) || (s.interventions || [])[0] || '';
+      fresh.push([
+        s.sponsor || '', '', '', drug, '', (s.conditions || [])[0] || '', s.phase || '', s.trialStatus || '',
+        s.nctId, s.trialTitle || '', s.enrollment ? String(s.enrollment) : '', '', '', '', '', '', '', '', '',
+        'screened', 'import', nowIso(), nowIso(), crypto.randomUUID(), '', '',
+      ]);
+      if (fresh.length >= max) break;
+    }
+    token = page.nextPageToken;
+  } while (token && fresh.length < max);
+
+  // One batched append, not one call per row — a few hundred single appends would blow the
+  // Sheets write quota and take minutes.
+  if (fresh.length) await appendTabRows(BIO_TAB, BIO_HEADERS, fresh, BIO_SHEET_ID);
+  track('bio-import', true, `${fresh.length} new of ${known.size} known`);
+  res.json({ ok: true, imported: fresh.length, universe: known.size });
+}));
+
+// Promote a screened row into the analysed watchlist (or send it back).
+app.post('/api/bio/trials/:id/watch', asyncRoute(async (req, res) => {
+  const on = (req.body || {}).watch !== false;
+  const row = await updateBioById(req.params.id, { Status: on ? 'tracked' : 'screened' });
+  if (!row) return res.status(404).json({ error: 'not found' });
+  await bioAudit(normEmail((verifySession(cookieOf(req, 'dash_session')) || {}).email), 'watch',
+    `${row.Company} / ${row.Drug}`, on ? 'tracked' : 'screened', req.params.id);
+  bioQuoteCacheBust();
+  res.json({ ok: true, status: on ? 'tracked' : 'screened' });
+}));
+
+// ---------- workspace settings: the ⚙ module registry, same shape as the main dashboard ----------
+// {sections:{key:{order,hidden,title}}} in one cell of the tracker's own sheet, so the second
+// reader configures their modules without touching the owner's dashboard settings.
+const BIOSET_CELL = "'Bio Settings'!A1";
+async function readBioSettings() {
+  try {
+    const r = await store.values.get({ spreadsheetId: BIO_SHEET_ID, range: BIOSET_CELL });
+    return JSON.parse((((r.data.values || [])[0] || [])[0]) || '{}');
+  } catch (e) { return {}; }
+}
+app.get('/api/bio/settings', asyncRoute(async (req, res) => res.json({ settings: await readBioSettings() })));
+app.post('/api/bio/settings', asyncRoute(async (req, res) => {
+  const cur = await readBioSettings();
+  const next = { ...cur, ...(req.body || {}).settings };
+  await ensureTab('Bio Settings', ['settings'], BIO_SHEET_ID);
+  await store.values.update({
+    spreadsheetId: BIO_SHEET_ID, range: BIOSET_CELL,
+    valueInputOption: 'RAW', requestBody: { values: [[JSON.stringify(next)]] },
+  });
+  res.json({ ok: true, settings: next });
+}));
+
+// ---------- biotech news config: the tracker's own SUBJECTS / SOURCES ----------
+// Same prompt-row + header-row + data-rows shape as the main prefs sheet, but on the
+// tracker's sheet and seeded with biotech defaults, so tuning this reader's feed never
+// edits the owner's news.
+const BIOPREF_TABS = { SUBJECTS: 'Subject', SOURCES: 'Source' };
+const BIOPREF_SEED = {
+  SUBJECTS: ['clinical trial results', 'FDA approval', 'FDA advisory committee', 'phase 3 readout',
+    'biotech M&A', 'drug pricing', 'gene therapy', 'obesity drugs', 'oncology pipeline', 'PDUFA date'],
+  SOURCES: ['Endpoints News', 'STAT News', 'FierceBiotech', 'BioSpace', 'Nature Biotechnology',
+    'Evaluate Vantage', 'BioPharma Dive'],
+};
+async function readBioPrefs() {
+  const out = {};
+  for (const [tab, header] of Object.entries(BIOPREF_TABS)) {
+    let rows = [];
+    try {
+      const r = await store.values.get({ spreadsheetId: BIO_SHEET_ID, range: `'${tab}'!A1:A` });
+      rows = (r.data.values || []).slice(2).map(v => String(v[0] || '').trim()).filter(Boolean);
+    } catch (e) {}
+    if (!rows.length) rows = BIOPREF_SEED[tab]; // first read shows the biotech defaults
+    out[tab] = rows;
+  }
+  return out;
+}
+app.get('/api/bio/prefs', asyncRoute(async (req, res) => res.json(await readBioPrefs())));
+app.post('/api/bio/prefs', asyncRoute(async (req, res) => {
+  const tab = String((req.body || {}).tab || '').toUpperCase();
+  if (!BIOPREF_TABS[tab]) return res.status(400).json({ error: 'tab must be SUBJECTS or SOURCES' });
+  const lines = (Array.isArray(req.body.lines) ? req.body.lines : String(req.body.lines || '').split('\n'))
+    .map(l => String(l).trim()).filter(Boolean).slice(0, 100);
+  await ensureTab(tab, [`${tab} — one per line`], BIO_SHEET_ID);
+  await store.values.clear({ spreadsheetId: BIO_SHEET_ID, range: `'${tab}'!A1:A` }).catch(() => {});
+  await store.values.update({
+    spreadsheetId: BIO_SHEET_ID, range: `'${tab}'!A1`, valueInputOption: 'RAW',
+    requestBody: { values: [[`${tab} — one per line`], [BIOPREF_TABS[tab]], ...lines.map(l => [l])] },
+  });
+  bioNewsCache = { at: 0, items: [] }; // config changed → next read rebuilds
+  res.json({ ok: true, count: lines.length });
+}));
+
+// ---------- quotes: one mini-tracker per tracked ticker ----------
+// Same keyless Yahoo chart endpoint the Markets module uses, same {price, changePct, spark}
+// primitive. A ticker that cannot be priced returns an error field — never a fake zero.
+const bioQuoteCache = {}; // range → {at, data}
+const bioQuoteCacheBust = () => Object.keys(bioQuoteCache).forEach(k => delete bioQuoteCache[k]);
+const BIO_RANGES = { '1mo': '1d', '3mo': '1d', '6mo': '1d' };
+async function bioQuote(sym, range) {
+  try {
+    const iv = BIO_RANGES[range] || '1d';
+    const r = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?range=${range}&interval=${iv}`,
+      { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(10000) });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const result = (((await r.json()).chart || {}).result || [])[0];
+    if (!result) throw new Error('empty result');
+    const meta = result.meta || {};
+    const closes = (((result.indicators || {}).quote || [])[0] || {}).close || [];
+    const clean = closes.filter(v => typeof v === 'number' && isFinite(v));
+    const price = meta.regularMarketPrice ?? clean[clean.length - 1] ?? null;
+    const prev = meta.chartPreviousClose ?? (clean.length > 1 ? clean[clean.length - 2] : null);
+    const weekAgo = clean.length > 5 ? clean[clean.length - 6] : clean[0];
+    return {
+      symbol: sym, price, currency: meta.currency || 'USD',
+      changePct: prev ? ((price - prev) / prev) * 100 : null,
+      weekPct: weekAgo ? ((price - weekAgo) / weekAgo) * 100 : null,
+      spark: clean.slice(-90),
+    };
+  } catch (e) { return { symbol: sym, error: e.message }; }
+}
+app.get('/api/bio/quotes', asyncRoute(async (req, res) => {
+  const range = BIO_RANGES[String(req.query.range || '')] ? String(req.query.range) : '3mo'; // 3mo default
+  const hit = bioQuoteCache[range];
+  if (hit && Date.now() - hit.at < 10 * 60 * 1000) return res.json(hit.data);
+  let rows = [];
+  try { rows = (await readBioTab()).rows; } catch (e) {}
+  const seen = new Set();
+  const live = rows.filter(r => r.Status !== 'removed')
+    .sort((x, y) => (y.Status === 'tracked') - (x.Status === 'tracked')); // watchlist tickers first
+  const BIO_QUOTE_CAP = 30;
+  const tickers = live.map(r => String(r.Ticker || '').trim().toUpperCase())
+    .filter(t => t && !seen.has(t) && seen.add(t)).slice(0, BIO_QUOTE_CAP);
+  const nameOf = t => (live.find(r => String(r.Ticker || '').trim().toUpperCase() === t) || {}).Company || '';
+  const quotes = [];
+  for (const t of tickers) quotes.push({ ...(await bioQuote(t, range)), company: nameOf(t) }); // small list; serial keeps Yahoo happy
+  const data = { at: nowIso(), range, quotes };
+  bioQuoteCache[range] = { at: Date.now(), data };
+  track('bio-quotes', quotes.some(q => !q.error), `${quotes.filter(q => !q.error).length}/${quotes.length}`);
+  res.json(data);
+}));
+
+// ---------- news curation: swipe feedback + LLM summaries ----------
+// Dismissals are durable on the tracker's own sheet so a story swiped away on the phone
+// stays gone everywhere. Every gesture also emits a CI feedback signal (bio_* kinds) so the
+// feed learns this reader's taste, exactly like the main dashboard's news.
+const BIODIS_TAB = 'Bio Dismissed';
+const BIODIS_HEADERS = ['URL', 'Title', 'Kind', 'At'];
+let bioDismissCache = { at: 0, urls: new Set() };
+async function bioDismissed() {
+  if (Date.now() - bioDismissCache.at < 60000) return bioDismissCache.urls;
+  const urls = new Set();
+  try {
+    const r = await store.values.get({ spreadsheetId: BIO_SHEET_ID, range: `'${BIODIS_TAB}'!A2:A` });
+    (r.data.values || []).forEach(v => v[0] && urls.add(String(v[0]).trim()));
+  } catch (e) {}
+  bioDismissCache = { at: Date.now(), urls };
+  return urls;
+}
+const BIO_SIGNAL = { bio_not_interested: -2, bio_agent_read: 1, bio_pinned: 2, bio_clicked: 1 };
+app.post('/api/bio/news/feedback', asyncRoute(async (req, res) => {
+  const b = req.body || {};
+  const kind = BIO_SIGNAL[b.kind] !== undefined ? b.kind : 'bio_not_interested';
+  const sess = verifySession(cookieOf(req, 'dash_session'));
+  await writeFeedbackEntry({
+    at: nowIso(), kind, signal: BIO_SIGNAL[kind], title: b.title || '', url: b.url || '',
+    source: 'biotech-tracker', subjects: Array.isArray(b.subjects) ? b.subjects : [],
+    author: normEmail((sess || {}).email), context: b.context || '',
+  }).catch(e => console.error('bio feedback:', e.message));
+  if (kind === 'bio_not_interested' && (b.url || b.title)) {
+    await appendTabRow(BIODIS_TAB, BIODIS_HEADERS, [b.url || '', b.title || '', kind, nowIso()], BIO_SHEET_ID).catch(() => {});
+    bioDismissCache.at = 0;
+  }
+  res.json({ ok: true });
+}));
+
+// Summaries: the reader swipes right, an LLM reads the story and writes a short brief.
+// Uses the pipeline's free-first transport, so with no CLI it refuses rather than billing.
+const BIOSUM_TAB = 'Bio Summaries';
+const BIOSUM_HEADERS = ['At', 'Title', 'URL', 'Summary', 'Model', 'ID'];
+app.get('/api/bio/summaries', asyncRoute(async (req, res) => {
+  let rows = [];
+  try { rows = (await readTab(BIO_SHEET_ID, BIOSUM_TAB, ['At', 'Title', 'ID'])).rows; }
+  catch (e) { if (!/Header row not found|Unable to parse range/i.test(e.message)) throw e; }
+  res.json({ summaries: rows.map(r => ({ id: r.ID, at: r.At, title: r.Title, url: r.URL, summary: r.Summary, model: r.Model })).reverse().slice(0, 25) });
+}));
+app.post('/api/bio/summaries', asyncRoute(async (req, res) => {
+  const b = req.body || {};
+  if (!b.title && !b.url) return res.status(400).json({ error: 'title or url required' });
+  const { callModel } = require('./bio-pipeline');
+  const prompt = `Summarise this biotech news story for a clinical-trial tracker's reader in 3-5 sentences.
+Title: ${b.title || ''}
+Source: ${b.source || ''}
+URL: ${b.url || ''}
+${b.desc ? `Standfirst: ${b.desc}` : ''}
+
+Say what happened, which company/drug/indication it concerns, and why it matters to someone tracking drug pipelines. If it names a trial, phase or regulatory date, keep those exact. If you do not have enough to go on, say so plainly rather than padding. No investment advice. Return the summary as plain prose with no preamble.`;
+  let out;
+  try { out = await callModel('haiku', prompt); }
+  catch (e) { return res.status(503).json({ error: e.message }); } // free-transport refusal surfaces as-is
+  const text = String(out.text || '').trim();
+  const id = crypto.randomUUID();
+  await appendTabRow(BIOSUM_TAB, BIOSUM_HEADERS, [nowIso(), b.title || '', b.url || '', text, out.model || '', id], BIO_SHEET_ID);
+  res.json({ ok: true, id, summary: text, model: out.model });
+}));
+
+// Biotech-only news: its own feed set, deliberately NOT the owner's /api/news prefs
+// (SUBJECTS/SOURCES there drive a different reader's dashboard).
+let bioNewsCache = { at: 0, items: [] };
+app.get('/api/bio/news', asyncRoute(async (req, res) => {
+  if (Date.now() - bioNewsCache.at < 30 * 60 * 1000 && bioNewsCache.items.length) {
+    const dis0 = await bioDismissed();
+    return res.json({ items: bioNewsCache.items.filter(i => !dis0.has(i.link)), cached: true });
+  }
+  // Queries are built from the reader's own SUBJECTS, restricted to their own SOURCES —
+  // the same "subjects x sources" idea as the main dashboard's news, scoped to this sheet.
+  const prefs = await readBioPrefs();
+  const subjects = prefs.SUBJECTS.slice(0, 12);
+  const sources = prefs.SOURCES.slice(0, 8);
+  const srcClause = sources.length ? ' (' + sources.map(x => '"' + x + '"').join(' OR ') + ')' : '';
+  const queries = subjects.map(sub => sub + srcClause);
+  // one unrestricted sweep so a big story from an unlisted outlet still lands
+  queries.push(subjects.slice(0, 4).join(' OR '));
+  const batches = await Promise.all(queries.map(q => rssSearch(q, 6).catch(() => [])));
+  const seen = new Set(), items = [];
+  for (let i = 0; i < batches.length; i++) {
+    for (const it of batches[i]) {
+      const k = (it.title || '').toLowerCase();
+      if (!k || seen.has(k)) continue;
+      seen.add(k);
+      items.push({ ...it, subject: subjects[i] || '' });
+    }
+  }
+  items.sort((x, y) => (x.ageHours ?? 1e9) - (y.ageHours ?? 1e9));
+  bioNewsCache = { at: Date.now(), items: items.slice(0, 40) };
+  const dis = await bioDismissed();
+  const visible = bioNewsCache.items.filter(i => !dis.has(i.link));
+  track('bio-news', visible.length > 0, `${visible.length} items from ${subjects.length} subjects`);
+  res.json({ items: visible, subjects, sources });
+}));
+
 const HABITS_TAB = 'Habits';
 const HABITS_HEADERS = ['Text', 'Recurring', 'Date', 'Created', 'ID', 'Stopped', 'Freq', 'Track', 'Hidden'];
 function freqShowsToday(freq) {
@@ -2841,6 +4195,7 @@ app.get('/api/activities', asyncRoute(async (req, res) => {
   const leadOf = Object.fromEntries(acts.map(a => [a.activity, a.leadDays]));
   const showOf = Object.fromEntries(acts.map(a => [a.activity, a.show]));
   const tab = await readTabCached(TODO_SHEET_ID, ACTEV_TAB, ACTEV_HEADERS, 120000).catch(() => ({ rows: [] }));
+  const dismissedEvt = (await getDismissedSet().catch(() => ({ urls: new Set() }))).urls;
   const t0 = today();
   const horizon = new Date(Date.now() + 15 * 86400000).toISOString().slice(0, 10);
   const STOP2 = new Set(['vs', 'v', 'the', 'and', 'at', 'of', 'round', 'rd', 'match', 'live']);
@@ -2852,7 +4207,17 @@ app.get('/api/activities', asyncRoute(async (req, res) => {
   };
   const seenKeys = new Set(); const seenToks = {}; // activity|date → [token arrays]
   const homeLC = String(typeof HOME_LOCATION !== 'undefined' ? HOME_LOCATION : '').toLowerCase();
-  const events = tab.rows.filter(r => r.Date >= t0 && r.Date <= horizon)
+  // time-expiry: a same-day event whose end has passed is over — auto-expire it. Time may be
+  // "HH:MM" (assume ≤3h) or "HH:MM-HH:MM"; untimed same-day rows survive until midnight.
+  const nowHM = new Date().toTimeString().slice(0, 5); // server-local clock (Mac = owner's TZ; cloud=UTC expires late, never early)
+  const stillOn = r => {
+    if (r.Date !== t0) return true;
+    const m = /^(\d{2}:\d{2})(?:\s*-\s*(\d{2}:\d{2}))?/.exec(String(r.Time || '').trim());
+    if (!m) return true;
+    const end = m[2] || (String(Math.min(23, +m[1].slice(0, 2) + 3)).padStart(2, '0') + m[1].slice(2));
+    return end >= nowHM;
+  };
+  const events = tab.rows.filter(r => r.Date >= t0 && r.Date <= horizon).filter(stillOn)
     .filter(r => { // projected-location gate (see ScanLoc column)
       const here = locationOnDate(r.Date); if (!here) return true;
       const scanLoc = String(r.ScanLoc || '').trim();
@@ -2867,6 +4232,7 @@ app.get('/api/activities', asyncRoute(async (req, res) => {
       seenKeys.add(k); (seenToks[g] = seenToks[g] || []).push(T);
       return true;
     })
+    .filter(r => !dismissedEvt.has('evt:' + normTitle(r.Title) + '|' + r.Activity)) // swiped away = gone, every tier
     .map(r => ({ activity: r.Activity, date: r.Date, title: r.Title, time: r.Time, venue: r.Venue, url: r.URL, note: r.Note, show: showOf[r.Activity] || 'all' }))
     .sort((x, y) => x.date.localeCompare(y.date) || String(x.time).localeCompare(String(y.time)));
   const leads = events.filter(ev => {
@@ -3379,10 +4745,10 @@ function appendToJournal(line, { section = 'Agent Log', day = 'today' } = {}) {
 // with the vault), synced to the cloud tier via a Heartbeat cell like markets/bars. Boxes
 // persist until the owner ✕-dismisses them (they don't vanish when the day rolls over);
 // a dismissed heading only comes back if its note is edited again after the dismissal.
-const JLISTS_LOCAL = path.join(__dirname, 'data', 'journal-lists.json');
-const JLISTS_CELL = "'Heartbeat'!Q1";
-const JLIST_WINDOW = 7; // scan this many most-recent daily notes
-// template sections that are NEVER ad-hoc lists (lowercased); config can extend for other vaults
+const JLIST_WINDOW = 30; // scan window widened 7→30 (2026-07-31): recovers lists that the old replace-not-merge scan evaporated; retention keeps them regardless of window now
+// template sections that are NEVER ad-hoc lists (lowercased); config can extend for other vaults.
+// Confidential rule (2026-07-29): headings ending in "confidential" are skipped entirely —
+// enforced below in the heading filter, never surfaced as dashboard boxes.
 const KNOWN_HEADINGS = new Set([
   'post-meditation notes', 'health notes', 'family/personal notes', 'journal', 'work', 'todo',
   'stashed notes', 'agent feedback', 'ci log', 'agent notes', 'agent log', 'stashed media',
@@ -3419,34 +4785,86 @@ function jlCleanTodoLabel(s) {
     .replace(/[:\-–]\s*$/, '')
     .replace(/\s+/g, ' ').trim();
 }
-function readJListsFile() { const j = readJson(JLISTS_LOCAL, null); return (j && Array.isArray(j.lists)) ? j : { savedAt: 0, lists: [], dismissed: {} }; }
-function saveJLists(store) {
-  const payload = { savedAt: Date.now(), lists: store.lists || [], dismissed: store.dismissed || {} };
-  try { writeJson(JLISTS_LOCAL, payload); } catch (e) {}
-  storeValues_update(JLISTS_CELL, JSON.stringify(payload)); // fire-and-forget cross-tier
-  return payload;
-}
+// ---- Ephemeral Lists: the Sheet tab IS the store (David 2026-07-31) ----
+// The journal is INTAKE only: the scanner picks a new ad-hoc list up ONCE and moves it to
+// the 'Ephemeral Lists' tab — two columns per list (items | done), expandable on request.
+// Item marks: '' open · 'D' doer-reported complete (external helper) · 'Y' owner-checked.
+// Completing a list (all Y, or ✕ on the dashboard) rewrites its second header to
+// "completed DD-MM-YY" → inactive; pairs completed >30d are dropped and the sheet condensed
+// (daily) so columns never run out. keepStorage: storeValues_update stays (other cells use it).
+const ELISTS_TAB = 'Ephemeral Lists';
+const ELIST_COMMENTS_TAB = 'List Comments';
+const ELIST_COMMENTS_HEADERS = ['At', 'List', 'Item', 'From', 'Text'];
 function storeValues_update(cell, raw) {
   store.values.update({ spreadsheetId: TODO_SHEET_ID, range: cell, valueInputOption: 'RAW', requestBody: { values: [[String(raw).slice(0, 49000)]] } }).catch(() => {});
 }
-async function syncJListsFromSheet() {
-  try {
-    const r = await store.values.get({ spreadsheetId: TODO_SHEET_ID, range: JLISTS_CELL });
-    const raw = (((r.data.values || [[]])[0] || [])[0]) || '';
-    let remote = null; try { remote = JSON.parse(raw); } catch (e) {}
-    const local = readJson(JLISTS_LOCAL, null);
-    if (remote && Array.isArray(remote.lists) && (!local || (remote.savedAt || 0) > (local.savedAt || 0))) { writeJson(JLISTS_LOCAL, remote); return; }
-    if (local && (!remote || (local.savedAt || 0) > (remote.savedAt || 0))) storeValues_update(JLISTS_CELL, JSON.stringify(local));
-  } catch (e) {}
+let elistsTabReady = false;
+async function elistsEnsureTab() {
+  if (elistsTabReady) return;
+  const meta = await store.spreadsheets.get({ spreadsheetId: TODO_SHEET_ID });
+  if (!(meta.data.sheets || []).some(x => x.properties.title === ELISTS_TAB))
+    await store.spreadsheets.batchUpdate({ spreadsheetId: TODO_SHEET_ID, requestBody: { requests: [{ addSheet: { properties: { title: ELISTS_TAB } } }] } });
+  elistsTabReady = true;
+}
+const elistDDMMYY = () => { const d = new Date(); const p = n => String(n).padStart(2, '0'); return `${p(d.getDate())}-${p(d.getMonth() + 1)}-${String(d.getFullYear()).slice(2)}`; };
+async function elistsRead() { // → { grid, lists:[{slug,heading,col,persistent,completedAt,items:[{row,text,mark}]}] }
+  await elistsEnsureTab();
+  const r = await store.values.get({ spreadsheetId: TODO_SHEET_ID, range: `'${ELISTS_TAB}'!A1:ZZ300` }).catch(() => null);
+  const grid = (r && r.data.values) || [];
+  const head = grid[0] || [];
+  const lists = [];
+  for (let c = 0; c < head.length; c += 2) {
+    const heading = String(head[c] || '').trim();
+    if (!heading) continue;
+    const h2 = String(head[c + 1] || '').trim();
+    const cm = /^completed\s+(\d{2}-\d{2}-\d{2,4})/i.exec(h2);
+    const items = [];
+    for (let rI = 1; rI < grid.length; rI++) {
+      const text = String((grid[rI] || [])[c] || '').trim();
+      if (!text) continue;
+      items.push({ row: rI + 1, text, mark: String((grid[rI] || [])[c + 1] || '').trim().toUpperCase() });
+    }
+    lists.push({ slug: jlSlug(heading), heading, col: c, persistent: /persistent/i.test(h2), completedAt: cm ? cm[1] : null, items });
+  }
+  return { grid, lists };
+}
+async function elistsCreate(heading, texts, doneTexts = new Set(), { persistent = false } = {}) {
+  const { grid, lists } = await elistsRead();
+  const used = lists.length ? Math.max(...lists.map(l => l.col)) + 2 : 0;
+  const col = used; // first free pair
+  const values = [[heading, persistent ? 'done (persistent)' : 'done'],
+    ...texts.map(t => [t, doneTexts.has(t) ? 'Y' : ''])];
+  await store.values.update({ spreadsheetId: TODO_SHEET_ID, range: `'${ELISTS_TAB}'!${colLetter(col)}1:${colLetter(col + 1)}${values.length}`, valueInputOption: 'RAW', requestBody: { values } });
+}
+async function elistsAppendItems(list, texts) {
+  if (!texts.length) return;
+  const startRow = (list.items.length ? Math.max(...list.items.map(i => i.row)) : 1) + 1;
+  await store.values.update({ spreadsheetId: TODO_SHEET_ID, range: `'${ELISTS_TAB}'!${colLetter(list.col)}${startRow}:${colLetter(list.col)}${startRow + texts.length - 1}`, valueInputOption: 'RAW', requestBody: { values: texts.map(t => [t]) } });
+}
+async function elistsSetMark(list, row, mark) {
+  await store.values.update({ spreadsheetId: TODO_SHEET_ID, range: `'${ELISTS_TAB}'!${colLetter(list.col + 1)}${row}`, valueInputOption: 'RAW', requestBody: { values: [[mark]] } });
+}
+async function elistsSetHeader2(list, text) {
+  await store.values.update({ spreadsheetId: TODO_SHEET_ID, range: `'${ELISTS_TAB}'!${colLetter(list.col + 1)}1`, valueInputOption: 'RAW', requestBody: { values: [[text]] } });
+}
+async function elistsCleanup() { // completed >30d → drop the column pair (rightmost first), condensing the sheet
+  const { lists } = await elistsRead();
+  const cutoff = Date.now() - 30 * 864e5;
+  const dead = lists.filter(l => {
+    if (!l.completedAt) return false;
+    const [dd, mm, yy] = l.completedAt.split('-').map(Number);
+    return new Date(2000 + (yy % 100), mm - 1, dd).getTime() < cutoff;
+  }).sort((a, b) => b.col - a.col);
+  if (!dead.length) return 0;
+  const meta = await store.spreadsheets.get({ spreadsheetId: TODO_SHEET_ID });
+  const sheetId = meta.data.sheets.find(x => x.properties.title === ELISTS_TAB).properties.sheetId;
+  await store.spreadsheets.batchUpdate({ spreadsheetId: TODO_SHEET_ID, requestBody: { requests: dead.map(l => ({ deleteDimension: { range: { sheetId, dimension: 'COLUMNS', startIndex: l.col, endIndex: l.col + 2 } } })) } });
+  return dead.length;
 }
 // Mac-only: parse the recent daily notes, upsert ad-hoc lists, preserve done-state by item text.
+
 async function scanJournalLists() {
   if (!HAS_JOURNAL || process.env.DASHBOARD_NO_JOBS) return;
-  await syncJListsFromSheet(); // fold in any dismiss/toggle done on the phone first
-  const store = readJListsFile();
-  const dismissed = store.dismissed || {};
-  const prevDone = {}; // slug -> Set(done item texts) to carry across scans
-  for (const l of store.lists || []) prevDone[jlSlug(l.heading)] = new Set((l.items || []).filter(i => i.done).map(i => i.text));
   let files = [];
   try { files = fs.readdirSync(JOURNAL_DIR).filter(f => /^\d{4}-\d{2}-\d{2}\.md$/.test(f)).sort().slice(-JLIST_WINDOW); } catch (e) { return; }
   const found = {}; // slug -> { heading, date, mtime, items:[{text,done}] } — newest note wins the items
@@ -3474,6 +4892,7 @@ async function scanJournalLists() {
         const heading = h2[1].trim();
         if (heading.toLowerCase() === TODO_SECTION) { inTodo = true; continue; }
         if (KNOWN_HEADINGS.has(heading.toLowerCase()) || !heading) continue;
+        if (/confidential\s*$/i.test(heading)) continue; // confidential sections never surface (David 2026-07-29)
         cur = heading; items = [];
         found[jlSlug(heading)] = { heading, date: f.slice(0, 10), mtime, items }; // newest file overwrites
         continue;
@@ -3492,61 +4911,313 @@ async function scanJournalLists() {
     }
     flushTodo();
   }
-  const lists = [];
-  for (const [slug, v] of Object.entries(found)) {
-    if (!v.items.length) continue;                                  // a heading with no bullets isn't a list
-    if (dismAt(dismissed[slug]) && v.mtime <= dismAt(dismissed[slug])) continue; // dismissed & not re-touched since
-    const carried = prevDone[slug] || new Set();
-    lists.push({ id: 'jl:' + slug, heading: v.heading, date: v.date, items: v.items.map(i => ({ text: i.text, done: i.done || carried.has(i.text) })) });
-  }
-  saveJLists({ lists, dismissed });
+  // INTAKE ONLY (David 2026-07-31): a journal list moves to the Ephemeral Lists tab once;
+  // thereafter the TAB is the source of truth — done-marks, doer-marks, completion, comments
+  // all live there. A completed list is NOT reopened by its journal section still existing;
+  // new bullets added to an ACTIVE list's journal section do flow in.
+  try {
+    const { lists: tabLists } = await elistsRead();
+    const bySlug = Object.fromEntries(tabLists.map(l => [l.slug, l]));
+    for (const [slug, v] of Object.entries(found)) {
+      if (!v.items.length) continue;
+      const existing = bySlug[slug];
+      if (!existing) { await elistsCreate(v.heading, v.items.map(i => i.text), new Set(v.items.filter(i => i.done).map(i => i.text))); continue; }
+      if (existing.completedAt) continue;
+      const have = new Set(existing.items.map(i => i.text));
+      await elistsAppendItems(existing, v.items.filter(i => !have.has(i.text)).map(i => i.text));
+    }
+    // daily housekeeping: drop pairs completed >30d, condensing the sheet
+    if (!scanJournalLists._cleanedDay || scanJournalLists._cleanedDay !== today()) {
+      scanJournalLists._cleanedDay = today();
+      await elistsCleanup().catch(() => {});
+    }
+  } catch (e) { console.error('elists intake:', e.message); }
 }
-// dismissed[slug] is {at, list?} — `at` gates re-add on scan, `list` lets undo restore the
-// exact box without waiting for (or depending on) a re-scan. Tolerates the legacy bare-epoch shape.
-const dismAt = d => (typeof d === 'number' ? d : (d && d.at) || 0);
+
 if (HAS_JOURNAL && !process.env.DASHBOARD_NO_JOBS) {
   setTimeout(() => scanJournalLists().catch(() => {}), 20e3);
   setInterval(() => scanJournalLists().catch(() => {}), 120e3); // journal edits are frequent — low latency
 }
-setInterval(syncJListsFromSheet, 10 * 60000); // cloud tier: pull Mac's lists
-app.get('/api/journal-lists', asyncRoute(async (req, res) => {
-  if (!HAS_JOURNAL) await syncJListsFromSheet().catch(() => {}); // cloud: freshen from the cell
-  res.json({ lists: readJListsFile().lists || [] });
-}));
+// list API — tab-backed; same response shapes the frontend already renders.
+async function elistsPayload() {
+  const { lists } = await elistsRead();
+  // recent comments (external helpers) attach to items by list+item text
+  let comments = [];
+  try {
+    const tab = await readTabCached(TODO_SHEET_ID, ELIST_COMMENTS_TAB, ELIST_COMMENTS_HEADERS, 30000);
+    comments = tab.rows.slice(-200);
+  } catch (e) {}
+  const out = lists.filter(l => !l.completedAt).map(l => ({
+    id: 'jl:' + l.slug, heading: l.heading, persistent: l.persistent,
+    items: l.items.map(i => ({ text: i.text, done: i.mark === 'Y', doer: i.mark === 'D',
+      comments: comments.filter(c => c.List === l.slug && c.Item === i.text).map(c => ({ from: c.From, text: c.Text, at: c.At })) })),
+  }));
+  // shared lists living on an external sheet (family datastore) join the payload
+  for (const [slug, cfg] of Object.entries(loadSettings().listShares || {})) {
+    if (!cfg || !cfg.sheetId) continue;
+    try {
+      const { items, comments: cms } = await sharedListRead(cfg.sheetId, cfg.tab || slug);
+      out.push({ id: 'jl:' + slug, heading: cfg.label || (cfg.name ? cfg.name + ' tasks' : slug), persistent: true, shared: true,
+        items: items.map(i => ({ text: i.text, done: i.mark === 'Y', doer: i.mark === 'D',
+          comments: cms.filter(c => c.Item === i.text || !c.Item).map(c => ({ from: c.From, text: c.Text, at: c.At })) })) });
+    } catch (e) {}
+  }
+  return out;
+}
+app.get('/api/journal-lists', asyncRoute(async (req, res) => res.json({ lists: await elistsPayload() })));
 app.post('/api/journal-lists/scan', asyncRoute(async (req, res) => {
   if (!HAS_JOURNAL) return res.status(400).json({ error: 'journal scanning runs on the vault host' });
   await scanJournalLists();
-  res.json({ ok: true, lists: readJListsFile().lists || [] });
+  res.json({ ok: true, lists: await elistsPayload() });
 }));
 app.post('/api/journal-lists/:id/dismiss', asyncRoute(async (req, res) => {
-  const store = readJListsFile();
-  const l = (store.lists || []).find(x => x.id === req.params.id);
-  const slug = l ? jlSlug(l.heading) : String(req.params.id).replace(/^jl:/, '');
-  store.dismissed = store.dismissed || {};
-  store.dismissed[slug] = { at: Date.now(), list: l || null }; // stash the box so undo restores it verbatim
-  store.lists = (store.lists || []).filter(x => x.id !== req.params.id);
-  res.json({ ok: true, list: saveJLists(store) });
-}));
-app.post('/api/journal-lists/:id/restore', asyncRoute(async (req, res) => { // undo of a dismiss
-  const store = readJListsFile();
   const slug = String(req.params.id).replace(/^jl:/, '');
-  const stashed = store.dismissed && store.dismissed[slug];
-  if (store.dismissed) delete store.dismissed[slug];
-  // put the exact box back immediately (no dependence on a re-scan, which never runs on a
-  // no-jobs/cloud tier); if it wasn't stashed, the Mac's next scan re-materializes it
-  const l = stashed && stashed.list;
-  if (l && !(store.lists || []).some(x => x.id === l.id)) store.lists = [...(store.lists || []), l];
-  saveJLists(store);
-  res.json({ ok: true, lists: readJListsFile().lists || [] });
+  const { lists } = await elistsRead();
+  const l = lists.find(x => x.slug === slug);
+  if (!l) return res.status(404).json({ error: 'list not found' });
+  await elistsSetHeader2(l, 'completed ' + elistDDMMYY());
+  res.json({ ok: true });
+}));
+app.post('/api/journal-lists/:id/restore', asyncRoute(async (req, res) => { // undo of a complete
+  const slug = String(req.params.id).replace(/^jl:/, '');
+  const { lists } = await elistsRead();
+  const l = lists.find(x => x.slug === slug);
+  if (!l) return res.status(404).json({ error: 'list not found' });
+  await elistsSetHeader2(l, l.persistent ? 'done (persistent)' : 'done');
+  res.json({ ok: true, lists: await elistsPayload() });
 }));
 app.post('/api/journal-lists/:id/item', asyncRoute(async (req, res) => {
   const { text, done } = req.body || {};
-  const store = readJListsFile();
-  const l = (store.lists || []).find(x => x.id === req.params.id);
+  const slug = String(req.params.id).replace(/^jl:/, '');
+  const shared = sharedCfgOf(slug);
+  if (shared) {
+    const { items } = await sharedListRead(shared.sheetId, shared.tab || slug);
+    const it = items.find(i => i.text === text);
+    if (!it) return res.status(404).json({ error: 'item not found' });
+    await sharedListSetMark(shared.sheetId, shared.tab || slug, it.row, done ? 'Y' : '');
+    return res.json({ ok: true });
+  }
+  const { lists } = await elistsRead();
+  const l = lists.find(x => x.slug === slug);
   if (!l) return res.status(404).json({ error: 'list not found' });
-  const item = (l.items || []).find(i => i.text === text);
-  if (item) item.done = !!done;
-  res.json({ ok: true, list: saveJLists(store) });
+  const item = l.items.find(i => i.text === text);
+  if (!item) return res.status(404).json({ error: 'item not found' });
+  await elistsSetMark(l, item.row, done ? 'Y' : '');   // owner check overrides any doer mark
+  // all owner-checked → auto-complete the list ("collectively checked off")
+  if (done && l.items.every(i => i.text === text || i.mark === 'Y') && !l.persistent)
+    await elistsSetHeader2(l, 'completed ' + elistDDMMYY());
+  res.json({ ok: true });
+}));
+
+// ---- shared lists on an EXTERNAL spreadsheet (family datastore) ----
+// listShares[slug] may carry {sheetId, tab}: the list then lives on that sheet's tab —
+// items in A:B (Item | done/'D'/'Y'), comments log in D:G (At | Item | From | Text). One
+// tab = one list + its conversation, shareable sheet-level with family members.
+async function sharedListRead(sheetId, tab) {
+  const r = await store.values.get({ spreadsheetId: sheetId, range: `'${tab}'!A1:G300` }).catch(() => null);
+  const grid = (r && r.data.values) || [];
+  const items = [], comments = [];
+  for (let i = 1; i < grid.length; i++) {
+    const row = grid[i] || [];
+    const text = String(row[0] || '').trim();
+    if (text) items.push({ row: i + 1, text, mark: String(row[1] || '').trim().toUpperCase() });
+    if (String(row[3] || '').trim() || String(row[6] || '').trim())
+      comments.push({ At: row[3] || '', Item: row[4] || '', From: row[5] || '', Text: row[6] || '' });
+  }
+  return { items, comments };
+}
+async function sharedListEnsureHeaders(sheetId, tab) {
+  await store.values.update({ spreadsheetId: sheetId, range: `'${tab}'!A1:G1`, valueInputOption: 'RAW',
+    requestBody: { values: [['Item', 'done', '', 'At', 'Item', 'From', 'Text']] } }).catch(() => {});
+}
+async function sharedListSetMark(sheetId, tab, row, mark) {
+  await store.values.update({ spreadsheetId: sheetId, range: `'${tab}'!B${row}`, valueInputOption: 'RAW', requestBody: { values: [[mark]] } });
+}
+async function sharedListAddItem(sheetId, tab, text) {
+  const { items } = await sharedListRead(sheetId, tab);
+  const row = (items.length ? Math.max(...items.map(i => i.row)) : 1) + 1;
+  await store.values.update({ spreadsheetId: sheetId, range: `'${tab}'!A${row}`, valueInputOption: 'RAW', requestBody: { values: [[text]] } });
+}
+async function sharedListAddComment(sheetId, tab, item, from, text) {
+  const { items, comments } = await sharedListRead(sheetId, tab);
+  const row = Math.max(1, ...items.map(i => i.row), ...comments.map((c, i) => i + 2)) + 1;
+  await store.values.update({ spreadsheetId: sheetId, range: `'${tab}'!D${row}:G${row}`, valueInputOption: 'RAW',
+    requestBody: { values: [[nowIso(), item || '', from, text]] } });
+}
+const sharedCfgOf = slug => { const v = (loadSettings().listShares || {})[slug]; return v && v.sheetId ? v : null; };
+
+// ---- shared-list bridge: token-authed access for EXTERNAL helpers/agents ----
+// settings.listShares = { slug: { token, name } } (owner-managed). Contract: the external
+// side can READ, mark an item doer-complete ('D' — the owner still checks it off), or leave
+// a comment/question. It can never check items off, edit texts, or see anything else.
+const shareOf = token => Object.entries(loadSettings().listShares || {}).find(([, v]) => v && v.token === token);
+app.get('/api/elists/ext/:token', asyncRoute(async (req, res) => {
+  const hit = shareOf(String(req.params.token || ''));
+  if (!hit) return res.status(404).json({ error: 'unknown share' });
+  const list = (await elistsPayload()).find(l => l.id === 'jl:' + hit[0]);
+  if (!list) return res.status(404).json({ error: 'list inactive' });
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.json({ list: list.heading, items: list.items.map(i => ({ item: i.text, status: i.done ? 'done' : i.doer ? 'reported-complete' : 'open', comments: i.comments })) });
+}));
+app.post('/api/elists/ext/:token/complete', asyncRoute(async (req, res) => {
+  const hit = shareOf(String(req.params.token || ''));
+  if (!hit) return res.status(404).json({ error: 'unknown share' });
+  const want = String((req.body || {}).item || '');
+  const shared = sharedCfgOf(hit[0]);
+  if (shared) {
+    const { items } = await sharedListRead(shared.sheetId, shared.tab || hit[0]);
+    const it = items.find(i => i.text === want);
+    if (!it) return res.status(404).json({ error: 'item not found — GET the list for exact item texts' });
+    if (it.mark !== 'Y') await sharedListSetMark(shared.sheetId, shared.tab || hit[0], it.row, 'D');
+    return res.json({ ok: true, status: 'reported-complete' });
+  }
+  const { lists } = await elistsRead();
+  const l = lists.find(x => x.slug === hit[0]);
+  const item = l && l.items.find(i => i.text === want);
+  if (!item) return res.status(404).json({ error: 'item not found — GET the list for exact item texts' });
+  if (item.mark !== 'Y') await elistsSetMark(l, item.row, 'D'); // never downgrade an owner check
+  res.json({ ok: true, status: 'reported-complete' });
+}));
+app.post('/api/elists/ext/:token/comment', asyncRoute(async (req, res) => {
+  const hit = shareOf(String(req.params.token || ''));
+  if (!hit) return res.status(404).json({ error: 'unknown share' });
+  const from = String((req.body || {}).from || (loadSettings().listShares[hit[0]].name || 'helper')).slice(0, 40);
+  const text = String((req.body || {}).text || '').trim().slice(0, 500);
+  if (!text) return res.status(400).json({ error: 'text required' });
+  const shared = sharedCfgOf(hit[0]);
+  if (shared) { await sharedListAddComment(shared.sheetId, shared.tab || hit[0], String((req.body || {}).item || '').slice(0, 200), from, text); return res.json({ ok: true }); }
+  await appendTabRow(ELIST_COMMENTS_TAB, ELIST_COMMENTS_HEADERS, [nowIso(), hit[0], String((req.body || {}).item || '').slice(0, 200), from, text]);
+  res.json({ ok: true });
+}));
+// owner-side add-item (the ＋ input on each list box)
+app.post('/api/journal-lists/:id/add', asyncRoute(async (req, res) => {
+  const text = String((req.body || {}).text || '').trim().slice(0, 300);
+  if (!text) return res.status(400).json({ error: 'text required' });
+  const slug = String(req.params.id).replace(/^jl:/, '');
+  const shared = sharedCfgOf(slug);
+  if (shared) { await sharedListAddItem(shared.sheetId, shared.tab || slug, text); return res.json({ ok: true }); }
+  const { lists } = await elistsRead();
+  const l = lists.find(x => x.slug === slug);
+  if (!l) return res.status(404).json({ error: 'list not found' });
+  await elistsAppendItems(l, [text]);
+  res.json({ ok: true });
+}));
+
+// ---- Ranmali task checklist: session-authed view of lists shared to "Ranmali" ----
+// David creates/fills lists on his dashboard and shares them (settings.listShares entries
+// whose name is "Ranmali"); the /ranmali page renders every such active list above the
+// clothes section. Same contract as the token bridge — she can report an item complete
+// ('D', undoable while un-confirmed) and comment; only David checks items off ('Y').
+// Session-gated by the ranmali guest scope; no share token ever reaches her client.
+const ranmaliShareSlugs = () => new Set(Object.entries(loadSettings().listShares || {})
+  .filter(([, v]) => v && /^ranmali$/i.test(String(v.name || '').trim()))
+  .map(([slug]) => slug));
+app.get('/api/ranmali/tasks', asyncRoute(async (req, res) => {
+  const slugs = ranmaliShareSlugs();
+  const lists = (await elistsPayload()).filter(l => slugs.has(l.id.replace(/^jl:/, '')));
+  res.json({ lists: lists.map(l => ({ id: l.id.replace(/^jl:/, ''), heading: l.heading,
+    items: l.items.map(i => ({ text: i.text, status: i.done ? 'done' : i.doer ? 'reported' : 'open',
+      comments: i.comments })) })) });
+}));
+app.post('/api/ranmali/tasks/report', asyncRoute(async (req, res) => {
+  const { list, item, undo } = req.body || {};
+  if (!ranmaliShareSlugs().has(String(list))) return res.status(404).json({ error: 'list not shared' });
+  const { lists } = await elistsRead();
+  const l = lists.find(x => x.slug === String(list) && !x.completedAt);
+  const it = l && l.items.find(i => i.text === String(item || ''));
+  if (!it) return res.status(404).json({ error: 'item not found' });
+  if (it.mark === 'Y') return res.json({ ok: true, status: 'done' }); // owner check is final
+  await elistsSetMark(l, it.row, undo ? '' : 'D');
+  res.json({ ok: true, status: undo ? 'open' : 'reported' });
+}));
+app.post('/api/ranmali/tasks/comment', asyncRoute(async (req, res) => {
+  const { list, item } = req.body || {};
+  const text = String((req.body || {}).text || '').trim().slice(0, 500);
+  if (!ranmaliShareSlugs().has(String(list))) return res.status(404).json({ error: 'list not shared' });
+  if (!text) return res.status(400).json({ error: 'text required' });
+  await appendTabRow(ELIST_COMMENTS_TAB, ELIST_COMMENTS_HEADERS, [nowIso(), String(list), String(item || '').slice(0, 200), 'Ranmali', text]);
+  res.json({ ok: true });
+}));
+
+// ---------- ephemeral notes: quick captures (text / link / image) ----------
+// NOT tasks: dedicated 'Ephemeral Notes' Sheet tab (durable, cross-tier, append-only —
+// "delete" stamps the Deleted column per Sheet protocol). Scratch captures that may later
+// BECOME tasks/journal/wiki items, but start as their own thing. Image BYTES stay on the
+// capturing tier (data/enotes/, gitignored); the tab carries metadata only. Local-store
+// mode (the stub, no Google) falls back to a JSON file. History: v1 used Heartbeat!R1 —
+// that cell collided with nature-weather's state store AND evaporated on Cloud Run
+// redeploys, which is how early notes were lost (2026-07-29 postmortem).
+const ENOTES_LOCAL = path.join(__dirname, 'data', 'ephemeral-notes.json');
+const ENOTES_DIR = path.join(__dirname, 'data', 'enotes');
+const ENOTES_TAB = 'Ephemeral Notes';
+const ENOTES_TAB_HEADERS = ['At', 'Type', 'Text', 'Caption', 'Tier', 'ID', 'Deleted'];
+const ENOTE_TIER = () => HAS_CLAUDE ? 'mac' : 'cloud';
+async function enotesList() {
+  if (STORE_MODE !== 'sheets') {
+    const j = readJson(ENOTES_LOCAL, null);
+    return ((j && j.notes) || []).filter(n => !n.deleted);
+  }
+  const tab = await readTabCached(TODO_SHEET_ID, ENOTES_TAB, ENOTES_TAB_HEADERS, 20000).catch(() => ({ rows: [] }));
+  return tab.rows.filter(r => !String(r.Deleted || '').trim())
+    .map(r => ({ id: r.ID, type: r.Type, text: r.Text, caption: r.Caption, tier: r.Tier, at: r.At, ext: r.Type === 'image' ? 'jpg' : undefined }))
+    .reverse();
+}
+async function enotesAdd(note) {
+  if (STORE_MODE !== 'sheets') {
+    const j = readJson(ENOTES_LOCAL, null) || { notes: [] };
+    j.notes = [note, ...(j.notes || [])].slice(0, 200);
+    writeJson(ENOTES_LOCAL, j);
+    return;
+  }
+  await appendTabRow(ENOTES_TAB, ENOTES_TAB_HEADERS, [note.at, note.type, note.text || '', note.caption || '', note.tier || '', note.id, '']);
+  _tabCache.delete(TODO_SHEET_ID + '|' + ENOTES_TAB); // read-your-write
+}
+async function enotesDelete(id) {
+  if (STORE_MODE !== 'sheets') {
+    const j = readJson(ENOTES_LOCAL, null) || { notes: [] };
+    for (const n of j.notes || []) if (n.id === id) n.deleted = nowIso();
+    writeJson(ENOTES_LOCAL, j);
+    return true;
+  }
+  const tab = await readTab(TODO_SHEET_ID, ENOTES_TAB, ENOTES_TAB_HEADERS).catch(() => null);
+  const row = tab && tab.rows.find(r => r.ID === id);
+  if (!row) return false;
+  await store.values.update({ spreadsheetId: TODO_SHEET_ID, range: `'${ENOTES_TAB}'!G${row._row}`, valueInputOption: 'RAW', requestBody: { values: [[nowIso()]] } });
+  _tabCache.delete(TODO_SHEET_ID + '|' + ENOTES_TAB); // read-your-write
+  return true;
+}
+app.get('/api/enotes', asyncRoute(async (req, res) => res.json({ notes: await enotesList(), tier: ENOTE_TIER() })));
+app.post('/api/enotes', asyncRoute(async (req, res) => {
+  const text = String((req.body || {}).text || '').trim().slice(0, 2000);
+  if (!text) return res.status(400).json({ error: 'text required' });
+  const type = /^https?:\/\/\S+$/i.test(text) ? 'link' : 'text';
+  const note = { id: crypto.randomUUID().slice(0, 8), type, text, at: nowIso(), tier: ENOTE_TIER() };
+  await enotesAdd(note);
+  res.json({ ok: true, notes: await enotesList() });
+}));
+// image capture: client downscales to ≤~900px JPEG and sends a data URL (raised body limit)
+app.post('/api/enotes/image', express.json({ limit: '3mb' }), asyncRoute(async (req, res) => {
+  const m = /^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+\/=]+)$/.exec(String((req.body || {}).dataUrl || ''));
+  if (!m) return res.status(400).json({ error: 'dataUrl (jpeg/png/webp) required' });
+  const buf = Buffer.from(m[2], 'base64');
+  if (buf.length > 2.5e6) return res.status(400).json({ error: 'image too large — downscale failed?' });
+  const id = crypto.randomUUID().slice(0, 8);
+  fs.mkdirSync(ENOTES_DIR, { recursive: true });
+  fs.writeFileSync(path.join(ENOTES_DIR, `${id}.${m[1] === 'jpeg' ? 'jpg' : m[1]}`), buf);
+  await enotesAdd({ id, type: 'image', caption: String((req.body || {}).caption || '').slice(0, 200), tier: ENOTE_TIER(), at: nowIso() });
+  res.json({ ok: true, notes: await enotesList() });
+}));
+app.get('/api/enotes/img/:id', asyncRoute(async (req, res) => {
+  const id = String(req.params.id).replace(/[^a-z0-9-]/gi, '');
+  const f = ['jpg', 'png', 'webp'].map(e => path.join(ENOTES_DIR, `${id}.${e}`)).find(p => fs.existsSync(p));
+  if (!f) return res.status(404).json({ error: 'not on this tier' });
+  res.sendFile(f);
+}));
+app.delete('/api/enotes/:id', asyncRoute(async (req, res) => {
+  const id = String(req.params.id);
+  const ok = await enotesDelete(id);
+  for (const e of ['jpg', 'png', 'webp']) { try { fs.unlinkSync(path.join(ENOTES_DIR, `${id}.${e}`)); } catch (x) {} }
+  res.json({ ok });
 }));
 
 // ---------- Monitor-list change watcher ----------
@@ -4536,26 +6207,26 @@ app.get('/api/futures-strip', asyncRoute(async (req, res) => {
 }));
 
 // ---------- sovereign CDS (worldgovernmentbonds.com) ----------
-// Countries of interest = US + France + Qatar + anything mappable from
-// Preferences LOCATIONS. The free source's main table covers the US and France
-// but not Qatar or Sri Lanka — those render as "not covered". True trailing-year
-// series isn't freely available, so the server snapshots each fetch into
-// data/cds-history.json and the sparkline grows from accumulated history.
+// Countries of interest come from CONFIG (cdsCountries base list + cdsLocationMap
+// [{match, country}] regexes applied to the Preferences LOCATIONS tab) — nothing
+// owner-specific in code. The free source doesn't cover every country; uncovered ones
+// render as "not covered". True trailing-year series isn't freely available, so the
+// server snapshots each fetch into data/cds-history.json and sparklines accumulate.
 
 const CDS_HISTORY = path.join(__dirname, 'data', 'cds-history.json');
-const COUNTRY_MAP = [
-  [/qatar/i, 'Qatar'], [/france/i, 'France'], [/sri lanka/i, 'Sri Lanka'],
-  [/\b(us|usa|md|tx|maryland|texas|bethesda|austin|united states)\b/i, 'United States'],
-];
+const COUNTRY_MAP = (Array.isArray(CFG.cdsLocationMap) ? CFG.cdsLocationMap : [])
+  .filter(x => x && x.match && x.country)
+  .map(x => { try { return [new RegExp(x.match, 'i'), String(x.country)]; } catch (e) { return null; } })
+  .filter(Boolean);
 
 async function cdsCountries() {
-  const base = ['United States', 'France', 'Qatar'];
+  const base = (Array.isArray(CFG.cdsCountries) ? CFG.cdsCountries : []).map(String).slice(0, 12);
   try {
     const r = await store.values.get({ spreadsheetId: PREFS_SHEET_ID, range: "'LOCATIONS'!A1:B" });
     for (const row of prefRows(r.data.values || [])) {
       for (const [re, country] of COUNTRY_MAP) if (re.test(String(row[0] || '')) && !base.includes(country)) base.push(country);
     }
-  } catch (e) { /* fall back to the base three */ }
+  } catch (e) { /* fall back to the configured base */ }
   return base;
 }
 
@@ -5107,31 +6778,35 @@ const APA_MODELS_HEADERS = ['Model', 'Lab', 'Country', 'OS', 'Role', 'PriceIn', 
 const APA_CUTOFF_CELL = "'Heartbeat'!J1";
 let apaBoardBusy = false;
 async function runApaBoard() {
-  if (apaBoardBusy || !HAS_CLAUDE) return { skipped: true };
+  // AA is the SOLE benchmark source (David 2026-07-30): fresher and deterministic; the LLM
+  // web-search compile is deleted — no fallback machinery for models AA hasn't indexed
+  // ("I can't compete with them"). No LLM involved: cheap enough to refresh daily.
+  if (apaBoardBusy) return { skipped: true };
   apaBoardBusy = true;
   try {
-    // prompt + parse are agent-stable logic (stable/board.js); LLM call + persistence stay here
-    const cfg = loadApaSources();
-    const bd = require('./stable/board').createBoard({ roles: loadApaRoles(), prices: MODEL_PRICES, labs: cfg });
-    let raw; try { raw = await runClaude(bd.compilePrompt({ currentDefault: modelFor('summary', 'claude-sonnet-5') }), { tools: 'WebSearch', timeoutMs: 240000, module: 'apa-board', model: 'claude-sonnet-5' }); }
-    catch (e) { return { error: e.message }; }
-    const parsed = bd.parseCompile(raw);
-    let models = parsed.models;
-    if (!models.length) return { found: 0 };
-    if (parsed.cutoffs) { // APA's per-task cutoff hypothesis — Sheet cell so the cloud tier gets it
-      const s = apaState(); s.cutoffs = parsed.cutoffs; saveApaState(s);
-      store.values.update({ spreadsheetId: TODO_SHEET_ID, range: APA_CUTOFF_CELL, valueInputOption: 'RAW', requestBody: { values: [[JSON.stringify(parsed.cutoffs)]] } }).catch(() => {});
-    }
+    const aa = await aaModels();
+    if (!aa || !aa.length) { track('apa-board', false, CFG.aaApiKey ? 'AA API unavailable' : 'no aaApiKey configured'); return { error: 'AA unavailable' }; }
+    const bd = require('./stable/board').createBoard({ roles: loadApaRoles() });
+    const models = bd.fromRows(aa);
     await ensureTab(APA_MODELS_TAB, APA_MODELS_HEADERS, STABLE_SHEET_ID);
     await store.values.clear({ spreadsheetId: STABLE_SHEET_ID, range: `'${APA_MODELS_TAB}'!A2:Z1000` }); // replace board
-    const rows = models.map(m => [String(m.model).slice(0, 60), m.lab || '', m.country || '', m.os ? '1' : '', m.role || '', String(m.priceIn ?? ''), String(m.priceOut ?? ''), JSON.stringify({ ...(m.benchmarks || {}), ...(m.host ? { _host: String(m.host).slice(0, 30) } : {}) }).slice(0, 900), nowIso(), String(m.source || '').slice(0, 120)]);
+    const rows = models.map(m => [String(m.model).slice(0, 60), m.lab || '', m.country || '', m.os ? '1' : '', m.role || '',
+      m.priceIn == null ? '' : String(m.priceIn), m.priceOut == null ? '' : String(m.priceOut),
+      JSON.stringify(m.benchmarks).slice(0, 900), nowIso(), 'artificialanalysis.ai']);
     await appendTabRows(APA_MODELS_TAB, APA_MODELS_HEADERS, rows, STABLE_SHEET_ID);
     // seed price table for any board model we don't already price (helps cost-compare later)
-    const s = apaState(); s.prices = s.prices || {};
-    for (const m of models) if (m.priceIn != null && m.priceOut != null) s.prices[String(m.model).toLowerCase()] = { in: +m.priceIn, out: +m.priceOut, tier: 'board' };
-    saveApaState(s);
+    const st = apaState(); st.prices = st.prices || {};
+    for (const m of models) if (m.priceIn != null && m.priceOut != null) st.prices[String(m.model).toLowerCase()] = { in: +m.priceIn, out: +m.priceOut, src: 'aa' };
+    st.boardAt = nowIso();
+    saveApaState(st);
+    track('apa-board', true, `${rows.length} models (AA)`);
     return { found: rows.length };
   } finally { apaBoardBusy = false; }
+}
+// daily refresh on the journal host (single writer); the POST route works from any tier
+if (HAS_JOURNAL && !process.env.DASHBOARD_NO_JOBS) {
+  setTimeout(() => runApaBoard().catch(() => {}), 90 * 1000); // post-boot, after caches warm
+  setInterval(() => runApaBoard().catch(() => {}), 24 * 3600 * 1000);
 }
 app.get('/api/apa/models', asyncRoute(async (req, res) => {
   const roles = loadApaRoles();
@@ -5459,7 +7134,14 @@ app.get('/api/agent-stable', asyncRoute(async (req, res) => {
       input: u.reduce((n, r) => n + r.input, 0), output: u.reduce((n, r) => n + r.output, 0),
       costUsd: Math.round(cost * 100) / 100, costClass: cls, activities: acts.slice(0, 8) };
   });
-  res.json({ active: out.filter(a => a.status === 'active').length, standby: out.filter(a => a.status !== 'active').length, agents: out });
+  // per-MODEL 7d totals (all modules, incl. ones not mapped to a roster agent)
+  const models = {};
+  for (const r of rows) {
+    const m = models[r.model] = models[r.model] || { input: 0, output: 0, costUsd: 0, runs: 0 };
+    m.input += r.input; m.output += r.output; m.costUsd += r.costUsd; m.runs++;
+  }
+  res.json({ active: out.filter(a => a.status === 'active').length, standby: out.filter(a => a.status !== 'active').length, agents: out,
+    models: Object.entries(models).sort((a, b) => b[1].costUsd - a[1].costUsd).map(([model, x]) => ({ model, ...x, costUsd: Math.round(x.costUsd * 100) / 100 })) });
 }));
 
 // Filesystem overview — tracked roots with file counts + changes in the last 24h.

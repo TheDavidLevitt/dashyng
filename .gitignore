@@ -37,3 +37,5 @@ data/monitor-snapshot.json
 data/weather-locations.json
 data/cycle.json
 data/urgent-state.json
+data/ephemeral-notes.json
+data/enotes/

@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- Hampr donate checklist — phone-only page for Ranmali (Samsung / Chrome Android).
+     One photo per clothing piece from the Thriftr "Donate" Drive folder; she ticks each
+     piece as she physically takes it, then presses Done, which moves the checked photos
+     to "Donated" (server reparents them in Drive). Served behind the dashboard's Google
+     sign-in; guests on RANMALI_EMAILS can reach only this page. -->
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0d1117">
+<title>Clothes · Hampr</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  html, body { background: #0d1117; color: #e6edf3; font-family: system-ui, sans-serif; }
+  body { min-height: 100dvh; padding-bottom: calc(96px + env(safe-area-inset-bottom)); }
+
+  header { padding: 18px 16px 6px; }
+  header h1 { font-size: 22px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+  header .hint { margin-top: 4px; font-size: 14px; line-height: 1.45; color: #9aa4b2; }
+  header .hint .si { display: block; font-size: 13.5px; }
+
+  #status { padding: 40px 16px; text-align: center; color: #9aa4b2; font-size: 15px; }
+  #status .big { font-size: 44px; margin-bottom: 10px; }
+
+  #list { padding: 10px 12px 0; display: flex; flex-direction: column; gap: 14px; }
+  .card { position: relative; border-radius: 14px; overflow: hidden; background: #161b22;
+          border: 3px solid #30363d; transition: border-color .15s; }
+  .card img { display: block; width: 100%; min-height: 120px; background: #21262d; }
+  .card.checked { border-color: #2ea043; }
+  .card.checked img { opacity: .38; }
+  /* the tick — always visible so it reads as a checkbox, fills green when checked */
+  .tick { position: absolute; top: 10px; right: 10px; width: 44px; height: 44px;
+          border-radius: 50%; border: 3px solid #e6edf3; background: rgba(13,17,23,.55);
+          display: flex; align-items: center; justify-content: center;
+          font-size: 26px; color: transparent; }
+  .card.checked .tick { background: #2ea043; border-color: #2ea043; color: #fff; }
+  .card.checked::after { content: '✓'; position: absolute; inset: 0; display: flex;
+          align-items: center; justify-content: center; font-size: 90px; font-weight: 700;
+          color: #2ea043; pointer-events: none; }
+
+  #bar { position: fixed; left: 0; right: 0; bottom: 0; padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+         background: rgba(13,17,23,.92); backdrop-filter: blur(6px); border-top: 1px solid #30363d; }
+  #doneBtn { width: 100%; padding: 16px; border: 0; border-radius: 12px; font-size: 19px;
+             font-weight: 700; font-family: inherit; background: #2ea043; color: #fff; }
+  #doneBtn:disabled { background: #21262d; color: #57606a; }
+  #doneBtn.confirm { background: #d29922; color: #0d1117; }
+  #toast { position: fixed; left: 50%; transform: translateX(-50%);
+           bottom: calc(96px + env(safe-area-inset-bottom)); background: #2ea043; color: #fff;
+           padding: 10px 18px; border-radius: 999px; font-size: 15px; font-weight: 600;
+           opacity: 0; transition: opacity .3s; pointer-events: none; max-width: 90vw; text-align: center; }
+  #toast.err { background: #da3633; }
+  #toast.show { opacity: 1; }
+
+  /* ---- task checklist (lists David shares from his dashboard) ---- */
+  #tasks { padding: 4px 12px 0; }
+  #tasks h2 { font-size: 18px; font-weight: 700; padding: 8px 4px 2px; }
+  #tasks .listHead { font-size: 14.5px; font-weight: 600; color: #9aa4b2; padding: 10px 4px 6px; }
+  .task { background: #161b22; border: 2px solid #30363d; border-radius: 12px; margin-bottom: 8px; }
+  .task .rowMain { display: flex; align-items: center; gap: 12px; padding: 12px; }
+  .task .box { flex: 0 0 34px; height: 34px; border-radius: 50%; border: 3px solid #e6edf3;
+               display: flex; align-items: center; justify-content: center; font-size: 20px; color: transparent; }
+  .task .txt { flex: 1; font-size: 16px; line-height: 1.35; overflow-wrap: anywhere; }
+  .task .lbl { display: block; font-size: 12px; margin-top: 2px; }
+  .task.reported { border-color: #d29922; }
+  .task.reported .box { background: #d29922; border-color: #d29922; color: #0d1117; }
+  .task.reported .lbl { color: #d29922; }
+  .task.done { border-color: #2ea043; opacity: .65; }
+  .task.done .box { background: #2ea043; border-color: #2ea043; color: #fff; }
+  .task.done .txt { text-decoration: line-through; }
+  .task.done .lbl { color: #2ea043; }
+  .task .ask { flex: 0 0 auto; border: 0; background: #21262d; color: #9aa4b2; font-size: 17px;
+               padding: 8px 11px; border-radius: 10px; font-family: inherit; }
+  .task .cmts { padding: 0 12px 8px 58px; }
+  .task .cmt { font-size: 13px; color: #9aa4b2; padding: 2px 0; overflow-wrap: anywhere; }
+  .task .cmt b { color: #b8c2cc; font-weight: 600; }
+  .task .askRow { display: none; gap: 8px; padding: 0 12px 12px 58px; }
+  .task .askRow.open { display: flex; }
+  .task .askRow input { flex: 1; min-width: 0; background: #0d1117; border: 1px solid #30363d;
+               border-radius: 10px; color: #e6edf3; font-size: 15px; padding: 10px; font-family: inherit; }
+  .task .askRow button { border: 0; background: #2ea043; color: #fff; font-weight: 700;
+               border-radius: 10px; padding: 0 16px; font-size: 15px; font-family: inherit; }
+</style>
+</head>
+<body>
+<section id="tasks" hidden>
+  <h2>📋 Tasks for today · අද වැඩ</h2>
+  <div id="taskLists"></div>
+</section>
+
+<header>
+  <h1>🧺 Clothes for donation</h1>
+  <div class="hint">Please take and help us give to someone who can use it.
+    <span class="si">කරුණාකර මේ ඇඳුම් අරගෙන, පාවිච්චි කරන්න පුළුවන් කෙනෙකුට දෙන්න අපට උදව් කරන්න.</span>
+  </div>
+  <div class="hint" style="margin-top:6px; font-size:13px">Tick ✓ each piece as you take it, then press Done.
+    <span class="si" style="font-size:12.5px">ඇඳුම ගත්තාම ✓ කරන්න. ඉවර වුණාම Done ඔබන්න.</span>
+  </div>
+</header>
+
+<div id="status"><div class="big">⏳</div>Loading…</div>
+<div id="list"></div>
+
+<div id="bar" hidden>
+  <button id="doneBtn" disabled>Done</button>
+</div>
+<div id="toast"></div>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const checked = new Set();
+  let items = [];
+  let confirmArmed = false;
+  let confirmTimer = null;
+  let busy = false;
+
+  function showStatus(icon, text) {
+    $('status').innerHTML = `<div class="big">${icon}</div>${text}`;
+    $('status').style.display = 'block';
+  }
+  function toast(msg, isErr) {
+    const t = $('toast');
+    t.textContent = msg;
+    t.className = isErr ? 'err show' : 'show';
+    clearTimeout(t._h);
+    t._h = setTimeout(() => t.className = t.className.replace(' show', '').replace('show', ''), 3000);
+  }
+  function disarmConfirm() {
+    confirmArmed = false;
+    clearTimeout(confirmTimer);
+    updateBar();
+  }
+  function updateBar() {
+    const n = checked.size;
+    const btn = $('doneBtn');
+    $('bar').hidden = items.length === 0;
+    btn.disabled = n === 0 || busy;
+    btn.classList.toggle('confirm', confirmArmed && n > 0);
+    btn.textContent = busy ? '⏳ …'
+      : confirmArmed && n > 0 ? `Press again to finish ✓ ${n}`
+      : n > 0 ? `Done ✓ ${n}` : 'Done';
+  }
+
+  function render() {
+    const list = $('list');
+    list.innerHTML = '';
+    for (const it of items) {
+      const card = document.createElement('div');
+      card.className = 'card' + (checked.has(it.id) ? ' checked' : '');
+      card.innerHTML = `<img src="${it.imgUrl}" alt="clothing photo" loading="lazy"><div class="tick">✓</div>`;
+      card.onclick = () => {
+        if (busy) return;
+        checked.has(it.id) ? checked.delete(it.id) : checked.add(it.id);
+        card.classList.toggle('checked', checked.has(it.id));
+        disarmConfirm();
+      };
+      list.appendChild(card);
+    }
+    if (items.length === 0) showStatus('🎉', 'All done! Nothing left.<br>ඔක්කොම ඉවරයි!');
+    else $('status').style.display = 'none';
+    updateBar();
+  }
+
+  async function load() {
+    showStatus('⏳', 'Loading…');
+    try {
+      const r = await fetch('/api/ranmali/items');
+      if (r.status === 401) { location.href = '/auth/login?next=' + encodeURIComponent('/ranmali'); return; }
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      items = (await r.json()).items;
+      for (const id of [...checked]) if (!items.some(it => it.id === id)) checked.delete(id);
+      render();
+    } catch (e) {
+      showStatus('😕', 'Could not load. Check internet and pull to refresh.<br>අන්තර්ජාලය බලලා නැවත උත්සාහ කරන්න.');
+      $('bar').hidden = true;
+    }
+  }
+
+  $('doneBtn').onclick = async () => {
+    if (busy || checked.size === 0) return;
+    if (!confirmArmed) {           // two-tap confirm instead of a system dialog
+      confirmArmed = true;
+      updateBar();
+      confirmTimer = setTimeout(disarmConfirm, 6000);
+      return;
+    }
+    disarmConfirm();
+    busy = true; updateBar();
+    try {
+      const ids = [...checked];
+      const r = await fetch('/api/ranmali/done', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids }),
+      });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const out = await r.json();
+      for (const id of out.moved) checked.delete(id);
+      items = items.filter(it => !out.moved.includes(it.id));
+      if (out.failed.length) toast(`${out.moved.length} moved, ${out.failed.length} failed — try again`, true);
+      else toast(`✓ ${out.moved.length} moved. Thank you! ස්තූතියි!`);
+    } catch (e) {
+      toast('Could not save — try again / නැවත උත්සාහ කරන්න', true);
+    }
+    busy = false;
+    render();
+  };
+
+  // ---- task checklist (lists David shares from his dashboard) ----
+  // Tap = report done (amber, undoable by tapping again); green = David confirmed.
+  let taskBusy = false;
+  function taskRow(list, it) {
+    const row = document.createElement('div');
+    row.className = 'task' + (it.status === 'done' ? ' done' : it.status === 'reported' ? ' reported' : '');
+    const main = document.createElement('div'); main.className = 'rowMain';
+    const box = document.createElement('div'); box.className = 'box'; box.textContent = '✓';
+    const txt = document.createElement('div'); txt.className = 'txt'; txt.textContent = it.text;
+    const lbl = document.createElement('span'); lbl.className = 'lbl';
+    lbl.textContent = it.status === 'done' ? 'Done ✓ · හරි'
+      : it.status === 'reported' ? 'Reported ✓ David will check · කිව්වා' : '';
+    txt.appendChild(lbl);
+    const ask = document.createElement('button'); ask.className = 'ask'; ask.textContent = '💬';
+    ask.setAttribute('aria-label', 'ask a question');
+    main.append(box, txt, ask); row.appendChild(main);
+    const cmts = document.createElement('div'); cmts.className = 'cmts';
+    for (const c of it.comments || []) {
+      const d = document.createElement('div'); d.className = 'cmt';
+      const b = document.createElement('b'); b.textContent = c.from + ': ';
+      d.append(b, document.createTextNode(c.text)); cmts.appendChild(d);
+    }
+    row.appendChild(cmts);
+    const askRow = document.createElement('div'); askRow.className = 'askRow';
+    const inp = document.createElement('input');
+    inp.placeholder = 'Ask David… · ප්‍රශ්නයක් අහන්න'; inp.maxLength = 500;
+    const send = document.createElement('button'); send.textContent = 'Send';
+    askRow.append(inp, send); row.appendChild(askRow);
+
+    main.onclick = async (ev) => {
+      if (ev.target === ask) { askRow.classList.toggle('open'); if (askRow.classList.contains('open')) inp.focus(); return; }
+      if (taskBusy || it.status === 'done') return;
+      taskBusy = true;
+      const undo = it.status === 'reported';
+      try {
+        const r = await fetch('/api/ranmali/tasks/report', { method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ list: list.id, item: it.text, undo }) });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        it.status = (await r.json()).status;
+        row.className = 'task' + (it.status === 'done' ? ' done' : it.status === 'reported' ? ' reported' : '');
+        lbl.textContent = it.status === 'done' ? 'Done ✓ · හරි'
+          : it.status === 'reported' ? 'Reported ✓ David will check · කිව්වා' : '';
+      } catch (e) { toast('Could not save — try again / නැවත උත්සාහ කරන්න', true); }
+      taskBusy = false;
+    };
+    send.onclick = async () => {
+      const text = inp.value.trim();
+      if (!text || send.disabled) return;
+      send.disabled = true;
+      try {
+        const r = await fetch('/api/ranmali/tasks/comment', { method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ list: list.id, item: it.text, text }) });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const d = document.createElement('div'); d.className = 'cmt';
+        const b = document.createElement('b'); b.textContent = 'Ranmali: ';
+        d.append(b, document.createTextNode(text)); cmts.appendChild(d);
+        inp.value = ''; askRow.classList.remove('open');
+        toast('Sent to David ✓ · යැව්වා');
+      } catch (e) { toast('Could not send — try again / නැවත උත්සාහ කරන්න', true); }
+      send.disabled = false;
+    };
+    return row;
+  }
+  async function loadTasks() {
+    // never clobber in-progress interaction: an open question box or an in-flight report
+    if (document.querySelector('.askRow.open') || taskBusy) return;
+    try {
+      const r = await fetch('/api/ranmali/tasks');
+      if (!r.ok) return; // tasks are optional — the clothes section stands alone
+      const lists = (await r.json()).lists;
+      const wrap = $('taskLists');
+      wrap.innerHTML = '';
+      for (const l of lists) {
+        if (lists.length > 1) {
+          const h = document.createElement('div'); h.className = 'listHead'; h.textContent = l.heading;
+          wrap.appendChild(h);
+        }
+        for (const it of l.items) wrap.appendChild(taskRow(l, it));
+      }
+      $('tasks').hidden = !lists.some(l => l.items.length);
+    } catch (e) { /* keep whatever is on screen */ }
+  }
+
+  load();
+  loadTasks();
+  setInterval(loadTasks, 90000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) loadTasks(); });
+})();
+</script>
+</body>
+</html>

@@ -1,8 +1,20 @@
 {
   "name": "agent-stable",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "description": "Cost-performance management for a stable of AI models: meter every call by source-of-funds, benchmark the market by use case, and let a procurement agent test and adopt cheaper-or-better models — reversibly and fully logged.",
   "main": "index.js",
+  "files": [
+    "index.js",
+    "adapters.js",
+    "apa.js",
+    "board.js",
+    "meter.js",
+    "pricing.js",
+    "tiers.js",
+    "sinks/",
+    "demo.js",
+    "test.js"
+  ],
   "scripts": {
     "demo": "node demo.js",
     "test": "node test.js"

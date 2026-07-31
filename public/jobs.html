@@ -1,0 +1,384 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Job Openings</title>
+<script>document.documentElement.dataset.theme = localStorage.getItem('theme') || 'dark';</script>
+<style>
+/* same palette as the dashboard (index.html); --est is the "LLM-estimated value" purple */
+:root[data-theme="dark"]{color-scheme:dark;--bg:#0b0f14;--card:#131a22;--card2:#1a222c;--border:#243140;--text:#dbe4ee;--text2:#8fa1b3;--text3:#5c6f82;--accent:#4da3ff;--green:#6fcf97;--red:#e57373;--est:#c084fc}
+:root[data-theme="light"]{color-scheme:light;--bg:#f5f7fa;--card:#fff;--card2:#f9fafb;--border:#e5e7eb;--text:#1f2937;--text2:#6b7280;--text3:#9ca3af;--accent:#2563eb;--green:#059669;--red:#dc2626;--est:#7c3aed}
+*{box-sizing:border-box}
+body{font-family:-apple-system,system-ui,sans-serif;background:var(--bg);color:var(--text);max-width:860px;margin:0 auto;padding:16px 12px 80px;font-size:14px;line-height:1.45}
+h1{font-size:20px;margin:4px 0 2px}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+.muted{color:var(--text2)}.tiny{font-size:11px;color:var(--text3)}
+.cat{margin-top:18px}
+.cat h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--text2);margin:0 0 6px;cursor:pointer;user-select:none}
+.cat h2 .n{font-weight:400;color:var(--text3)}
+.cat.closed .jobs{display:none}
+.job{position:relative;display:flex;gap:8px;align-items:flex-start;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:9px 10px;margin-bottom:6px;
+  touch-action:pan-y;user-select:none;-webkit-user-select:none;transition:transform .15s,background .15s,opacity .2s}
+.job.swiping{transition:none}
+.job.flyout{transition:transform .25s,opacity .25s;opacity:0}
+.job.tint-left{background:color-mix(in srgb,var(--red) 14%,var(--card))}
+.job.dragging{opacity:.45;border-style:dashed}
+.job.drop-before{box-shadow:0 -2px 0 var(--accent)}
+.job.drop-after{box-shadow:0 2px 0 var(--accent)}
+/* hot = energy-team role at an AI/compute company — the owner's sweet spot, shown loud */
+.job.hot{border-left:3px solid #e9b949;background:color-mix(in srgb,#e9b949 6%,var(--card))}
+.hotchip{display:inline-block;font-size:9.5px;font-weight:700;letter-spacing:.04em;color:#e9b949;border:1px solid color-mix(in srgb,#e9b949 55%,transparent);border-radius:8px;padding:0 6px;margin-left:6px;vertical-align:2px;white-space:nowrap}
+/* new = added since the last time this board was opened (green, distinct from hot gold) */
+.job.new{border-left:3px solid var(--green);background:color-mix(in srgb,var(--green) 7%,var(--card))}
+.job.new.hot{border-left:3px solid #e9b949;outline:1px solid color-mix(in srgb,var(--green) 45%,transparent)} /* both: gold border wins, green outline says new */
+.newchip{display:inline-block;font-size:9.5px;font-weight:700;letter-spacing:.04em;color:var(--green);border:1px solid color-mix(in srgb,var(--green) 55%,transparent);border-radius:8px;padding:0 6px;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.handle{cursor:grab;color:var(--text3);font-size:15px;padding:2px 3px;touch-action:none;flex:none;line-height:1.2}
+.handle:active{cursor:grabbing}
+.chk{margin-top:3px;flex:none;width:15px;height:15px;accent-color:var(--green);cursor:pointer}
+.body{flex:1;min-width:0}
+.title{font-weight:600;font-size:14px}
+.co{font-size:12.5px;margin-top:1px}
+.meta{display:flex;flex-wrap:wrap;gap:4px 12px;margin-top:4px;font-size:11.5px;color:var(--text2)}
+.meta b{font-weight:600;color:var(--text)}
+.meta .est,.meta .est b{color:var(--est)} /* purple = LLM-estimated, not stated in the listing */
+.meta .soon b{color:var(--red)}
+.acts{display:flex;flex-direction:column;gap:4px;flex:none}
+.ib{background:var(--card2);color:var(--text2);border:1px solid var(--border);border-radius:5px;font-size:12px;line-height:1;padding:4px 6px;cursor:pointer}
+.ib:hover{color:var(--text)}
+.ib.star{font-size:13px}
+.ib.star.on{color:#e9b949;border-color:#e9b949}
+.empty{color:var(--text3);padding:18px 4px}
+.err{color:var(--red);padding:8px 0}
+#toast{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);background:var(--card2);border:1px solid var(--border);color:var(--text);
+  border-radius:8px;padding:8px 14px;font-size:13px;display:none;z-index:9;box-shadow:0 4px 16px rgba(0,0,0,.35)}
+#toast a{margin-left:10px;font-weight:600;cursor:pointer}
+#theme-btn{float:right;background:var(--card);color:var(--text2);border:1px solid var(--border);border-radius:5px;padding:2px 9px;font-size:11px;cursor:pointer}
+.legend{margin-top:26px;border-top:1px solid var(--border);padding-top:8px}
+</style></head><body>
+<p style="margin:0"><a href="/">← dashboard</a> <button id="theme-btn"></button></p>
+<h1>Job Openings</h1>
+<div class="tiny" id="updated">Loading…</div>
+<div id="fav-wrap" style="display:none" class="cat"><h2 style="cursor:default;color:#e9b949">★ Favorites <span class="n" id="fav-n"></span></h2><div id="fav-list"></div></div>
+<div id="board"><div class="empty">Loading openings…</div></div>
+<div id="applied-wrap" style="display:none" class="cat"><h2 style="cursor:default">Applications submitted <span class="n" id="applied-n"></span></h2><div id="applied-list"></div></div>
+<div id="maybe-wrap" style="display:none" class="cat closed"><h2 id="maybe-h2">▸ Maybe</h2><div id="maybe-list" class="jobs"></div></div>
+<div id="removed-wrap" style="display:none" class="cat"><h2 style="cursor:default">Removed</h2><div id="removed-list"></div></div>
+<div class="cat" style="margin-top:22px"><h2 style="cursor:default">Note to the search agent / CI</h2>
+<div style="display:flex;gap:6px;align-items:flex-start">
+  <textarea id="ci-in" rows="2" placeholder="Feedback, a job to add (paste the link), a new category to search, applied-elsewhere notes…"
+    style="flex:1;resize:vertical;min-height:38px;font:inherit;font-size:13px;background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 8px"></textarea>
+  <button id="ci-send" class="ib" style="padding:8px 14px;font-size:13px">Send</button>
+</div>
+<div class="tiny" id="ci-status" style="margin-top:3px">read by the daily search agent (09:00) and the nightly CI — job links get added, categories get searched, feedback reshapes the ranking</div>
+</div>
+<div class="legend tiny">
+  drag ≡ to re-rank (higher = more like this) · swipe ← or ✕ = remove (not interested) · ☆→★→★★ = favorite / favorite-favorite (★★ top of Favorites; ★ in click order) · 🤔 = park in Maybe below · ☑ = application completed → moves to the log below<br>
+  <span style="color:var(--est)">purple values are LLM estimates</span> — not stated in the listing · <span class="hotchip" style="vertical-align:0">⚡ AI-CO ENERGY</span> = energy-team role at an AI/compute company · <span class="newchip" style="vertical-align:0">NEW</span> = since your last visit, and always for 24h · refreshed daily by the search agent (Sonnet)
+  · <a id="show-removed" style="cursor:pointer"></a>
+</div>
+<div id="toast"></div>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const themeBtn = $('theme-btn');
+const setThemeBtn = () => themeBtn.textContent = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+themeBtn.onclick = () => { const t = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'; document.documentElement.dataset.theme = t; localStorage.setItem('theme', t); setThemeBtn(); };
+setThemeBtn();
+
+const api = (p, opt) => fetch(p, opt && { method: opt.method || 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(opt.body || {}) }).then(r => r.json());
+let jobs = [];
+const closedCats = new Set(JSON.parse(localStorage.getItem('jobs-closed') || '[]'));
+// "new" = created since this device last opened the board — AND, regardless of visits,
+// anything from the last 24h stays green (owner rule 2026-07-28: a quick glance must not
+// "consume" today's arrivals). Fallback 48h for a device with no visit stamp.
+const _stamp = Date.parse(localStorage.getItem('jobs-last-visit') || '') || (Date.now() - 48 * 3600e3);
+const NEW_CUTOFF = Math.min(_stamp, Date.now() - 24 * 3600e3);
+const isNew = j => (Date.parse(j.created || '') || 0) > NEW_CUTOFF;
+// stable category order — derived-from-data ordering made sections swap places on every
+// star/remove (owner bug report 2026-07-28); unknown categories append alphabetically
+const CAT_ORDER = ['Data center power development', 'AI application', 'AI-first energy & mining',
+  'Energy software & AI-for-energy', 'Data-center BD at energy companies',
+  'TotalEnergies internal', 'France / Pau', 'International institutions'];
+const catRank = c => { const i = CAT_ORDER.indexOf(c); return i === -1 ? 99 : i; };
+
+function toast(msg, undoFn) {
+  const t = $('toast');
+  if (msg.length > 70) msg = msg.slice(0, 67) + '…'; // long titles must not swallow the phone screen
+  t.innerHTML = esc(msg) + (undoFn ? '<a id="undo">undo</a>' : '');
+  t.style.display = 'block';
+  if (undoFn) $('undo').onclick = () => { t.style.display = 'none'; undoFn(); };
+  clearTimeout(toast.tm);
+  toast.tm = setTimeout(() => t.style.display = 'none', 6000);
+}
+
+const fmtDate = d => { const t = Date.parse(d); return isNaN(t) ? d : new Date(t).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }); };
+const daysTo = d => { const t = Date.parse(d); return isNaN(t) ? null : Math.round((t - Date.now()) / 864e5); };
+const agoStr = d => { const t = Date.parse(d); if (isNaN(t)) return d; const days = Math.round((Date.now() - t) / 864e5); return days <= 0 ? 'today' : days === 1 ? '1d ago' : days < 31 ? days + 'd ago' : fmtDate(d); };
+
+function metaHtml(j) {
+  const isEst = f => j.est.includes(f);
+  const parts = [];
+  if (j.location) parts.push(`<span>📍 <b>${esc(j.location)}</b></span>`);
+  if (j.remote !== '') parts.push(`<span class="${isEst('remote') ? 'est' : ''}" title="${isEst('remote') ? 'LLM estimate' : 'stated'}">🏠 <b>${esc(String(j.remote).replace(/%?$/, '%'))} remote</b></span>`);
+  if (j.salary) parts.push(`<span class="${isEst('salary') ? 'est' : ''}" title="${isEst('salary') ? 'LLM estimate' : 'stated'}">💰 <b>${esc(j.salary)}</b></span>`);
+  if (j.deadline) {
+    const dd = daysTo(j.deadline);
+    parts.push(`<span class="${isEst('deadline') ? 'est' : ''} ${dd !== null && dd <= 7 ? 'soon' : ''}">⏳ <b>${esc(fmtDate(j.deadline))}${dd !== null ? ` (${dd < 0 ? 'passed' : dd + 'd'})` : ''}</b></span>`);
+  }
+  if (j.posted) parts.push(`<span class="${isEst('posted') ? 'est' : ''}">🗓 posted <b>${esc(agoStr(j.posted))}</b></span>`);
+  return parts.join('');
+}
+
+let showRemoved = false;
+function renderRemoved() {
+  const removed = jobs.filter(j => j.status === 'removed');
+  const link = $('show-removed');
+  link.textContent = removed.length ? (showRemoved ? 'hide removed' : `show removed (${removed.length})`) : '';
+  link.onclick = () => { showRemoved = !showRemoved; renderRemoved(); };
+  $('removed-wrap').style.display = showRemoved && removed.length ? '' : 'none';
+  $('removed-list').innerHTML = removed.map(j => `<div class="job" style="opacity:.7" data-id="${esc(j.id)}">
+    <div class="body"><div class="title">${esc(j.title)}</div>
+    <div class="co">${esc(j.company)}<span class="tiny"> · ${esc(j.category)}</span></div></div>
+    <div class="acts"><button class="ib restore" title="restore to the board">↩︎</button></div></div>`).join('');
+  $('removed-list').querySelectorAll('.restore').forEach(b => b.onclick = () => {
+    const j = jobs.find(x => x.id === b.closest('.job').dataset.id);
+    j.status = 'open'; render();
+    api(`/api/jobs/${encodeURIComponent(j.id)}`, { method: 'PATCH', body: { status: 'open' } });
+    toast(`Restored: ${j.title}`);
+  });
+}
+function renderApplied() {
+  const applied = jobs.filter(j => j.status === 'applied')
+    .sort((a, b) => String(b.updated || '').localeCompare(String(a.updated || '')));
+  $('applied-wrap').style.display = applied.length ? '' : 'none';
+  $('applied-n').textContent = applied.length ? `· ${applied.length}` : '';
+  $('applied-list').innerHTML = applied.map(j => `<div class="job ${j.flags.includes('hot') ? 'hot' : ''}" data-id="${esc(j.id)}" style="touch-action:auto">
+    <input type="checkbox" class="chk unapply" title="un-mark — return to the board" checked>
+    <div class="body">
+      <div class="title">${j.url ? `<a href="${esc(j.url)}" target="_blank" rel="noopener">${esc(j.title)}</a>` : esc(j.title)}${j.flags.includes('hot') ? '<span class="hotchip">⚡ AI-CO ENERGY</span>' : ''}</div>
+      <div class="co">${esc(j.company)}<span class="tiny"> · ${esc(j.category)} · applied ${esc((j.updated || '').slice(0, 10))}</span></div>
+    </div></div>`).join('');
+  $('applied-list').querySelectorAll('.unapply').forEach(c => c.onchange = () => {
+    const j = jobs.find(x => x.id === c.closest('.job').dataset.id);
+    j.status = 'open'; render();
+    api(`/api/jobs/${encodeURIComponent(j.id)}/applied`, { body: { applied: false } });
+  });
+}
+const isFav = j => (j.fav || 0) > 0;
+// Full re-render, but anchored: the Favorites section lives ABOVE the fold, so when it
+// grows/shrinks the content under the user's finger jumped (owner bug report 2026-07-28).
+// Compensate the scroll by the top section's height delta.
+function render() {
+  const favWrap = $('fav-wrap');
+  const hBefore = favWrap.offsetHeight;
+  const y = window.scrollY;
+  renderInner();
+  const delta = favWrap.offsetHeight - hBefore;
+  if (delta && y > favWrap.offsetTop) window.scrollTo(0, y + delta);
+}
+function renderInner() {
+  renderRemoved();
+  renderApplied();
+  renderMaybe();
+  $('updated').textContent = `${jobs.filter(j => j.status === 'open').length} open · ${jobs.filter(j => j.status === 'applied').length} applied`;
+  const board = $('board');
+  const open = jobs.filter(j => j.status === 'open');
+  // ★★ favorite-favorites first (click order), then ★ favorites in click order
+  const favs = open.filter(isFav).sort((a, b) => (b.fav - a.fav) || (a.favAt || 0) - (b.favAt || 0));
+  $('fav-wrap').style.display = favs.length ? '' : 'none';
+  $('fav-n').textContent = favs.length ? `· ${favs.length}` : '';
+  $('fav-list').innerHTML = favs.map(j => cardHtml(j, true)).join('');
+  const rest = open.filter(j => !isFav(j));
+  if (!rest.length && !favs.length) { board.innerHTML = '<div class="empty">No open roles — the search agent runs daily and new ones will appear here.</div>'; bind(); return; }
+  const cats = [...new Set(rest.map(j => j.category))].sort((a, b) => catRank(a) - catRank(b) || a.localeCompare(b));
+  board.innerHTML = cats.map(cat => {
+    const list = rest.filter(j => j.category === cat).sort((a, b) => (a.rank || 1e9) - (b.rank || 1e9));
+    const closed = closedCats.has(cat);
+    return `<div class="cat ${closed ? 'closed' : ''}" data-cat="${esc(cat)}">
+      <h2>${closed ? '▸' : '▾'} ${esc(cat)} <span class="n">· ${list.length}</span></h2>
+      <div class="jobs">${list.map(j => cardHtml(j, false)).join('')}</div></div>`;
+  }).join('');
+  bind();
+}
+function renderMaybe() {
+  const maybes = jobs.filter(j => j.status === 'maybe');
+  const wrap = $('maybe-wrap');
+  wrap.style.display = maybes.length ? '' : 'none';
+  const open = localStorage.getItem('jobs-maybe-open') === '1';
+  wrap.classList.toggle('closed', !open);
+  $('maybe-h2').innerHTML = `${open ? '▾' : '▸'} Maybe <span class="n">· ${maybes.length}</span>`;
+  $('maybe-list').innerHTML = maybes.map(j => `<div class="job" data-id="${esc(j.id)}" style="touch-action:auto">
+    <div class="body">
+      <div class="title">${j.url ? `<a href="${esc(j.url)}" target="_blank" rel="noopener">${esc(j.title)}</a>` : esc(j.title)}${j.flags.includes('hot') ? '<span class="hotchip">⚡ AI-CO ENERGY</span>' : ''}</div>
+      <div class="co">${esc(j.company)}<span class="tiny"> · ${esc(j.category)}</span></div>
+      <div class="meta">${metaHtml(j)}</div>
+    </div>
+    <div class="acts"><button class="ib unmaybe" title="back to the board">↩︎</button><button class="ib rm-maybe" title="remove — not interested">✕</button></div></div>`).join('');
+  $('maybe-h2').onclick = () => { localStorage.setItem('jobs-maybe-open', open ? '0' : '1'); renderMaybe(); };
+  $('maybe-list').querySelectorAll('.unmaybe').forEach(b => b.onclick = () => {
+    const j = jobs.find(x => x.id === b.closest('.job').dataset.id);
+    j.status = 'open'; render();
+    api(`/api/jobs/${encodeURIComponent(j.id)}/maybe`, { body: { maybe: false } });
+  });
+  $('maybe-list').querySelectorAll('.rm-maybe').forEach(b => b.onclick = () => {
+    const j = jobs.find(x => x.id === b.closest('.job').dataset.id);
+    j.status = 'removed'; render();
+    api(`/api/jobs/${encodeURIComponent(j.id)}/remove`, { body: { context: 'from-maybe' } });
+    toast(`Removed: ${j.title}`, () => { j.status = 'maybe'; render(); api(`/api/jobs/${encodeURIComponent(j.id)}`, { method: 'PATCH', body: { status: 'maybe' } }); });
+  });
+}
+
+function cardHtml(j, fav) {
+  const hot = j.flags.includes('hot');
+  const starGlyph = j.fav === 2 ? '★★' : j.fav === 1 ? '★' : '☆';
+  const starTitle = j.fav === 2 ? 'un-star' : j.fav === 1 ? 'again = ★★ favorite-favorite (top of favorites)' : 'favorite — pins to top + more like this';
+  return `<div class="job ${hot ? 'hot' : ''} ${isNew(j) ? 'new' : ''}" data-id="${esc(j.id)}">
+    ${fav ? '' : '<span class="handle" title="drag to re-rank">≡</span>'}
+    <input type="checkbox" class="chk" title="application completed">
+    <div class="body">
+      <div class="title">${j.url ? `<a href="${esc(j.url)}" target="_blank" rel="noopener">${esc(j.title)}</a>` : esc(j.title)}${isNew(j) ? '<span class="newchip">NEW</span>' : ''}${hot ? '<span class="hotchip">⚡ AI-CO ENERGY</span>' : ''}</div>
+      <div class="co">${j.companyUrl ? `<a href="${esc(j.companyUrl)}" target="_blank" rel="noopener">${esc(j.company)}</a>` : esc(j.company)}${fav ? ` <span class="tiny">· ${esc(j.category)}</span>` : ''}${j.notes ? ` <span class="tiny">· ${esc(j.notes)}</span>` : ''}</div>
+      <div class="meta">${metaHtml(j)}</div>
+    </div>
+    <div class="acts">
+      <button class="ib star ${j.fav ? 'on' : ''}" title="${starTitle}">${starGlyph}</button>
+      <button class="ib mb" title="maybe — park in the Maybe section below">🤔</button>
+      <button class="ib rm" title="remove — not interested">✕</button>
+    </div></div>`;
+}
+
+const jobOf = el => jobs.find(j => j.id === el.dataset.id);
+
+async function removeJob(card, viaSwipe) {
+  const j = jobOf(card); if (!j) return;
+  card.classList.add('flyout');
+  card.style.transform = 'translateX(-120%)';
+  j.status = 'removed';
+  setTimeout(render, 250);
+  api(`/api/jobs/${encodeURIComponent(j.id)}/remove`, { body: { context: viaSwipe ? 'swipe' : 'button' } });
+  toast(`Removed: ${j.title}`, () => { j.status = 'open'; render(); api(`/api/jobs/${encodeURIComponent(j.id)}`, { method: 'PATCH', body: { status: 'open' } }); });
+}
+
+function bind() {
+  document.querySelectorAll('#board .cat h2').forEach(h => h.onclick = () => {
+    const cat = h.parentElement.dataset.cat;
+    closedCats.has(cat) ? closedCats.delete(cat) : closedCats.add(cat);
+    localStorage.setItem('jobs-closed', JSON.stringify([...closedCats]));
+    render();
+  });
+  document.querySelectorAll('#board .job, #fav-list .job').forEach(card => {
+    const j = jobOf(card);
+    card.querySelector('.rm').onclick = () => removeJob(card, false);
+    card.querySelector('.star').onclick = () => {
+      const level = ((j.fav || 0) + 1) % 3; // ☆ → ★ → ★★ → ☆
+      j.fav = level;
+      if (level === 1 && !j.favAt) j.favAt = Date.now(); // chronology = first star click
+      if (level === 0) j.favAt = 0;
+      render();
+      api(`/api/jobs/${encodeURIComponent(j.id)}/star`, { body: { level } });
+      if (level === 1) toast(`★ favorited — noted as more like "${j.title}"`);
+      if (level === 2) toast(`★★ favorite-favorite — pinned to the very top`);
+    };
+    card.querySelector('.mb').onclick = () => {
+      j.status = 'maybe';
+      render();
+      api(`/api/jobs/${encodeURIComponent(j.id)}/maybe`, { body: { maybe: true } });
+      toast(`🤔 parked in Maybe: ${j.title}`, () => { j.status = 'open'; render(); api(`/api/jobs/${encodeURIComponent(j.id)}/maybe`, { body: { maybe: false } }); });
+    };
+    card.querySelector('.chk').onchange = () => {
+      j.status = 'applied'; j.updated = new Date().toISOString();
+      render(); // moves the card into the applications log below
+      api(`/api/jobs/${encodeURIComponent(j.id)}/applied`, { body: { applied: true } });
+      toast(`Logged application: ${j.title} 🎉`);
+    };
+    makeSwipeable(card, () => removeJob(card, true));
+    if (card.querySelector('.handle')) dragRank(card);
+  });
+}
+
+// CI / search-agent note box — lands in the feedback stream as kind=job_comment
+$('ci-send').onclick = async () => {
+  const text = $('ci-in').value.trim();
+  if (!text) return;
+  $('ci-send').disabled = true;
+  const r = await api('/api/feedback', { body: { kind: 'job_comment', source: 'jobs', context: text } }).catch(() => ({ error: 'unreachable' }));
+  $('ci-send').disabled = false;
+  if (r && r.ok) { $('ci-in').value = ''; $('ci-status').textContent = '✓ sent — the search agent acts on it at its next run (daily 09:00); the nightly CI reads it too'; }
+  else $('ci-status').textContent = 'send failed: ' + (r?.error || 'unknown') + ' — try again';
+};
+
+// swipe LEFT only (pointer events cover touch + mouse); links/buttons/handle click through
+function makeSwipeable(card, onLeft) {
+  let startX = null, dx = 0;
+  card.addEventListener('pointerdown', e => {
+    if (e.target.closest('a,button,input,.handle')) return;
+    startX = e.clientX; dx = 0;
+    card.classList.add('swiping');
+    card.setPointerCapture(e.pointerId);
+  });
+  card.addEventListener('pointermove', e => {
+    if (startX == null) return;
+    dx = Math.min(0, e.clientX - startX); // left only
+    card.style.transform = `translateX(${dx}px)`;
+    card.classList.toggle('tint-left', dx < -30);
+  });
+  const finish = () => {
+    if (startX == null) return;
+    startX = null;
+    card.classList.remove('swiping');
+    if (dx < -70) { onLeft(); } else { card.style.transform = ''; card.classList.remove('tint-left'); }
+    dx = 0;
+  };
+  card.addEventListener('pointerup', finish);
+  card.addEventListener('pointercancel', finish);
+}
+
+// drag ≡ to re-rank within the category (pointer-based: works mouse AND touch)
+function dragRank(card) {
+  const handle = card.querySelector('.handle');
+  handle.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    handle.setPointerCapture(e.pointerId);
+    const wrap = card.parentElement; // .jobs of this category
+    const startIdx = [...wrap.children].indexOf(card);
+    card.classList.add('dragging');
+    const move = ev => {
+      const sibs = [...wrap.querySelectorAll('.job:not(.dragging)')];
+      sibs.forEach(s => s.classList.remove('drop-before', 'drop-after'));
+      const tgt = sibs.find(s => { const r = s.getBoundingClientRect(); return ev.clientY < r.bottom; });
+      if (tgt) { const r = tgt.getBoundingClientRect(); tgt.classList.add(ev.clientY < r.top + r.height / 2 ? 'drop-before' : 'drop-after'); }
+      else if (sibs.length) sibs[sibs.length - 1].classList.add('drop-after');
+    };
+    const up = async ev => {
+      handle.removeEventListener('pointermove', move);
+      handle.removeEventListener('pointerup', up);
+      handle.removeEventListener('pointercancel', up);
+      card.classList.remove('dragging');
+      const before = wrap.querySelector('.drop-before'), after = wrap.querySelector('.drop-after');
+      wrap.querySelectorAll('.job').forEach(s => s.classList.remove('drop-before', 'drop-after'));
+      if (before) wrap.insertBefore(card, before);
+      else if (after) after.insertAdjacentElement('afterend', card);
+      else return;
+      const order = [...wrap.children].map(el => el.dataset.id);
+      const newIdx = order.indexOf(card.dataset.id);
+      if (newIdx === startIdx) return;
+      order.forEach((id, i) => { const j = jobs.find(x => x.id === id); if (j) j.rank = i + 1; });
+      await api('/api/jobs/reorder', { body: {
+        updates: order.map((id, i) => ({ id, rank: i + 1 })),
+        ...(newIdx < startIdx ? { movedUp: card.dataset.id } : {}),
+      } });
+      if (newIdx < startIdx) toast('Ranked up — noted as "more like this"');
+    };
+    handle.addEventListener('pointermove', move);
+    handle.addEventListener('pointerup', up);
+    handle.addEventListener('pointercancel', up);
+  });
+}
+
+api('/api/jobs?all=1').then(r => {
+  if (r.error) { $('board').innerHTML = `<div class="err">${esc(r.error)}</div>`; return; }
+  jobs = r.jobs;
+  render();
+  const n = jobs.filter(j => j.status === 'open' && isNew(j)).length;
+  if (n) $('updated').textContent += ` · ${n} new`;
+  // stamp the visit AFTER rendering — this visit shows NEW; the next one clears it
+  localStorage.setItem('jobs-last-visit', new Date().toISOString());
+}).catch(e => $('board').innerHTML = `<div class="err">${esc(String(e))}</div>`);
+</script></body></html>

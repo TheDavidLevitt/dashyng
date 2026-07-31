@@ -1,41 +1,36 @@
-// agent-stable · board — benchmark-board compilation logic, host-independent.
-// Pure functions: build the compile prompts, parse/normalize the LLM's results, and merge
-// role thresholds. The host supplies the LLM call and persists rows wherever its sink lives.
+// agent-stable · board — benchmark-board logic over EXTERNALLY SOURCED rows.
+// v0.4.0: the LLM web-search compile is gone. Benchmark data comes from a real source the
+// host injects (the reference deployment uses Artificial Analysis' API) — deterministic,
+// fresh, and no scraping machinery to maintain. The board keeps the judgment layers a data
+// vendor can't provide: YOUR tier thresholds, role assignment, and fuzzy benchmark matching.
 //
-//   const board = createBoard({ roles, prices });        // roles = apa-roles config object
-//   const p  = board.compilePrompt();                     // → prompt string for a web-search LLM
-//   const r  = board.parseCompile(rawLlmText);            // → { models:[...], cutoffs:{...} }
-//   const bp = board.benchPrompt();                       // → knowledge-base prompt
-//   const kb = board.parseBench(rawLlmText);              // → [{name, measures, ...}]
-//   board.thresholdFor(roleKey, cutoffs)                  // → user min ?? APA hypothesis
+//   const board = createBoard({ roles });                 // roles = apa-roles config object
+//   const rows = board.fromRows(sourceRows);              // normalize + assign tiers
+//   board.thresholdFor(roleKey, cutoffs)                  // → user min ?? hypothesis
 //   board.sameBench(a, b)                                 // fuzzy benchmark-name equality
+//   const bp = board.benchPrompt();                       // → knowledge-base prompt (optional)
+//   const kb = board.parseBench(rawLlmText);              // → [{name, measures, ...}]
 
 function createBoard({ roles = { roles: {}, all_benchmarks: [], track_non_us_os: 3 }, prices = {}, labs = {} } = {}) {
   const benchAll = () => [...new Set([...(roles.all_benchmarks || []), ...Object.values(roles.roles || {}).flatMap(r => r.benchmarks || [])])];
   const norm = s => String(s || '').toLowerCase().replace(/\(.*?\)/g, '').trim();
   const sameBench = (a, b) => { const x = norm(a), y = norm(b); return !!x && !!y && (x.startsWith(y) || y.startsWith(x)); };
 
-  function compilePrompt({ currentDefault = '' } = {}) {
-    return `You are a model-board compiler building a live cost+benchmark comparison for a multi-model agent system.\n` +
-      `Track, for EACH of these labs (${(labs.us_labs || []).join(', ')}): their current TOP-TIER REASONING model (role "thoroughbred"), their DAILY-DRIVER general model (role "steeldust"), and their CHEAPEST usable model (role "workhorse"). ALSO include the top ${roles.track_non_us_os || 3} non-US OPEN-WEIGHT models (role "watch", os=true) for comparison.\n` +
-      `For each model provide: model (exact API id if known), lab, country, os (true/false), role, priceIn, priceOut ($/1M tokens), and a benchmarks object using these keys where a real value exists: ${benchAll().join(', ')} (numbers only; OMIT any score you can't verify).\n` +
-      `PRICING BASIS: for closed models use the lab's own API list price. For OPEN-WEIGHT models use the CHEAPEST major hosting provider's serverless price (${(labs.hosting || []).join(', ')}) and set "host" to that provider's name — never the lab's own premium endpoint.\n` +
-      `Current price table for reference ($/1M in/out): ${JSON.stringify(prices)}. Current system default: ${currentDefault}.\n` +
-      `Use web search — Artificial Analysis, LMArena, and the lab pages. Real current figures only; never fabricate.\n` +
-      `ALSO hypothesize, for each role, the MINIMUM score on its primary benchmark that a model needs to be ADEQUATE for that task (thoroughbred = hard analysis; steeldust = thesis-led summaries with contextualized numbers; workhorse = mechanical extraction). Give a one-line rationale each.\n` +
-      `Return STRICT JSON only: {"models":[{"model","lab","country","os","role","priceIn","priceOut","benchmarks":{...},"host","source"}], "cutoffs":{"thoroughbred":{"min":<number>,"why":"..."},"steeldust":{...},"workhorse":{...}}}. Aim for ~18-22 model rows.`;
-  }
-
-  function parseCompile(raw) {
-    const block = (String(raw).replace(/```json?/gi, '').replace(/```/g, '').match(/\{[\s\S]*\}/) || [])[0];
-    let parsed = {}; try { parsed = JSON.parse(block); } catch (e) {}
-    const models = (parsed.models || []).filter(m => m && m.model && m.role).map(m => ({
-      model: String(m.model).slice(0, 60), lab: m.lab || '', country: m.country || '', os: !!m.os,
-      role: m.role || '', priceIn: m.priceIn ?? null, priceOut: m.priceOut ?? null,
-      host: m.host ? String(m.host).slice(0, 30) : null,
-      benchmarks: m.benchmarks || {}, source: String(m.source || '').slice(0, 120),
-    }));
-    return { models, cutoffs: parsed.cutoffs || null };
+  // Normalize source rows ([{model, lab, os, priceIn, priceOut, benchmarks:{name:score}}])
+  // and assign each model the HIGHEST configured tier whose user threshold it clears on that
+  // tier's primary benchmark ('' when it clears none or the tier has no threshold yet).
+  function fromRows(rows) {
+    const tiers = Object.entries(roles.roles || {});
+    return (Array.isArray(rows) ? rows : []).filter(r => r && r.model).map(r => {
+      let role = '';
+      for (const [key, rc] of tiers) {
+        if (!rc || !rc.primary || rc.min == null) continue;
+        const hit = Object.entries(r.benchmarks || {}).find(([b]) => sameBench(b, rc.primary));
+        if (hit && +hit[1] >= +rc.min) role = key;
+      }
+      return { model: String(r.model), lab: r.lab || '', country: r.country || '', os: !!r.os,
+        role, priceIn: r.priceIn ?? null, priceOut: r.priceOut ?? null, benchmarks: r.benchmarks || {} };
+    });
   }
 
   function benchPrompt() {
@@ -57,7 +52,7 @@ function createBoard({ roles = { roles: {}, all_benchmarks: [], track_non_us_os:
     return rc.min ?? (cutoffs[roleKey] || {}).min ?? null;
   }
 
-  return { compilePrompt, parseCompile, benchPrompt, parseBench, thresholdFor, sameBench, benchAll };
+  return { fromRows, thresholdFor, sameBench, benchPrompt, parseBench };
 }
 
 module.exports = { createBoard };

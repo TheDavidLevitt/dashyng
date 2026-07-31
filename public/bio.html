@@ -1,0 +1,1130 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Biotech Tracker</title>
+<script>document.documentElement.dataset.theme = localStorage.getItem('theme') || 'dark';</script>
+<style>
+/* same palette as the dashboard (index.html); the phase ramp is this page's own */
+:root[data-theme="dark"]{color-scheme:dark;--bg:#0b0f14;--card:#131a22;--card2:#1a222c;--border:#243140;--text:#dbe4ee;--text2:#8fa1b3;--text3:#5c6f82;--accent:#4da3ff;--green:#6fcf97;--red:#e57373;--amber:#e9b949;--orange:#f0932b;--violet:#c084fc}
+:root[data-theme="light"]{color-scheme:light;--bg:#f5f7fa;--card:#fff;--card2:#f9fafb;--border:#e5e7eb;--text:#1f2937;--text2:#6b7280;--text3:#9ca3af;--accent:#2563eb;--green:#059669;--red:#dc2626;--amber:#b45309;--orange:#c2410c;--violet:#7c3aed}
+*{box-sizing:border-box}
+body{font-family:-apple-system,system-ui,sans-serif;background:var(--bg);color:var(--text);max-width:1400px;margin:0 auto;padding:16px 12px 80px;font-size:14px;line-height:1.45}
+h1{font-size:20px;margin:4px 0 2px}
+h2{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--text2);margin:0 0 8px}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+.muted{color:var(--text2)}.tiny{font-size:11px;color:var(--text3)}
+section{margin-top:24px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px 12px}
+button,select,input{font-family:inherit;font-size:12.5px}
+.btn{background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 10px;cursor:pointer}
+.btn:hover{border-color:var(--accent)}
+.btn:disabled{opacity:.5;cursor:default}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+select,input[type=text],input[type=search],textarea{background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 8px}
+#theme-btn{float:right;background:var(--card);color:var(--text2);border:1px solid var(--border);border-radius:5px;padding:2px 9px;font-size:11px;cursor:pointer}
+/* ---- toolbar ---- */
+.tools{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:8px}
+.tools .grow{flex:1;min-width:120px}
+/* ---- table ---- */
+.tablewrap{overflow-x:auto;border:1px solid var(--border);border-radius:8px}
+table{border-collapse:collapse;width:100%;font-size:12.5px;background:var(--card)}
+th,td{text-align:left;padding:6px 9px;border-bottom:1px solid var(--border);vertical-align:top;white-space:nowrap}
+th{position:sticky;top:0;background:var(--card2);color:var(--text2);font-size:11px;text-transform:uppercase;letter-spacing:.04em;cursor:pointer;user-select:none;z-index:1}
+th .ar{color:var(--accent);font-size:9px}
+tr.row{cursor:pointer}
+tr.row:hover td{background:var(--card2)}
+tr.row.open td{background:var(--card2)}
+td.wrap{white-space:normal;max-width:240px;min-width:150px}
+th.num,td.num{text-align:right} /* digits line up on the right edge; header follows the cells */
+/* analyst prose runs to whole paragraphs — the collapsed row shows two lines, the
+   expanded panel has the full text, so one long cell can't make a 500px-tall row */
+.clamp{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.co{font-weight:600}
+.tkr{color:var(--text3);font-weight:400;font-size:11px;margin-left:4px}
+.pill{display:inline-block;font-size:10.5px;font-weight:700;letter-spacing:.03em;border-radius:9px;padding:1px 8px;white-space:nowrap}
+/* phase ramp: green approved → blue Ph3 → yellow Ph2 → orange Ph1 → red preclinical */
+.ph-approved{color:var(--green);border:1px solid var(--green);background:color-mix(in srgb,var(--green) 14%,transparent)}
+.ph-review{color:var(--accent);border:1px solid var(--accent);background:color-mix(in srgb,var(--green) 12%,color-mix(in srgb,var(--accent) 12%,transparent))}
+.ph-p3{color:var(--accent);border:1px solid var(--accent);background:color-mix(in srgb,var(--accent) 14%,transparent)}
+.ph-p23{color:var(--accent);border:1px solid color-mix(in srgb,var(--accent) 70%,var(--amber));background:color-mix(in srgb,var(--accent) 10%,transparent)}
+.ph-p2{color:var(--amber);border:1px solid var(--amber);background:color-mix(in srgb,var(--amber) 14%,transparent)}
+.ph-p12{color:var(--orange);border:1px solid color-mix(in srgb,var(--orange) 70%,var(--amber));background:color-mix(in srgb,var(--amber) 12%,transparent)}
+.ph-p1{color:var(--orange);border:1px solid var(--orange);background:color-mix(in srgb,var(--orange) 14%,transparent)}
+.ph-pre{color:var(--red);border:1px solid var(--red);background:color-mix(in srgb,var(--red) 14%,transparent)}
+.ph-none{color:var(--text3);border:1px solid var(--border)}
+/* catalyst urgency sits behind the phase pill, so the phase ramp above keeps its meaning.
+   Negative margin cancels the padding — the tint grows, the row height does not. */
+.cat{display:inline-block;border-radius:9px;padding:2px 5px;margin:-2px -5px}
+.cat-hot{background:color-mix(in srgb,var(--red) 26%,transparent)}
+.cat-warm{background:color-mix(in srgb,var(--amber) 24%,transparent)}
+.tiny .cat{margin:0 1px} /* in the legend there is no pill to hug, so no negative margin */
+/* ---- density: compact rows are the default; the toolbar toggle restores roomier ones.
+   Only the collapsed table tightens — the expanded panel keeps its own padding and prose size. */
+body[data-density="compact"] table{font-size:12px}
+body[data-density="compact"] th,body[data-density="compact"] td{padding:3px 7px}
+body[data-density="compact"] th{font-size:10px}
+body[data-density="compact"] tr.grp td{padding:3px 7px;font-size:11.5px}
+body[data-density="compact"] .clamp{-webkit-line-clamp:1}
+body[data-density="compact"] td.wrap{max-width:200px}
+body[data-density="compact"] .pill{font-size:10px;padding:0 7px}
+body[data-density="compact"] .tierbadge{margin-left:3px}
+/* ---- expanded detail ---- */
+tr.detail td{background:var(--card2);white-space:normal;padding:0}
+/* the table scrolls horizontally, so an expanded panel spanning every column would be
+   clipped off-screen; sticky-left + viewport width keeps the whole panel readable without
+   scrolling sideways */
+.det{position:sticky;left:0;box-sizing:border-box;
+  display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px;padding:12px 14px}
+.det h4{margin:0 0 3px;font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--text2)}
+.det p{margin:0;font-size:12.5px;line-height:1.5}
+.det .full{grid-column:1/-1;display:flex;gap:10px;flex-wrap:wrap;align-items:center;border-top:1px solid var(--border);padding-top:9px}
+.est{color:var(--violet)} /* agent-estimated analysis, not a clinicaltrials.gov fact */
+/* ---- news ---- */
+.news li{margin-bottom:5px;font-size:12.5px}
+.news .src{color:var(--text3);font-size:11px}
+/* ---- agent stable ---- */
+.tiers{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:8px}
+.tier{background:var(--card2);border:1px solid var(--border);border-radius:6px;padding:7px 9px;font-size:12px}
+.tier b{display:block;font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--text2);font-weight:600}
+/* ---- add dialog ---- */
+dialog{background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:10px;max-width:640px;width:94vw;padding:0}
+dialog::backdrop{background:rgba(0,0,0,.55)}
+.dlg-body{padding:14px 16px;max-height:80vh;overflow-y:auto}
+.res{border:1px solid var(--border);border-radius:6px;padding:6px 8px;margin-bottom:5px;cursor:pointer;font-size:12px}
+.res:hover{border-color:var(--accent)}
+.fld{display:block;margin-bottom:7px}
+.fld span{display:block;font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--text2);margin-bottom:2px}
+.fld input,.fld select,.fld textarea{width:100%}
+/* ---- provenance badges: which tier wrote this cell, and how sure it was ---- */
+.tierbadge{display:inline-block;font-size:9px;font-weight:700;letter-spacing:.04em;border-radius:7px;
+  padding:0 5px;margin-left:5px;vertical-align:1px;cursor:help;white-space:nowrap;border:1px solid}
+.t-haiku{color:var(--text2);border-color:var(--border)}
+.t-sonnet{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 55%,transparent)}
+.t-opus{color:var(--violet);border-color:color-mix(in srgb,var(--violet) 60%,transparent)}
+.t-low{background:color-mix(in srgb,var(--red) 18%,transparent)} /* below the escalation threshold */
+/* ---- design input ---- */
+.fb{display:flex;gap:6px;align-items:flex-start;margin-bottom:8px}
+.fb textarea{flex:1;min-height:52px;resize:vertical}
+.fb-item{border-top:1px solid var(--border);padding:7px 0;font-size:12.5px}
+.fb-item:first-child{border-top:0}
+.fb-meta{font-size:10.5px;color:var(--text3);margin-top:2px}
+.fb-prop{margin-top:4px;padding:6px 8px;background:var(--card2);border-left:2px solid var(--violet);border-radius:4px;font-size:12px}
+.fb-turn{margin-top:4px;padding:5px 8px;border-radius:4px;font-size:12px;background:var(--card2)}
+.fb-turn.ag{border-left:2px solid var(--accent)}
+.fb-turn.rd{border-left:2px solid var(--green)}
+.fb-reply{display:flex;gap:6px;margin-top:5px}
+.fb-reply input{flex:1}
+.kindsel{width:96px}
+.fb-x{background:none;border:0;color:var(--text3);cursor:pointer;font-size:13px;line-height:1;padding:0 2px;flex:none}
+.fb-x:hover{color:var(--red)}
+.aud{display:flex;gap:8px;font-size:11.5px;padding:2px 0;border-bottom:1px solid color-mix(in srgb,var(--border) 50%,transparent);align-items:baseline}
+.aud:last-child{border-bottom:0}
+.aud-ev{color:var(--accent);min-width:70px}
+.aud-who{color:var(--text2);min-width:60px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.aud-de{flex:1;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.aud-out{color:var(--text3);white-space:nowrap}
+.calib{display:flex;flex-wrap:wrap;gap:14px;font-size:11.5px;color:var(--text2);margin-top:8px}
+.calib b{color:var(--text);font-weight:600}
+.warn{color:var(--amber)}
+/* ---- gear panel ---- */
+#cfg-btn{float:right;background:var(--card);color:var(--text2);border:1px solid var(--border);border-radius:5px;padding:2px 9px;font-size:11px;cursor:pointer;margin-right:6px}
+#cfg-panel{margin-bottom:14px}
+.cfg-row{display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--border);font-size:12.5px}
+.cfg-row:last-child{border-bottom:0}
+.cfg-row .nm{flex:1}
+.cfg-row button{background:var(--card2);color:var(--text2);border:1px solid var(--border);border-radius:4px;cursor:pointer;font-size:11px;padding:1px 6px}
+/* ---- stocks ---- */
+.stocks{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
+.stock{background:var(--card2);border:1px solid var(--border);border-radius:6px;padding:7px 9px;position:relative;overflow:hidden}
+.stock .sym{font-weight:700;font-size:12.5px}
+.stock .px{font-size:15px;margin-top:1px}
+.stock .chg{font-size:11.5px}
+.stock .up{color:var(--green)}.stock .down{color:var(--red)}
+.stock .co{font-size:10.5px;color:var(--text3);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.stock svg{position:absolute;right:0;bottom:0;width:60%;height:32px;opacity:.5}
+/* ---- news ---- */
+.news-item{position:relative;touch-action:pan-y;user-select:none;-webkit-user-select:none;transition:transform .15s,background .15s;padding:7px 8px;border-bottom:1px solid var(--border);display:flex;gap:8px;align-items:flex-start}
+.news-item:last-child{border-bottom:0}
+.news-item.swiping{transition:none}
+.news-item.flyout{transition:transform .25s,opacity .25s;opacity:0}
+.news-item.tint-left{background:color-mix(in srgb,var(--red) 20%,transparent);border-radius:4px}
+.news-item.tint-right{background:color-mix(in srgb,var(--green) 20%,transparent);border-radius:4px}
+.news-item .nbody{flex:1;min-width:0}
+.news-item .ttl{font-size:13px}
+.news-item .nmeta{font-size:10.5px;color:var(--text3);margin-top:2px}
+.subjchip{display:inline-block;font-size:9.5px;color:var(--text2);border:1px solid var(--border);border-radius:8px;padding:0 5px;margin-left:5px}
+.nacts{display:flex;gap:3px;flex:none}
+.nacts button{background:var(--card2);color:var(--text2);border:1px solid var(--border);border-radius:5px;font-size:12px;line-height:1;padding:3px 5px;cursor:pointer}
+.nacts button:hover{color:var(--text)}
+/* ---- recent stories under a company line ---- */
+.conews-t{cursor:pointer;margin-left:6px;white-space:nowrap}
+.conews-t:hover{color:var(--accent)}
+tr.conews td{background:var(--card2);white-space:normal;padding:0}
+/* same trick as .det: the table scrolls sideways, so the chips are pinned to the left edge
+   and sized to the viewport by sizeDetail() instead of to the (much wider) table */
+.conews-in{position:sticky;left:0;box-sizing:border-box;display:flex;flex-wrap:wrap;gap:6px;padding:6px 9px}
+.kwchip{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--border);border-radius:9px;padding:1px 7px;font-size:11.5px;max-width:100%}
+.kwchip a{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kwchip button{background:none;border:0;color:var(--text3);cursor:pointer;font-size:11px;line-height:1;padding:0}
+.kwchip button:hover{color:var(--accent)}
+.kwchip button:disabled{opacity:.4;cursor:default}
+.sumitem{border-top:1px solid var(--border);padding:7px 0;font-size:12.5px}
+.sumitem:first-child{border-top:0}
+.pencil{cursor:pointer;color:var(--text3);font-size:11px;margin-left:6px}
+.pencil:hover{color:var(--accent)}
+button.watch{background:none;border:0;color:var(--text3);cursor:pointer;font-size:14px;padding:0 2px;line-height:1}
+button.watch.on{color:var(--amber)}
+tr.grp td{background:var(--card2);border-top:2px solid var(--border);font-size:12px}
+#int-editor textarea{width:100%;min-height:120px}
+.empty{color:var(--text3);padding:18px 4px}
+.err{color:var(--red);padding:6px 0;font-size:12.5px}
+#toast{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 14px;font-size:13px;display:none;z-index:9;box-shadow:0 4px 16px rgba(0,0,0,.35)}
+</style></head><body>
+<p style="margin:0"><a href="/" id="home" style="display:none">← dashboard</a> <button id="theme-btn"></button><button id="cfg-btn">⚙</button></p>
+<h1>Biotech Tracker</h1>
+<div class="tiny" id="sub">Clinical-trial pipeline · data from clinicaltrials.gov</div>
+<div id="cfg-panel" class="card" style="display:none"></div>
+<main id="secs">
+
+<section id="tracker" data-sec="screening">
+  <h2><span data-sec-title>Screening</span> <span class="tiny" id="count"></span></h2>
+  <div class="tiny" id="cocount" style="margin:-4px 0 8px"></div>
+  <div class="tools">
+    <input type="search" id="q" class="grow" placeholder="Search company, drug, indication, NCT…">
+    <select id="f-scope"><option value="all">Universe</option><option value="tracked">Watchlist (★)</option></select>
+    <select id="f-phase"><option value="">All phases</option></select>
+    <select id="f-ind"><option value="">All indications</option></select>
+    <select id="f-co"><option value="">All companies</option></select>
+    <button class="btn primary" id="add-btn">+ Add</button>
+    <button class="btn" id="import-btn" title="Bulk-import industry Phase 2/3 trials from clinicaltrials.gov">⇩ Import</button>
+    <button class="btn" id="refresh-btn" title="Poll clinicaltrials.gov for status changes">↻ Refresh</button>
+    <a class="btn" href="/api/bio/trials.csv">↓ CSV</a>
+    <button class="btn" id="dens-btn"></button>
+  </div>
+  <div class="tablewrap"><table id="tbl">
+    <thead><tr id="hrow"></tr></thead>
+    <tbody id="tbody"><tr><td class="empty">Loading…</td></tr></tbody>
+  </table></div>
+  <div class="tiny" style="margin-top:6px">
+    Phase colours: <span class="pill ph-approved">Approved</span> <span class="pill ph-p3">Phase 3</span>
+    <span class="pill ph-p2">Phase 2</span> <span class="pill ph-p1">Phase 1</span> <span class="pill ph-pre">Preclinical</span>
+    · behind the pill: <span class="cat cat-hot">catalyst &lt;30d</span> <span class="cat cat-warm">&lt;90d</span>
+    · <span class="est">purple</span> = analyst estimate, not a registry fact · click any row to expand
+  </div>
+</section>
+
+<section id="pipeline-sec" data-sec="pipeline">
+  <h2><span data-sec-title>Analysis pipeline</span> <span class="tiny">Haiku → Sonnet → Opus, escalating on rules and confidence</span></h2>
+  <div class="card">
+    <div class="tools" style="margin-bottom:4px">
+      <button class="btn" data-run="daily">Run daily (Haiku)</button>
+      <button class="btn" data-run="weekly">Run weekly (Sonnet)</button>
+      <button class="btn" data-run="monthly">Run monthly review (Opus)</button>
+      <span class="tiny" id="run-state"></span>
+    </div>
+    <div class="calib" id="calib"><span class="muted">Loading calibration…</span></div>
+    <div class="tiny" id="calib-note" style="margin-top:6px"></div>
+  </div>
+</section>
+
+<section id="design-sec" data-sec="design">
+  <h2><span data-sec-title>Design input</span></h2>
+  <div class="card">
+    <div class="fb">
+      <select id="fb-kind" class="kindsel"><option value="idea">Idea</option><option value="bug">Bug</option>
+        <option value="question">Question</option><option value="data">Data</option></select>
+      <textarea id="fb-text" placeholder="What should change? An agent picks this up within ~30s and ships it. ⌘/Ctrl+Enter to send."></textarea>
+      <button class="btn primary" id="fb-send">Send</button>
+    </div>
+    <div class="tiny" style="margin-bottom:8px">Queued for the next iteration. An agent proposes a change per item; nothing is applied without a human saying yes.</div>
+    <div id="fb-list"><span class="muted">Loading…</span></div>
+    <div style="margin-top:12px;border-top:1px solid var(--border);padding-top:8px">
+      <div style="display:flex;justify-content:space-between;align-items:baseline">
+        <div style="font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--text2)">Activity log</div>
+        <div class="tiny" id="audit-lim"></div>
+      </div>
+      <div id="audit" style="margin-top:4px"><span class="muted">Loading…</span></div>
+    </div>
+  </div>
+</section>
+
+<section id="stocks-sec" data-sec="stocks">
+  <h2><span data-sec-title>Stocks</span> <span class="tiny" id="scount"></span> <span class="tiny">tracked tickers · 1mo</span></h2>
+  <div class="card"><div class="stocks" id="stocks"><span class="muted">Loading…</span></div></div>
+</section>
+
+<section id="news-sec" data-sec="news">
+  <h2><span data-sec-title>News</span>
+    <span class="tiny">swipe left = not interested · right = agent reads it
+      <span class="pencil" data-tab="SUBJECTS">subjects ✎</span><span class="pencil" data-tab="SOURCES">sources ✎</span></span></h2>
+  <div class="tools">
+    <input type="search" id="nq" class="grow" placeholder="Search recent news — company, drug, source…">
+    <span class="tiny" id="ncount"></span>
+  </div>
+  <div id="int-editor" class="card" style="display:none;margin-bottom:6px"></div>
+  <div class="card"><div id="news"><div class="muted">Loading…</div></div></div>
+</section>
+
+<section id="summaries-sec" data-sec="summaries">
+  <h2><span data-sec-title>Agent summaries</span></h2>
+  <div class="card"><div id="summaries"><span class="muted">Nothing queued yet — swipe a story right.</span></div></div>
+</section>
+
+<section id="stable-sec" data-sec="agents">
+  <h2><span data-sec-title>Agent Stable</span></h2>
+  <div class="card"><div class="tiers" id="tiers"><span class="muted">Loading…</span></div>
+  <div class="tiny" style="margin-top:8px">Model tiers backing this tracker's refresh pipeline.</div></div>
+</section>
+
+</main>
+
+<dialog id="add-dlg"><div class="dlg-body">
+  <h2 style="margin-bottom:10px">Add a programme</h2>
+  <label class="fld"><span>Search clinicaltrials.gov (company, drug, condition or NCT id)</span>
+    <input type="text" id="s-q" placeholder="e.g. resmetirom, Moderna, NCT03900429"></label>
+  <button class="btn" id="s-go">Search</button>
+  <div id="s-res" style="margin:10px 0"></div>
+  <div id="s-form" style="display:none">
+    <label class="fld"><span>Company</span><input type="text" id="a-company"></label>
+    <label class="fld"><span>Ticker (blank if private)</span><input type="text" id="a-ticker"></label>
+    <label class="fld"><span>Drug / candidate</span><input type="text" id="a-drug"></label>
+    <label class="fld"><span>Drug type</span><select id="a-type">
+      <option>small molecule</option><option>biologic</option><option>mRNA</option><option>gene therapy</option>
+      <option>cell therapy</option><option>ADC</option><option>RNAi</option><option>oligonucleotide</option>
+      <option>vaccine</option><option>other</option></select></label>
+    <label class="fld"><span>Indication</span><input type="text" id="a-ind"></label>
+    <label class="fld"><span>Phase</span><select id="a-phase"></select></label>
+    <label class="fld"><span>NCT id</span><input type="text" id="a-nct"></label>
+    <label class="fld"><span>Notes</span><textarea id="a-notes" rows="2"></textarea></label>
+    <div style="display:flex;gap:8px;margin-top:6px">
+      <button class="btn primary" id="a-save">Add to tracker</button>
+      <button class="btn" id="a-cancel">Cancel</button>
+    </div>
+    <div class="tiny" style="margin-top:8px">Analysis columns (outcomes, competition, market size, company background)
+      are filled in by the weekly research pass, or editable in the Sheet.</div>
+  </div>
+  <div style="margin-top:10px"><button class="btn" id="a-close">Close</button>
+    <a class="tiny" href="#" id="a-manual" style="margin-left:8px">enter manually without a trial →</a></div>
+</div></dialog>
+
+<div id="toast"></div>
+<script>
+const $ = s => document.querySelector(s);
+const api = (p, opt) => fetch(p, opt).then(async r => {
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.error || ('HTTP ' + r.status));
+  return body;
+});
+const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+function toast(msg, ms) { const t = $('#toast'); t.textContent = msg; t.style.display = 'block'; clearTimeout(toast.t); toast.t = setTimeout(() => t.style.display = 'none', ms || 2600); }
+
+const themeBtn = $('#theme-btn');
+const paintTheme = () => themeBtn.textContent = document.documentElement.dataset.theme === 'dark' ? '☀' : '☾';
+themeBtn.onclick = () => { const d = document.documentElement.dataset; d.theme = d.theme === 'dark' ? 'light' : 'dark'; localStorage.setItem('theme', d.theme); paintTheme(); };
+paintTheme();
+
+// ---------- module registry + ⚙ panel (same contract as the main dashboard) ----------
+const SEC_DEFS = { screening: 'Screening', stocks: 'Stocks', news: 'News', summaries: 'Agent summaries',
+  pipeline: 'Analysis pipeline', design: 'Design input', agents: 'Agent Stable' };
+let appSettings = { sections: {} };
+
+function setSecTitle(el, title) {
+  const n = [...el.childNodes].find(x => x.nodeType === 3 && x.nodeValue.trim());
+  if (n) n.nodeValue = title; else el.prepend(document.createTextNode(title));
+}
+function applySettings() {
+  const wrap = $('#secs'); if (!wrap) return;
+  const conf = appSettings.sections || {};
+  const defOrder = Object.keys(SEC_DEFS);
+  const secs = [...wrap.querySelectorAll(':scope > section[data-sec]')];
+  secs.sort((a, b) => (conf[a.dataset.sec]?.order ?? defOrder.indexOf(a.dataset.sec)) - (conf[b.dataset.sec]?.order ?? defOrder.indexOf(b.dataset.sec)));
+  for (const sec of secs) {
+    wrap.appendChild(sec); // append moves the node — this is the reorder
+    const c = conf[sec.dataset.sec] || {};
+    sec.style.display = c.hidden ? 'none' : '';
+    const t = sec.querySelector('[data-sec-title]');
+    if (t) setSecTitle(t, c.title || SEC_DEFS[sec.dataset.sec] || sec.dataset.sec);
+  }
+}
+function cfgToggle() {
+  const p = $('#cfg-panel');
+  if (p.style.display !== 'none') { p.style.display = 'none'; return; }
+  const conf = appSettings.sections || {};
+  const order = [...$('#secs').querySelectorAll(':scope > section[data-sec]')].map(s => s.dataset.sec);
+  p.innerHTML = '<div style="font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--text2);margin-bottom:6px">Modules</div>'
+    + '<div id="cfg-secs">' + order.map(k => `<div class="cfg-row" data-k="${k}">
+        <input type="checkbox" class="cfg-vis"${(conf[k] || {}).hidden ? '' : ' checked'}>
+        <span class="nm">${esc((conf[k] || {}).title || SEC_DEFS[k] || k)}</span>
+        <button data-mv="up">↑</button><button data-mv="down">↓</button></div>`).join('') + '</div>'
+    + '<div style="margin-top:8px;display:flex;gap:8px"><button class="btn primary" id="cfg-save">Save</button>'
+    + '<button class="btn" id="cfg-cancel">Cancel</button></div>';
+  p.style.display = '';
+  p.querySelectorAll('[data-mv]').forEach(b => b.onclick = () => {
+    const row = b.closest('.cfg-row');
+    if (b.dataset.mv === 'up' && row.previousElementSibling) row.parentNode.insertBefore(row, row.previousElementSibling);
+    if (b.dataset.mv === 'down' && row.nextElementSibling) row.parentNode.insertBefore(row.nextElementSibling, row);
+  });
+  $('#cfg-cancel').onclick = () => { p.style.display = 'none'; };
+  $('#cfg-save').onclick = async () => {
+    const sections = {};
+    [...p.querySelectorAll('#cfg-secs .cfg-row')].forEach((row, i) => {
+      const prev = (appSettings.sections || {})[row.dataset.k] || {};
+      sections[row.dataset.k] = { order: i, hidden: !row.querySelector('.cfg-vis').checked, ...(prev.title ? { title: prev.title } : {}) };
+    });
+    appSettings.sections = sections;
+    applySettings();
+    p.style.display = 'none';
+    try { await api('/api/bio/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ settings: { sections } }) }); }
+    catch (e) { toast('Could not save layout: ' + e.message, 5000); }
+  };
+}
+$('#cfg-btn').onclick = cfgToggle;
+
+// ---------- phases ----------
+const PHASE_CLASS = { 'Approved': 'ph-approved', 'FDA Review': 'ph-review', 'Phase 3': 'ph-p3', 'Phase 2/3': 'ph-p23',
+  'Phase 2': 'ph-p2', 'Phase 1/2': 'ph-p12', 'Phase 1': 'ph-p1', 'Preclinical': 'ph-pre' };
+let PHASE_ORDER = ['Preclinical', 'Phase 1', 'Phase 1/2', 'Phase 2', 'Phase 2/3', 'Phase 3', 'FDA Review', 'Approved'];
+const phasePill = p => `<span class="pill ${PHASE_CLASS[p] || 'ph-none'}">${esc(p || '—')}</span>`;
+
+// Days to the soonest dated catalyst in the milestone prose, or null. Only ISO-ish dates are
+// trusted — a guided "2H 2026" is not a date (same rule the pipeline's hard rules use).
+function catalystDays(t) {
+  let best = null;
+  const now = Date.now();
+  for (const m of String(t.nextMilestone || '').matchAll(/(\d{4})-(\d{2})(?:-(\d{2}))?/g)) {
+    const d = Date.parse(`${m[1]}-${m[2]}-${m[3] || '01'}T00:00:00Z`);
+    if (isNaN(d)) continue;
+    const days = Math.round((d - now) / 86400000);
+    if (days >= 0 && (best === null || days < best)) best = days;
+  }
+  return best;
+}
+function catalystTint(t, inner) {
+  const d = catalystDays(t);
+  if (d === null || d >= 90) return inner; // undated or far out: left alone
+  return `<span class="cat ${d < 30 ? 'cat-hot' : 'cat-warm'}" title="next dated catalyst in ${d} day${d === 1 ? '' : 's'}">${inner}</span>`;
+}
+
+let THRESHOLD = 0.65;
+function badge(t, col) {
+  const p = (t.provenance || {})[col];
+  if (!p || !p.tier) return '';
+  const conf = typeof p.confidence === 'number' ? p.confidence : null;
+  const low = conf !== null && conf < THRESHOLD;
+  const title = `${p.tier}${p.model ? ` (${p.model})` : ''}${conf !== null ? ` · confidence ${conf.toFixed(2)}` : ''}${low ? ' · below escalation threshold' : ''}${p.at ? ` · ${String(p.at).slice(0, 10)}` : ''}`;
+  return `<span class="tierbadge t-${esc(p.tier)}${low ? ' t-low' : ''}" title="${esc(title)}">${esc(p.tier)}${conf !== null ? ' ' + conf.toFixed(2) : ''}</span>`;
+}
+
+// ---------- quotes shared by the table and the stocks module ----------
+let QUOTES = {}, quoteRange = localStorage.getItem('bioRange') || '3mo';
+const money = v => v == null ? '—' : '$' + (v >= 100 ? v.toFixed(0) : v.toFixed(2));
+const pct = v => v == null ? '' : (v >= 0 ? '+' : '') + v.toFixed(1) + '%';
+
+// Consensus across whatever firms have been sourced. Median, not mean: one stale outlier
+// should not drag the headline number.
+function targetSummary(t) {
+  const nums = (t.priceTargets || []).map(x => Number(x.target)).filter(n => isFinite(n) && n > 0).sort((a, b) => a - b);
+  if (!nums.length) return null;
+  const mid = nums.length % 2 ? nums[(nums.length - 1) / 2] : (nums[nums.length / 2 - 1] + nums[nums.length / 2]) / 2;
+  const q = QUOTES[(t.ticker || '').toUpperCase()];
+  const up = q && q.price ? ((mid - q.price) / q.price) * 100 : null;
+  return { n: nums.length, median: mid, low: nums[0], high: nums[nums.length - 1], upside: up };
+}
+
+const COLS = [
+  { k: 'watch', h: '', sort: t => (t.status === 'tracked' ? 1 : 0),
+    cell: t => `<button class="watch${t.status === 'tracked' ? ' on' : ''}" data-watch="${esc(t.id)}" title="${t.status === 'tracked' ? 'on the watchlist — the analyst tiers run on this' : 'screened only — click to analyse'}">${t.status === 'tracked' ? '★' : '☆'}</button>` },
+  { k: 'drug', h: 'Drug', cell: t => esc(t.drug) },
+  { k: 'drugType', h: 'Type', cell: t => `<span class="muted">${esc(t.drugType)}</span>` },
+  { k: 'indication', h: 'Indication', cls: 'wrap', cell: t => esc(t.indication) },
+  { k: 'phase', h: 'Phase', cell: t => catalystTint(t, phasePill(t.phase)), sort: t => PHASE_ORDER.indexOf(t.phase) },
+  { k: 'trialStatus', h: 'Trial status', cell: t => `<span class="muted">${esc((t.trialStatus || '').toLowerCase())}</span>` },
+  { k: 'nctId', h: 'Trial ID', cell: t => t.nctId ? `<a href="https://clinicaltrials.gov/study/${esc(t.nctId)}" target="_blank" rel="noopener">${esc(t.nctId)}</a>` : '—' },
+  // enrollment arrives as a number from the registry but as a string from the add dialog —
+  // coerce before formatting, or toLocaleString silently returns the unseparated string
+  { k: 'enrollment', h: 'N', cls: 'num', num: true,
+    cell: t => { const n = Number(t.enrollment); return isFinite(n) && n > 0 ? n.toLocaleString() : '—'; } },
+  { k: 'price', h: 'Price', num: true,
+    sort: t => (QUOTES[(t.ticker || '').toUpperCase()] || {}).price || 0,
+    cell: t => {
+      const q = QUOTES[(t.ticker || '').toUpperCase()];
+      if (!q || q.price == null) return '<span class="muted">—</span>';
+      const cls = (q.changePct || 0) >= 0 ? 'up' : 'down';
+      return `${money(q.price)} <span class="${cls}" style="font-size:11px">${pct(q.changePct)}</span>`;
+    } },
+  { k: 'targets', h: 'Targets', num: true,
+    sort: t => (targetSummary(t) || {}).median || 0,
+    cell: t => {
+      const s = targetSummary(t);
+      if (!s) return '<span class="muted">—</span>';
+      const up = s.upside == null ? '' : ` <span class="${s.upside >= 0 ? 'up' : 'down'}" style="font-size:11px">${pct(s.upside)}</span>`;
+      return `<span class="est">${money(s.median)}</span>${up} <span class="tiny">${s.n} firm${s.n > 1 ? 's' : ''}</span>${badge(t, 'PriceTargets')}`;
+    } },
+  { k: 'nextMilestone', h: 'Next milestone', cls: 'wrap', cell: t => esc(t.nextMilestone) || '—' },
+  { k: 'updated', h: 'Updated', cell: t => `<span class="tiny">${esc((t.updated || '').slice(0, 10))}</span>` },
+];
+
+let TRIALS = [], sortKey = null, sortDir = -1, openId = null, isOwner = false, grouped = true;
+let openCo = null; // company whose recent-stories strip is expanded
+let scope = localStorage.getItem('bioScope') || 'all', COUNTS = {}; // universe by default
+const RENDER_CAP = 400; // a few hundred rows is fine; beyond that the table stops being readable
+
+function visible() {
+  const q = $('#q').value.trim().toLowerCase();
+  const fp = $('#f-phase').value, fi = $('#f-ind').value, fc = $('#f-co').value;
+  return TRIALS.filter(t => {
+    if (fp && t.phase !== fp) return false;
+    if (fi && t.indication !== fi) return false;
+    if (fc && t.company !== fc) return false;
+    if (!q) return true;
+    return [t.company, t.ticker, t.drug, t.drugType, t.indication, t.nctId, t.notes, t.trialTitle]
+      .join(' ').toLowerCase().includes(q);
+  });
+}
+function sortFlat(list) {
+  const col = COLS.find(c => c.k === sortKey) || COLS[0];
+  const val = t => col.sort ? col.sort(t) : (col.num ? (Number(t[col.k]) || 0) : String(t[col.k] || '').toLowerCase());
+  return list.slice().sort((a, b) => { const x = val(a), y = val(b); return (x < y ? -1 : x > y ? 1 : 0) * sortDir; });
+}
+// Salience for a company = how far its best programme has got, then how many programmes it
+// has. A company with a Phase 3 and two Phase 1s outranks one with a single Phase 2.
+// GROUP_DIR flips that whole ordering: a reader asked for the default the other way round
+// (earliest-stage first), so the ranking above is computed as before and then inverted —
+// company order and the drugs inside each company both follow it. Clicking a column header
+// still leaves this view for a flat sort, and toggles either direction as before.
+const GROUP_DIR = -1; // -1 = earliest-stage first (default), 1 = most advanced first
+function groupsOf(list) {
+  const by = new Map();
+  for (const t of list) {
+    if (!by.has(t.company)) by.set(t.company, []);
+    by.get(t.company).push(t);
+  }
+  const groups = [...by.entries()].map(([company, drugs]) => ({
+    company, drugs: drugs.slice().sort((a, b) => (PHASE_ORDER.indexOf(b.phase) - PHASE_ORDER.indexOf(a.phase)) * GROUP_DIR),
+    ticker: (drugs.find(d => d.ticker) || {}).ticker || '',
+    // "private" is a claim; absence of a ticker on an imported row is just missing data
+    knownPrivate: drugs.some(d => d.status === 'tracked' && !d.ticker),
+    best: Math.max(...drugs.map(d => PHASE_ORDER.indexOf(d.phase))),
+  }));
+  groups.sort((a, b) => ((b.best - a.best) || (b.drugs.length - a.drugs.length)) * GROUP_DIR
+    || a.company.localeCompare(b.company));
+  return groups;
+}
+
+// ---------- recent stories for a company line ----------
+// Matched client-side against the already-loaded news feed, so the company line costs no
+// extra request. Legal/industry boilerplate is stripped so "Merck & Co., Inc." matches on
+// "merck" and not on "pharmaceuticals".
+const CO_STOP = /\b(inc|llc|ltd|limited|corp|corporation|company|holdings|group|pharma|pharmaceutical|pharmaceuticals|therapeutic|therapeutics|bioscience|biosciences|science|sciences|biopharma|biotech|laboratories|labs|medicines|health|healthcare|international|and|the)\b/g;
+const coTokens = co => String(co || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ')
+  .replace(CO_STOP, ' ').split(/\s+/).filter(w => w.length >= 4);
+const CO_STORY_CAP = 5;
+function storiesFor(g) {
+  const toks = coTokens(g.company);
+  const tick = (g.ticker || '').toUpperCase();
+  const tickRe = /^[A-Z.]{2,6}$/.test(tick) ? new RegExp('\\b' + tick.replace('.', '\\.') + '\\b') : null;
+  const out = [];
+  for (let i = 0; i < NEWS.length && out.length < CO_STORY_CAP; i++) {
+    const it = NEWS[i];
+    if (it.gone) continue;
+    const hay = [it.title, it.desc, it.subject].join(' ');
+    if (toks.some(t => hay.toLowerCase().includes(t)) || (tickRe && tickRe.test(hay))) out.push({ it, i });
+  }
+  return out;
+}
+const KW_STOP = new Set(('a an the of for in on to and or with at from by as is are be was were it its this that than ' +
+  'after over into up down new says say said report reports could would may might will can').split(' '));
+// 1–3 words standing in for the headline: proper nouns and numbers first (drug names, doses,
+// phases), then whatever content words are left, in headline order.
+function keywordsOf(title, toks) {
+  const words = String(title || '').split(/[^A-Za-z0-9%$\/+-]+/).filter(Boolean);
+  const seen = new Set(), strong = [], weak = [];
+  for (const w of words) {
+    const lw = w.toLowerCase();
+    if (lw.length < 3 || KW_STOP.has(lw) || seen.has(lw)) continue;
+    if (toks.some(t => lw.includes(t))) continue; // the company name is not news about itself
+    seen.add(lw);
+    (/[0-9]/.test(w) || /^[A-Z]/.test(w) ? strong : weak).push(w);
+  }
+  const picked = strong.concat(weak).slice(0, 3);
+  return picked.length ? picked.join(' ') : String(title || '').slice(0, 40);
+}
+
+function detailHtml(t) {
+  const block = (h, v, estimate, col) => v ? `<div><h4>${h}${col ? badge(t, col) : ''}</h4><p${estimate ? ' class="est"' : ''}>${esc(v)}</p></div>` : '';
+  const links = (t.sources || []).map(u => `<a href="${esc(u)}" target="_blank" rel="noopener">source ↗</a>`).join(' ');
+  const tg = (t.priceTargets || []).filter(x => x.firm);
+  const targets = tg.length ? `<div style="grid-column:1/-1"><h4>Analyst targets${badge(t, 'PriceTargets')}</h4>
+    <table style="width:auto;font-size:12px;background:transparent"><tbody>${tg.map(x => `<tr>
+      <td style="padding:2px 10px 2px 0">${esc(x.firm)}</td>
+      <td style="padding:2px 10px 2px 0">${esc(x.rating || '')}</td>
+      <td style="padding:2px 10px 2px 0" class="est">${x.target ? money(Number(x.target)) : ''}</td>
+      <td style="padding:2px 10px 2px 0" class="tiny">${esc(x.date || '')}</td>
+      <td style="padding:2px 0">${x.source ? `<a href="${esc(x.source)}" target="_blank" rel="noopener">↗</a>` : ''}</td>
+    </tr>`).join('')}</tbody></table></div>` : '';
+  return `<div class="det">
+    ${block('Trial', t.trialTitle)}
+    ${block('Phase history', t.phaseHistory)}
+    ${block('Next milestone', t.nextMilestone, false, 'NextMilestone')}
+    ${block('Expected outcomes / disease burden', t.outcomes, true, 'Outcomes')}
+    ${block('Competition', t.competition, true, 'Competition')}
+    ${block('Market size', t.marketSize, true, 'MarketSize')}
+    ${block('Company background', t.background, true, 'Background')}
+    ${block('Notes', t.notes)}
+    ${targets}
+    <div class="full">
+      ${t.nctId ? `<a href="https://clinicaltrials.gov/study/${esc(t.nctId)}" target="_blank" rel="noopener">clinicaltrials.gov ↗</a>` : ''}
+      ${links}
+      <span class="tiny">last updated ${esc((t.updated || '').slice(0, 16).replace('T', ' '))}</span>
+      <button class="btn" data-remove="${esc(t.id)}" style="margin-left:auto">Remove</button>
+    </div></div>`;
+}
+
+function rowHtml(t) {
+  const tds = COLS.map(c => `<td class="${c.cls || ''}">${c.cls === 'wrap' ? `<div class="clamp">${c.cell(t)}</div>` : c.cell(t)}</td>`).join('');
+  const det = openId === t.id ? `<tr class="detail"><td colspan="${COLS.length}">${detailHtml(t)}</td></tr>` : '';
+  return `<tr class="row${openId === t.id ? ' open' : ''}" data-id="${esc(t.id)}">${tds}</tr>${det}`;
+}
+
+function render() {
+  const list = visible();
+  const scopeNote = `${COUNTS.tracked || 0} watched · ${COUNTS.screened || 0} screened`;
+  $('#count').textContent = (list.length === TRIALS.length ? `${TRIALS.length} programmes` : `${list.length} of ${TRIALS.length}`) + ' — ' + scopeNote;
+  // companies behind what the filters currently match — counted on the filtered list, not on
+  // the RENDER_CAP slice, so the caption keeps describing the selection when rows are capped
+  const cos = new Set(list.map(t => t.company).filter(Boolean)).size;
+  const coAll = new Set(TRIALS.map(t => t.company).filter(Boolean)).size;
+  $('#cocount').textContent = `${cos === coAll ? coAll : `${cos} of ${coAll}`} compan${coAll === 1 ? 'y' : 'ies'} represented`;
+  $('#hrow').innerHTML = COLS.map(c => `<th data-k="${c.k}" class="${c.cls === 'num' ? 'num' : ''}">${c.h}${sortKey === c.k ? ` <span class="ar">${sortDir > 0 ? '▲' : '▼'}</span>` : ''}</th>`).join('');
+  if (!list.length) { $('#tbody').innerHTML = `<tr><td colspan="${COLS.length}" class="empty">Nothing matches those filters.</td></tr>`; return; }
+  const capped = list.length > RENDER_CAP;
+  const shown = capped ? list.slice(0, RENDER_CAP) : list;
+  const capNote = capped ? `<tr><td colspan="${COLS.length}" class="tiny" style="padding:8px">showing ${RENDER_CAP} of ${list.length} — narrow the filters to see the rest</td></tr>` : '';
+  if (!grouped) { $('#tbody').innerHTML = sortFlat(shown).map(rowHtml).join('') + capNote; sizeDetail(); return; }
+  // grouped: a company header, then one explicit line per drug
+  $('#tbody').innerHTML = groupsOf(shown).map(g => {
+    const q = QUOTES[(g.ticker || '').toUpperCase()];
+    const px = q && q.price != null ? `${money(q.price)} <span class="${(q.changePct || 0) >= 0 ? 'up' : 'down'}">${pct(q.changePct)}</span>` : '';
+    const st = storiesFor(g), open = openCo === g.company;
+    const toks = coTokens(g.company);
+    const stories = st.length ? `<span class="tiny conews-t" data-conews="${esc(g.company)}">· ${st.length} recent stor${st.length > 1 ? 'ies' : 'y'} ${open ? '▾' : '▸'}</span>` : '';
+    const storyRow = open && st.length ? `<tr class="conews"><td colspan="${COLS.length}"><div class="conews-in">${st.map(({ it, i }) => `<span class="kwchip">
+        <a href="${esc(it.link)}" target="_blank" rel="noopener" title="${esc(it.title)}">${esc(keywordsOf(it.title, toks))}</a>
+        <button data-nagent="${i}"${it.queued ? ' disabled title="already queued"' : ' title="agent reads and summarises this"'}>🤖</button></span>`).join('')}</div></td></tr>` : '';
+    return `<tr class="grp"><td colspan="${COLS.length}">
+        <span class="co">${esc(g.company)}</span>${g.ticker ? `<span class="tkr">${esc(g.ticker)}</span>` : (g.knownPrivate ? '<span class="tkr">private</span>' : '')}
+        <span class="tiny" style="margin-left:8px">${g.drugs.length} programme${g.drugs.length > 1 ? 's' : ''}</span>${stories}
+        <span style="float:right;font-size:12px">${px}</span></td></tr>` + storyRow + g.drugs.map(rowHtml).join('');
+  }).join('') + capNote;
+  sizeDetail();
+}
+function sizeDetail() {
+  const wrap = document.querySelector('.tablewrap');
+  if (wrap) document.querySelectorAll('.det, .conews-in').forEach(el => el.style.width = wrap.clientWidth + 'px');
+}
+addEventListener('resize', sizeDetail);
+
+function fillFilters() {
+  const fill = (sel, vals, label) => {
+    const cur = sel.value;
+    sel.innerHTML = `<option value="">${label}</option>` + vals.map(v => `<option${v === cur ? ' selected' : ''}>${esc(v)}</option>`).join('');
+  };
+  const uniq = k => [...new Set(TRIALS.map(t => t[k]).filter(Boolean))].sort();
+  fill($('#f-phase'), PHASE_ORDER.filter(p => TRIALS.some(t => t.phase === p)), 'All phases');
+  fill($('#f-ind'), uniq('indication'), 'All indications');
+  fill($('#f-co'), uniq('company'), 'All companies');
+}
+
+async function load() {
+  try {
+    const d = await api('/api/bio/trials?scope=' + encodeURIComponent(scope));
+    TRIALS = d.trials || [];
+    COUNTS = d.counts || {};
+    if (d.phases && d.phases.length) PHASE_ORDER = d.phases;
+    fillFilters(); render();
+  } catch (e) {
+    $('#tbody').innerHTML = `<tr><td class="err">Could not load the tracker: ${esc(e.message)}</td></tr>`;
+  }
+}
+
+$('#hrow').addEventListener('click', e => {
+  const th = e.target.closest('th'); if (!th) return;
+  const k = th.dataset.k;
+  if (k === sortKey) sortDir = -sortDir; else { sortKey = k; sortDir = 1; }
+  grouped = false; const g = $('#grp-toggle'); if (g) g.checked = false; // sorting a column means a flat list
+  render();
+});
+$('#tbody').addEventListener('click', async e => {
+  const na = e.target.closest('[data-nagent]');
+  if (na) {
+    e.stopPropagation();
+    const it = NEWS[+na.dataset.nagent];
+    if (it && !it.queued) { it.queued = true; queueAgent(storyOfItem(it)); render(); }
+    return;
+  }
+  const cn = e.target.closest('[data-conews]');
+  if (cn) { e.stopPropagation(); openCo = openCo === cn.dataset.conews ? null : cn.dataset.conews; render(); return; }
+  const w = e.target.closest('[data-watch]');
+  if (w) {
+    e.stopPropagation();
+    const id = w.dataset.watch;
+    const t = TRIALS.find(x => x.id === id); if (!t) return;
+    const on = t.status !== 'tracked';
+    t.status = on ? 'tracked' : 'screened';
+    COUNTS.tracked = (COUNTS.tracked || 0) + (on ? 1 : -1);
+    COUNTS.screened = (COUNTS.screened || 0) + (on ? -1 : 1);
+    render();
+    try { await api('/api/bio/trials/' + id + '/watch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ watch: on }) }); loadStocks(); }
+    catch (err) { toast('Could not change watch state: ' + err.message, 5000); load(); }
+    return;
+  }
+  const rm = e.target.closest('[data-remove]');
+  if (rm) {
+    e.stopPropagation();
+    const id = rm.dataset.remove;
+    await api('/api/bio/trials/' + id + '/remove', { method: 'POST' }).catch(err => toast('Remove failed: ' + err.message, 4000));
+    TRIALS = TRIALS.filter(t => t.id !== id); openId = null; fillFilters(); render(); toast('Removed from tracker');
+    return;
+  }
+  const tr = e.target.closest('tr.row'); if (!tr) return;
+  if (e.target.closest('a')) return;
+  openId = openId === tr.dataset.id ? null : tr.dataset.id;
+  render();
+});
+['#q', '#f-phase', '#f-ind', '#f-co'].forEach(s => $(s).addEventListener('input', render));
+$('#f-scope').value = scope;
+$('#f-scope').addEventListener('change', () => { scope = $('#f-scope').value; localStorage.setItem('bioScope', scope); load(); });
+$('#import-btn').onclick = async () => {
+  const b = $('#import-btn'); b.disabled = true; b.textContent = '⇩ Importing…';
+  try {
+    const d = await api('/api/bio/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ max: 300 }) });
+    toast(`Imported ${d.imported} new trials (universe now ${d.universe})`, 5000);
+    scope = 'all'; $('#f-scope').value = 'all'; localStorage.setItem('bioScope', scope);
+    await load();
+  } catch (e) { toast('Import failed: ' + e.message, 6000); }
+  b.disabled = false; b.textContent = '⇩ Import';
+};
+
+$('#refresh-btn').onclick = async () => {
+  const b = $('#refresh-btn'); b.disabled = true; b.textContent = '↻ Polling…';
+  try {
+    const d = await api('/api/bio/refresh', { method: 'POST' });
+    await load();
+    toast(d.changes.length ? `${d.changes.length} of ${d.checked} trials changed` : `${d.checked} trials checked, nothing changed`, 4000);
+  } catch (e) { toast('Refresh failed: ' + e.message, 5000); }
+  b.disabled = false; b.textContent = '↻ Refresh';
+};
+
+// ---------- table density: compact by default, persisted like the quote range ----------
+let density = localStorage.getItem('bioDensity') || 'compact';
+function paintDensity() {
+  document.body.dataset.density = density;
+  const b = $('#dens-btn'), compact = density === 'compact';
+  b.textContent = compact ? '↕ Roomy' : '↕ Compact';
+  b.title = compact ? 'taller rows, two lines of prose' : 'tighter rows, one line of prose';
+}
+$('#dens-btn').onclick = () => {
+  density = density === 'compact' ? 'roomy' : 'compact';
+  localStorage.setItem('bioDensity', density);
+  paintDensity(); sizeDetail(); // row heights changed, so an open panel may need re-measuring
+};
+paintDensity();
+
+// ---------- stocks ----------
+function sparkSvg(values, up) {
+  if (!values || values.length < 2) return '';
+  const W = 100, H = 40, P = 3;
+  const min = Math.min(...values), max = Math.max(...values), range = (max - min) || 1;
+  const pts = values.map((v, i) => `${(i / (values.length - 1) * W).toFixed(1)},${(H - P - (v - min) / range * (H - 2 * P)).toFixed(1)}`);
+  const color = up ? 'var(--green)' : 'var(--red)';
+  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">
+    <path d="M0,${H} L${pts.join(' L')} L${W},${H} Z" fill="${color}" opacity="0.10"/>
+    <polyline points="${pts.join(' ')}" fill="none" stroke="${color}" stroke-width="1.2" opacity="0.55"/></svg>`;
+}
+// "priced" = the tickers a quote actually came back for; an errored or price-less symbol is
+// still rendered as a card, so the count and the card count differ when a feed is partial.
+function paintStockCount(quotes) {
+  const total = quotes.length;
+  const priced = quotes.filter(q => !q.error && q.price != null).length;
+  $('#scount').textContent = !total ? '' : priced === total ? `${priced} priced` : `${priced} of ${total} priced`;
+}
+async function loadStocks() {
+  const el = $('#stocks');
+  try {
+    const d = await api('/api/bio/quotes?range=' + encodeURIComponent(quoteRange));
+    QUOTES = {};
+    (d.quotes || []).forEach(q => { if (!q.error) QUOTES[q.symbol] = q; });
+    paintStockCount(d.quotes || []);
+    const ranges = ['1mo', '3mo', '6mo'];
+    const btns = ranges.map(r => `<button class="btn" data-range="${r}" style="padding:1px 7px;font-size:11px${r === quoteRange ? ';border-color:var(--accent);color:var(--text)' : ''}">${r.replace('mo', 'M')}</button>`).join(' ');
+    el.innerHTML = '';
+    const bar = document.createElement('div');
+    bar.style.cssText = 'grid-column:1/-1;display:flex;gap:5px;align-items:center;margin-bottom:2px';
+    bar.innerHTML = `<span class="tiny" style="margin-right:4px">range</span>${btns}`;
+    el.appendChild(bar);
+    (d.quotes || []).forEach(q => {
+      const div = document.createElement('div');
+      div.className = 'stock';
+      if (q.error) {
+        div.innerHTML = `<div class="sym">${esc(q.symbol)}</div><div class="tiny">unpriceable</div>`;
+      } else {
+        const up = (q.changePct || 0) >= 0;
+        div.innerHTML = `${sparkSvg(q.spark, (q.weekPct ?? q.changePct ?? 0) >= 0)}
+          <div class="sym">${esc(q.symbol)}</div>
+          <div class="px">${money(q.price)}</div>
+          <div class="chg ${up ? 'up' : 'down'}">${pct(q.changePct)} <span class="tiny">today</span></div>
+          <div class="co">${esc(q.company || '')}</div>`;
+      }
+      el.appendChild(div);
+    });
+    bar.querySelectorAll('[data-range]').forEach(b => b.onclick = () => {
+      quoteRange = b.dataset.range; localStorage.setItem('bioRange', quoteRange);
+      loadStocks().then(render); // the table's price column shares these quotes
+    });
+    if (!(d.quotes || []).length) el.innerHTML = '<span class="muted">No tickers tracked yet.</span>';
+  } catch (e) { $('#scount').textContent = ''; el.innerHTML = `<span class="err">Quotes unavailable: ${esc(e.message)}</span>`; }
+}
+
+// ---------- news: swipe left = not interested, right = agent reads it ----------
+const SWIPE_THRESHOLD = 70;
+function makeSwipeable(card, { onLeft, onRight }) {
+  let startX = null, dx = 0, busy = false;
+  card.addEventListener('pointerdown', e => {
+    if (busy || e.target.closest('a') || e.target.closest('button')) return;
+    startX = e.clientX; dx = 0; card.classList.add('swiping'); card.setPointerCapture(e.pointerId);
+  });
+  card.addEventListener('pointermove', e => {
+    if (startX == null) return;
+    dx = e.clientX - startX;
+    card.style.transform = `translateX(${dx}px)`;
+    card.classList.toggle('tint-right', dx > 30);
+    card.classList.toggle('tint-left', dx < -30);
+  });
+  const finish = () => {
+    if (startX == null) return;
+    startX = null; card.classList.remove('swiping');
+    const dir = dx > SWIPE_THRESHOLD ? 1 : dx < -SWIPE_THRESHOLD ? -1 : 0;
+    dx = 0;
+    if (!dir) { card.style.transform = ''; card.classList.remove('tint-left', 'tint-right'); return; }
+    busy = true; (dir > 0 ? onRight : onLeft)();
+  };
+  card.addEventListener('pointerup', finish);
+  card.addEventListener('pointercancel', finish);
+}
+function flyAway(row, dir) {
+  row.classList.add('flyout');
+  row.style.transform = `translateX(${dir * 120}%)`;
+  setTimeout(() => row.remove(), 260);
+}
+const storyOf = row => ({ title: row.dataset.title, url: row.dataset.url, source: row.dataset.source, desc: row.dataset.desc, subjects: row.dataset.subject ? [row.dataset.subject] : [] });
+const storyOfItem = it => ({ title: it.title, url: it.link, source: it.source, desc: (it.desc || '').slice(0, 400), subjects: it.subject ? [it.subject] : [] });
+// A swiped card leaves the DOM immediately, but the feed it came from is re-rendered on every
+// search keystroke — so the dismissal is marked on the item, not just on the row.
+const goneAt = row => {
+  const it = NEWS[+row.dataset.i];
+  if (it) it.gone = true;
+  if (openCo) render(); // an expanded company strip must not keep offering a dismissed story
+};
+function newsSkip(row) { // optimistic: the card leaves now, the write follows
+  goneAt(row); flyAway(row, -1);
+  api('/api/bio/news/feedback', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ kind: 'bio_not_interested', ...storyOf(row) }) }).catch(() => {});
+}
+function queueAgent(s) {
+  toast('Queued for the agent');
+  api('/api/bio/news/feedback', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ kind: 'bio_agent_read', ...s }) }).catch(() => {});
+  api('/api/bio/summaries', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(s) })
+    .then(() => loadSummaries())
+    .catch(e => toast('Summary failed: ' + e.message, 6000)); // e.g. the free-transport refusal
+}
+function newsAgent(row) {
+  const s = storyOf(row);
+  goneAt(row); flyAway(row, 1);
+  queueAgent(s);
+}
+let NEWS = [];
+function renderNews() {
+  const el = $('#news');
+  const q = ($('#nq').value || '').trim().toLowerCase();
+  const live = NEWS.map((it, i) => ({ it, i })).filter(({ it }) => !it.gone);
+  const items = q ? live.filter(({ it }) => [it.title, it.source, it.subject, it.desc].join(' ').toLowerCase().includes(q)) : live;
+  $('#ncount').textContent = live.length ? (items.length === live.length ? `${live.length} stories` : `${items.length} of ${live.length}`) : '';
+  if (!items.length) {
+    el.innerHTML = `<div class="muted">${live.length ? 'No stories match that search.' : 'Nothing new — everything has been triaged.'}</div>`;
+    return;
+  }
+  el.innerHTML = items.map(({ it, i }) => `<div class="news-item" data-i="${i}" data-title="${esc(it.title)}" data-url="${esc(it.link)}" data-source="${esc(it.source)}" data-desc="${esc((it.desc || '').slice(0, 400))}" data-subject="${esc(it.subject || '')}">
+      <div class="nbody">
+        <div class="ttl"><a href="${esc(it.link)}" target="_blank" rel="noopener">${esc(it.title)}</a></div>
+        <div class="nmeta">${esc(it.source || '')}${it.age ? ' · ' + esc(it.age) : ''}${it.subject ? `<span class="subjchip">${esc(it.subject)}</span>` : ''}</div>
+      </div>
+      <div class="nacts"><button class="n-skip" title="not interested">✕</button><button class="n-agent" title="agent reads and summarises this">🤖</button></div>
+    </div>`).join('');
+  el.querySelectorAll('.news-item').forEach(row => {
+    row.querySelector('.n-skip').onclick = () => newsSkip(row);
+    row.querySelector('.n-agent').onclick = () => newsAgent(row);
+    makeSwipeable(row, { onLeft: () => newsSkip(row), onRight: () => newsAgent(row) });
+  });
+}
+async function loadNews() {
+  try {
+    const d = await api('/api/bio/news');
+    NEWS = d.items || [];
+    renderNews();
+    if (TRIALS.length) render(); // the company lines carry a story count from this feed
+  } catch (e) { $('#news').innerHTML = `<div class="err">News unavailable: ${esc(e.message)}</div>`; }
+}
+$('#nq').addEventListener('input', renderNews);
+async function loadSummaries() {
+  try {
+    const d = await api('/api/bio/summaries');
+    $('#summaries').innerHTML = d.summaries.length ? d.summaries.map(s => `<div class="sumitem">
+      <div><a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.title)}</a></div>
+      <div style="margin-top:3px">${esc(s.summary)}</div>
+      <div class="tiny">${esc(String(s.at).slice(0, 16).replace('T', ' '))} · ${esc(s.model || '')}</div></div>`).join('')
+      : '<span class="muted">Nothing queued yet — swipe a story right.</span>';
+  } catch (e) { $('#summaries').innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+}
+
+// subjects / sources editor — same idea as the dashboard's prefs pencil
+document.querySelectorAll('.pencil').forEach(b => b.onclick = async () => {
+  const tab = b.dataset.tab;
+  const ed = $('#int-editor');
+  if (ed.style.display !== 'none' && ed.dataset.tab === tab) { ed.style.display = 'none'; return; }
+  ed.dataset.tab = tab;
+  ed.innerHTML = '<div class="muted">Loading…</div>';
+  ed.style.display = '';
+  const prefs = await api('/api/bio/prefs').catch(() => ({}));
+  ed.innerHTML = `<div style="font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--text2);margin-bottom:4px">${esc(tab)} — one per line</div>
+    <textarea id="int-text">${esc((prefs[tab] || []).join('\n'))}</textarea>
+    <div style="margin-top:6px;display:flex;gap:8px"><button class="btn primary" id="int-save">Save</button>
+    <button class="btn" id="int-cancel">Cancel</button></div>`;
+  $('#int-cancel').onclick = () => { ed.style.display = 'none'; };
+  $('#int-save').onclick = async () => {
+    try {
+      await api('/api/bio/prefs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tab, lines: $('#int-text').value.split('\n') }) });
+      ed.style.display = 'none'; toast('Saved — rebuilding the feed');
+      $('#news').innerHTML = '<div class="muted">Rebuilding…</div>';
+      loadNews();
+    } catch (e) { toast('Save failed: ' + e.message, 5000); }
+  };
+});
+
+// ---------- design input ----------
+function fbHtml(f) {
+  const who = (f.author || '').split('@')[0];
+  return `<div class="fb-item" data-fb="${esc(f.id)}">
+    <div style="display:flex;gap:8px;align-items:flex-start">
+      <div style="flex:1"><b>${esc(f.kind)}</b> — ${esc(f.text)}</div>
+      <button class="fb-x" data-close="${esc(f.id)}" title="remove this item">✕</button>
+    </div>
+    <div class="fb-meta">${esc(who)} · ${esc(String(f.at).slice(0, 10))} · ${esc(f.status)}</div>
+    ${f.proposal ? `<div class="fb-prop"><b>Proposed:</b> ${esc(f.proposal)}</div>` : ''}
+    ${(f.thread || []).map(m => `<div class="fb-turn ${m.role === 'agent' ? 'ag' : 'rd'}">
+      <b>${m.role === 'agent' ? 'Agent asks' : 'You'}:</b> ${esc(m.text)}</div>`).join('')}
+    ${f.status === 'question' ? `<div class="fb-reply">
+      <input type="text" class="fb-answer" data-reply="${esc(f.id)}" placeholder="Answer, and it carries straight on…">
+      <button class="btn" data-send="${esc(f.id)}">Send</button></div>` : ''}
+    ${f.resolution && f.status !== 'question' ? `<div class="fb-meta"><b>Outcome:</b> ${esc(f.resolution)}</div>` : ''}
+  </div>`;
+}
+function loadFeedback() {
+  return api('/api/bio/feedback').then(d => {
+    $('#fb-list').innerHTML = d.feedback.length ? d.feedback.map(fbHtml).join('')
+      : '<span class="muted">Nothing queued yet — first suggestion goes here.</span>';
+    const sendReply = async id => {
+      const input = $('#fb-list').querySelector(`[data-reply="${id}"]`);
+      const text = (input.value || '').trim();
+      if (!text) return;
+      input.disabled = true;
+      try {
+        await api('/api/bio/feedback/' + id + '/reply', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) });
+        toast('Answered — the agent is carrying on');
+        await loadFeedback(); loadAudit();
+      } catch (e) { toast('Could not send: ' + e.message, 5000); input.disabled = false; }
+    };
+    $('#fb-list').querySelectorAll('[data-send]').forEach(b => b.onclick = () => sendReply(b.dataset.send));
+    $('#fb-list').querySelectorAll('[data-reply]').forEach(i => i.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); sendReply(i.dataset.reply); }
+    }));
+    $('#fb-list').querySelectorAll('[data-close]').forEach(b => b.onclick = async () => {
+      const id = b.dataset.close;
+      b.closest('.fb-item').remove();
+      try { await api('/api/bio/feedback/' + id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'closed' }) }); }
+      catch (e) { toast('Could not remove: ' + e.message, 5000); loadFeedback(); }
+    });
+  }).catch(e => $('#fb-list').innerHTML = `<span class="err">${esc(e.message)}</span>`);
+}
+// What a reader asked for and what the machine then did — the record, on the page.
+function loadAudit() {
+  return api('/api/bio/audit?limit=40').then(d => {
+    const lim = d.limits || {};
+    $('#audit-lim').textContent = `limits: ${lim.proposalsPerHour}/hour answered · ${lim.appliesPerDay}/day may change the page`;
+    $('#audit').innerHTML = d.audit.length ? d.audit.map(r => `<div class="aud">
+      <span class="tiny">${esc(String(r.at).slice(0, 16).replace('T', ' '))}</span>
+      <span class="aud-ev">${esc(r.event)}</span>
+      <span class="aud-who">${esc((r.author || '').split('@')[0])}</span>
+      <span class="aud-de">${esc((r.detail || '').slice(0, 120))}</span>
+      <span class="aud-out">${esc(r.outcome || '')}</span></div>`).join('')
+      : '<span class="muted">No activity recorded yet.</span>';
+  }).catch(e => $('#audit').innerHTML = `<span class="err">${esc(e.message)}</span>`);
+}
+async function sendFeedback() {
+  const text = $('#fb-text').value.trim();
+  if (!text) return;
+  const btn = $('#fb-send'); btn.disabled = true;
+  try {
+    const r = await api('/api/bio/feedback', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, kind: $('#fb-kind').value }) });
+    $('#fb-text').value = '';
+    await loadFeedback(); loadAudit();
+    toast('Sent — an agent is picking it up');
+    watchItem(r.id);
+  } catch (e) { toast('Could not send: ' + e.message, 5000); }
+  btn.disabled = false;
+}
+$('#fb-send').onclick = sendFeedback;
+// ⌘/Ctrl+Enter sends from the textarea; plain Enter keeps its newline
+$('#fb-text').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); sendFeedback(); }
+});
+// Follow one item until an agent has done something with it, so the reader sees progress
+// rather than a static row. Gives up after ~10 min; the row itself is always the truth.
+function watchItem(id) {
+  let tries = 0;
+  const tick = async () => {
+    tries++;
+    try {
+      const d = await api('/api/bio/feedback?all=1');
+      const f = (d.feedback || []).find(x => x.id === id);
+      if (!f) return;
+      const moved = f.status === 'done' || f.status === 'question' || f.proposal || f.resolution;
+      if (moved) {
+        await loadFeedback(); loadAudit();
+        if (f.status === 'question') toast('The agent has a question for you', 8000);
+        else if (f.status === 'done') toast('Shipped — reload to see it', 9000);
+        return;
+      }
+    } catch (e) { /* keep watching */ }
+    if (tries < 60) setTimeout(tick, 10000);
+  };
+  setTimeout(tick, 8000);
+}
+
+// ---------- pipeline ----------
+function loadCalibration() {
+  return api('/api/bio/analysis-log?limit=1').then(d => {
+    const c = d.calibration || {};
+    THRESHOLD = c.threshold || 0.65;
+    const p = v => v === null || v === undefined ? '—' : (v * 100).toFixed(0) + '%';
+    $('#calib').innerHTML = [
+      `threshold <b>${c.threshold}</b>`, `breaker <b>${p(c.breakerAt)}</b>`, `analyses <b>${c.n || 0}</b>`,
+      `mean confidence <b>${c.meanConfidence ?? '—'}</b>`, `escalation rate <b>${p(c.escalationRate)}</b>`,
+      `human-judged <b>${c.judged || 0}</b>${c.agreedRate != null ? ` (agreed ${p(c.agreedRate)})` : ''}`,
+    ].map(x => `<span>${x}</span>`).join('');
+    $('#calib-note').innerHTML = (c.n || 0) === 0
+      ? '<span class="muted">No runs yet.</span>'
+      : (c.escalationRate > c.breakerAt ? '<span class="warn">Escalation rate is above the breaker ratio — the threshold may be too conservative.</span>' : '');
+  }).catch(() => { $('#calib').innerHTML = '<span class="muted">Calibration unavailable.</span>'; });
+}
+document.querySelectorAll('[data-run]').forEach(b => b.onclick = async () => {
+  const tier = b.dataset.run;
+  if (tier === 'monthly' && !confirm('Run the monthly Opus portfolio review now?')) return;
+  document.querySelectorAll('[data-run]').forEach(x => x.disabled = true);
+  $('#run-state').textContent = `starting ${tier} run…`;
+  try {
+    const d = await api('/api/bio/pipeline/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tier }) });
+    $('#run-state').textContent = `${tier} run ${d.runId} in progress…`;
+    poll(d.runId);
+  } catch (e) {
+    $('#run-state').textContent = ''; toast('Could not start: ' + e.message, 5000);
+    document.querySelectorAll('[data-run]').forEach(x => x.disabled = false);
+  }
+});
+function poll(runId) {
+  const tick = async () => {
+    try {
+      const r = await api('/api/bio/pipeline/run/' + runId);
+      if (!r.done) return setTimeout(tick, 4000);
+      document.querySelectorAll('[data-run]').forEach(x => x.disabled = false);
+      if (r.error) { $('#run-state').textContent = 'run failed: ' + r.error; return; }
+      const s = r.summary || {};
+      if (s.notify) { $('#run-state').innerHTML = `<span class="warn">${esc(s.notify)}</span>`; toast(s.notify, 9000); return; }
+      $('#run-state').textContent = [`${s.trials || 0} trials`, `${s.registryChanges || 0} registry changes`,
+        `${(s.escalations || {}).rule || 0} rule + ${(s.escalations || {}).confidence || 0} confidence escalations`,
+        `$${(s.cost || 0).toFixed(3)}`].join(' · ') + (s.circuitBreaker ? ' · circuit breaker tripped' : '');
+      if (s.circuitBreaker) toast(s.calibrationNote || 'Circuit breaker tripped', 8000);
+      await Promise.all([load(), loadCalibration()]);
+    } catch (e) { $('#run-state').textContent = 'lost track of the run: ' + e.message; document.querySelectorAll('[data-run]').forEach(x => x.disabled = false); }
+  };
+  setTimeout(tick, 3000);
+}
+
+// ---------- add dialog ----------
+const dlg = $('#add-dlg');
+$('#a-phase').innerHTML = PHASE_ORDER.map(p => `<option${p === 'Phase 2' ? ' selected' : ''}>${p}</option>`).join('');
+$('#add-btn').onclick = () => { $('#s-res').innerHTML = ''; $('#s-form').style.display = 'none'; dlg.showModal(); };
+$('#a-close').onclick = $('#a-cancel').onclick = () => dlg.close();
+$('#a-manual').onclick = e => { e.preventDefault(); $('#s-form').style.display = 'block'; };
+$('#s-q').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); $('#s-go').click(); } });
+$('#s-go').onclick = async () => {
+  const q = $('#s-q').value.trim(); if (!q) return;
+  $('#s-res').innerHTML = '<span class="muted">Searching…</span>';
+  try {
+    const d = await api('/api/bio/search?q=' + encodeURIComponent(q));
+    if (!d.results.length) { $('#s-res').innerHTML = '<span class="muted">No trials found. You can still enter it manually.</span>'; return; }
+    $('#s-res').innerHTML = d.results.map((r, i) => `<div class="res" data-i="${i}">
+      <b>${esc(r.nctId)}</b> ${phasePill(r.phase)} <span class="muted">${esc((r.trialStatus || '').toLowerCase())}</span><br>
+      ${esc(r.trialTitle).slice(0, 160)}<br>
+      <span class="tiny">${esc(r.sponsor)} · ${esc((r.conditions || []).slice(0, 3).join(', '))}</span></div>`).join('');
+    $('#s-res').querySelectorAll('.res').forEach(el => el.onclick = () => {
+      const r = d.results[+el.dataset.i];
+      $('#a-company').value = r.sponsor || '';
+      $('#a-drug').value = (r.interventions || []).find(n => !/placebo/i.test(n)) || '';
+      $('#a-ind').value = (r.conditions || [])[0] || '';
+      $('#a-nct').value = r.nctId || '';
+      if (PHASE_ORDER.includes(r.phase)) $('#a-phase').value = r.phase;
+      $('#s-form').dataset.status = r.trialStatus || '';
+      $('#s-form').dataset.title = r.trialTitle || '';
+      $('#s-form').dataset.enroll = r.enrollment || '';
+      $('#s-form').style.display = 'block';
+      $('#a-company').focus();
+    });
+  } catch (e) { $('#s-res').innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+};
+$('#a-save').onclick = async () => {
+  const f = $('#s-form');
+  const body = {
+    company: $('#a-company').value.trim(), ticker: $('#a-ticker').value.trim().toUpperCase(),
+    public: !!$('#a-ticker').value.trim(), drug: $('#a-drug').value.trim(), drugType: $('#a-type').value,
+    indication: $('#a-ind').value.trim(), phase: $('#a-phase').value, nctId: $('#a-nct').value.trim().toUpperCase(),
+    trialStatus: f.dataset.status || '', trialTitle: f.dataset.title || '', enrollment: f.dataset.enroll || '',
+    notes: $('#a-notes').value.trim(), source: 'web',
+  };
+  if (!body.company || !body.drug) { toast('Company and drug are required'); return; }
+  try {
+    const d = await api('/api/bio/trials', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    dlg.close(); await load(); loadStocks();
+    toast(d.deduped ? 'Already tracked' : 'Added to tracker');
+  } catch (e) { toast('Add failed: ' + e.message, 5000); }
+};
+
+api('/api/public/agentstable').then(d => {
+  const tiers = Object.values(d.tiers || {});
+  $('#tiers').innerHTML = tiers.length ? tiers.map(t => `<div class="tier"><b>${esc(t.label)}</b>${esc(t.winner || t.primary || '—')}</div>`).join('')
+    : '<span class="muted">No tier data.</span>';
+}).catch(() => $('#tiers').innerHTML = '<span class="muted">Agent stable unavailable.</span>');
+
+api('/api/bio/me').then(d => { isOwner = d.owner; if (isOwner) $('#home').style.display = ''; }).catch(() => {});
+
+// settings first so modules are ordered before anything paints
+api('/api/bio/settings').then(s => { appSettings = (s && s.settings && s.settings.sections) ? s.settings : appSettings; applySettings(); })
+  .catch(() => applySettings())
+  .then(() => loadCalibration())
+  .then(() => loadStocks())
+  .then(() => load());
+loadNews();
+loadSummaries();
+loadFeedback();
+loadAudit();
+</script></body></html>

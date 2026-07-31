@@ -9,6 +9,8 @@
 //   steeldust    — your daily driver: the orchestration layer, escalation from workhorse;
 //                  thesis-led summaries, judgment calls, routing
 //   thoroughbred — top-tier reasoning model; hard analysis, escalation from steeldust
+//   secretariat  — the stable "on steroids": top long-horizon model for multi-hour autonomous
+//                  work (named for the horse that won Belmont by 31 lengths)
 //
 //   const tiers = createTiers({
 //     incumbent: t => store.incumbent(t),        // host store: tier → current model id
@@ -18,7 +20,7 @@
 //   tiers.resolve('workhorse')   → { tier, model, price, fundingClass, advisories }
 //   tiers.escalate('workhorse')  → same shape, one tier up (steeldust)
 
-const TIER_ORDER = ['workhorse', 'steeldust', 'thoroughbred'];
+const TIER_ORDER = ['workhorse', 'steeldust', 'thoroughbred', 'secretariat'];
 
 function createTiers({ incumbent, priceOf, costClass, advisories } = {}) {
   if (typeof incumbent !== 'function') throw new Error('createTiers needs { incumbent(tier) → model id }');
@@ -43,7 +45,7 @@ function createTiers({ incumbent, priceOf, costClass, advisories } = {}) {
     if (i < 0) return { error: `unknown tier (use ${TIER_ORDER.join(' | ')})` };
     if (i === TIER_ORDER.length - 1) {
       const top = resolve(fromTier);
-      return { ...top, advisories: [...(top.advisories || []), 'already at the top tier (thoroughbred)'] };
+      return { ...top, advisories: [...(top.advisories || []), 'already at the top tier (secretariat)'] };
     }
     return resolve(TIER_ORDER[i + 1]);
   }
