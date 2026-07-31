@@ -96,6 +96,27 @@ const isBioPath = p => p === BIO_ROUTE || p.startsWith(BIO_ROUTE + '/') || p.sta
 const RANMALI_ROUTE = '/ranmali';
 const RANMALI_GUEST_EMAILS = CFG.ranmaliEmails;
 const isRanmaliPath = p => p === RANMALI_ROUTE || p.startsWith(RANMALI_ROUTE + '/') || p.startsWith('/api/ranmali/');
+// Guest proxy routes (CFG.guestRoutes): a guest listed on a route is served a DIFFERENT
+// dashboard instance entirely — every request forwards to route.target with a shared-secret
+// header pair (X-Proxy-Auth / X-Proxy-User), so one OAuth client + one hostname front N
+// scoped instances. The owner previews an instance at its entry path (/exit returns).
+const GUEST_ROUTES = (CFG.guestRoutes || []).filter(r => r && r.path && r.target);
+const guestRouteOf = em => GUEST_ROUTES.find(r => (r.emails || []).map(normEmail).includes(em));
+// Inbound trust: when CFG.proxyAuthKey is set this instance ONLY answers its fronting proxy.
+const PROXY_AUTH_KEY = String(CFG.proxyAuthKey || '');
+async function proxyToInstance(route, req, res, email) {
+  const url = route.target.replace(/\/$/, '') + req.originalUrl;
+  const headers = { 'x-proxy-auth': String(route.key || ''), 'x-proxy-user': email };
+  if (req.headers['content-type']) headers['content-type'] = req.headers['content-type'];
+  const body = ['GET', 'HEAD'].includes(req.method) ? undefined
+    : (req.headers['content-type'] || '').includes('json') ? JSON.stringify(req.body || {}) : undefined;
+  try {
+    const r = await fetch(url, { method: req.method, headers, body, redirect: 'manual' });
+    res.status(r.status);
+    for (const h of ['content-type', 'cache-control', 'location']) { const v = r.headers.get(h); if (v) res.set(h, v); }
+    res.send(Buffer.from(await r.arrayBuffer()));
+  } catch (e) { res.status(502).send('upstream instance unreachable'); }
+}
 // Google delivers the SAME account under several spellings: googlemail.com is an alias of
 // gmail.com (it is what some regions/older phones return), dots in a gmail local part are
 // ignored, and +tags are ignored. An exact string compare therefore locks out a legitimate
@@ -181,7 +202,7 @@ app.get('/auth/callback', asyncRoute(async (req, res) => {
   const rawEmail = (ticket.getPayload().email || '').toLowerCase();
   const email = normEmail(rawEmail);
   const isOwner = email === ALLOWED_EMAIL_N;
-  if (!isOwner && !GAME_GUEST_N.includes(email) && !BIO_GUEST_N.includes(email) && !RANMALI_GUEST_N.includes(email)) return res.status(403).send(`Not authorized: ${rawEmail}`);
+  if (!isOwner && !emailAllowed(email) && !GAME_GUEST_N.includes(email) && !BIO_GUEST_N.includes(email) && !RANMALI_GUEST_N.includes(email) && !guestRouteOf(email)) return res.status(403).send(`Not authorized: ${rawEmail}`);
   const secure = (req.headers['x-forwarded-proto'] === 'https') ? '; Secure' : '';
   res.set('Set-Cookie', `dash_session=${encodeURIComponent(signSession(email))}; HttpOnly${secure}; SameSite=Lax; Max-Age=${30 * 24 * 3600}; Path=/${cookieDomain(req)}`);
   const next = safeNext(String(req.query.state || '').startsWith('next:') ? String(req.query.state).slice(5) : '');
@@ -189,6 +210,7 @@ app.get('/auth/callback', asyncRoute(async (req, res) => {
   const nextPath = next.split('?')[0];
   if (BIO_GUEST_N.includes(email)) return res.redirect(isBioPath(nextPath) ? next : BIO_ROUTE);
   if (RANMALI_GUEST_N.includes(email)) return res.redirect(isRanmaliPath(nextPath) ? next : RANMALI_ROUTE);
+  if (guestRouteOf(email)) return res.redirect(next || '/'); // proxied-instance guest — gate routes every path
   res.redirect(isGamePath(nextPath) ? next : '/junglefarm/');
 }));
 app.get('/auth/logout', (req, res) => {
@@ -241,6 +263,11 @@ const PUBLIC_GETS = new Set([
 // reachable — merely POSSESSING the OAuth client creds (the Mac holds them for the
 // Gmail-consent relay) must not lock down the open LAN tier.
 app.use((req, res, next) => {
+  // Inbound proxy trust: this instance sits behind a fronting dashboard and answers ONLY it.
+  if (PROXY_AUTH_KEY) {
+    if (req.headers['x-proxy-auth'] === PROXY_AUTH_KEY) return next();
+    return res.status(403).send('proxy only');
+  }
   // one canonical host: www → apex, so the session cookie has a single home
   const reqHost = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(':')[0];
   if (BASE_HOST && reqHost === 'www.' + BASE_HOST) return res.redirect(301, `https://${BASE_HOST}${req.originalUrl}`);
@@ -257,7 +284,19 @@ app.use((req, res, next) => {
     const sess = verifySession(cookieOf(req, 'dash_session'));
     if (sess) {
       const email = normEmail(sess.email);
-      if (emailAllowed(email)) return next();
+      if (emailAllowed(email)) {
+        // owner preview of a proxied instance: entry path sets a view cookie, /exit clears
+        const vr = GUEST_ROUTES.find(r => r.path === req.path || req.path === r.path + '/exit');
+        if (vr) {
+          const on = req.path === vr.path;
+          res.set('Set-Cookie', `dash_view=${on ? encodeURIComponent(vr.path) : ''}; HttpOnly; SameSite=Lax; Path=/${on ? '' : '; Max-Age=0'}`);
+          return res.redirect('/');
+        }
+        const vp = cookieOf(req, 'dash_view');
+        const rv = vp && GUEST_ROUTES.find(r => r.path === vp);
+        if (rv) return proxyToInstance(rv, req, res, email);
+        return next();
+      }
       // game guests: /junglefarm only — anything else bounces back to the game
       if (GAME_GUEST_N.includes(email)) {
         if (isGamePath(req.path)) return next();
@@ -275,6 +314,12 @@ app.use((req, res, next) => {
         if (isRanmaliPath(req.path)) return next();
         if (req.path.startsWith('/api/')) return res.status(403).json({ error: 'not authorized for this API' });
         return res.redirect(RANMALI_ROUTE);
+      }
+      // proxied-instance guests: EVERY request is served by their instance
+      const gr = guestRouteOf(email);
+      if (gr) {
+        if (req.path === gr.path) return res.redirect('/');
+        return proxyToInstance(gr, req, res, email);
       }
       // valid signature but email no longer on any list (e.g. guest removed) → re-login
     }

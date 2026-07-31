@@ -83,6 +83,16 @@ module.exports = {
   ranmaliEmails: (() => { const v = pick('ranmaliEmails', 'RANMALI_EMAILS', '');
     return (Array.isArray(v) ? v : String(v).split(','))
       .map(s => String(s).trim().toLowerCase()).filter(Boolean); })(),
+  // Reverse-proxy instance routing (both halves generic; values live in env/config-local):
+  // guestRoutes (outbound): [{path:'/x', target:'https://…', emails:[…], key:'secret'}] —
+  // signed-in guests on a route are served that other dashboard instance for EVERY request;
+  // the owner previews it at its entry path. One OAuth client fronts N scoped instances.
+  guestRoutes: (() => { const v = pick('guestRoutes', 'DASHBOARD_GUEST_ROUTES', null);
+    if (Array.isArray(v)) return v;
+    try { const a = JSON.parse(v); return Array.isArray(a) ? a : []; } catch (e) { return []; } })(),
+  // proxyAuthKey (inbound): when set, EVERY request must carry X-Proxy-Auth: <key>
+  // (identity arrives as X-Proxy-User) — the instance only answers its fronting proxy.
+  proxyAuthKey: pick('proxyAuthKey', 'DASHBOARD_PROXY_AUTH_KEY', ''),
   // Google AI Studio FREE tier (rate-limited, may train on data → non-personal modules only)
   geminiFreeKey: pick('geminiFreeKey', 'GEMINI_API_KEY', ''),
   geminiFreeModel: pick('geminiFreeModel', 'GEMINI_FREE_MODEL', 'gemini-2.5-flash'),
