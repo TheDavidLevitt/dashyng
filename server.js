@@ -842,16 +842,79 @@ function fireListHook(event, task) {
   } catch (e) {}
 }
 
+// ---------- Recurring tasks ----------
+// Rule token in Tags (comma-free so the comma-separated Tags column survives):
+//   recur=<days>/<everyNweeks>[+<days>/<n>…]@<anchorDate>
+// days = dot-joined mo|tu|we|th|fr|sa|su; the anchor fixes week parity for n>1
+// ("alternating thursdays" = th/2@2026-07-31). Checking a recurring task off does NOT
+// close it — the row stays open and Due advances to the next occurrence.
+const RECUR_DAYS = ['su', 'mo', 'tu', 'we', 'th', 'fr', 'sa'];
+function parseRecurTag(tags) {
+  const m = String(tags || '').match(/(?:^|,)\s*recur=([^,\s]+)/i);
+  if (!m) return null;
+  const [body, anchor] = m[1].split('@');
+  const parts = String(body || '').split('+').map(p => {
+    const [ds, n] = p.split('/');
+    const days = String(ds || '').split('.').map(d => RECUR_DAYS.indexOf(d.slice(0, 2).toLowerCase())).filter(i => i >= 0);
+    return days.length ? { days, n: Math.max(1, parseInt(n, 10) || 1) } : null;
+  }).filter(Boolean);
+  return parts.length ? { parts, anchor: /^\d{4}-\d{2}-\d{2}$/.test(anchor || '') ? anchor : null } : null;
+}
+function nextRecurDate(rule, fromIso) {
+  const from = new Date((fromIso || today()) + 'T12:00:00Z');
+  if (isNaN(from)) return '';
+  const weekStart = d => { const x = new Date(d); x.setUTCDate(x.getUTCDate() - ((x.getUTCDay() + 6) % 7)); x.setUTCHours(0, 0, 0, 0); return x; };
+  const anchorWs = weekStart(new Date((rule.anchor || fromIso || today()) + 'T12:00:00Z'));
+  for (let i = 1; i <= 120; i++) { // horizon: n≤17 weeks always hits within 120 days
+    const d = new Date(from); d.setUTCDate(d.getUTCDate() + i);
+    for (const p of rule.parts) {
+      if (!p.days.includes(d.getUTCDay())) continue;
+      const weeks = Math.round((weekStart(d) - anchorWs) / (7 * 864e5));
+      if (((weeks % p.n) + p.n) % p.n === 0) return d.toISOString().slice(0, 10);
+    }
+  }
+  return '';
+}
+// Capture-time schedule brackets: "water plants [Tuesday and alternating thursdays]".
+// Deterministic grammar (day names, daily, alternating/every other, every N weeks) —
+// an unrecognized bracket is left in the text untouched rather than guessed at.
+function parseScheduleBracket(text) {
+  const m = String(text || '').match(/\s*\[([^\]]+)\]\s*$/);
+  if (!m) return null;
+  const s = m[1].toLowerCase();
+  const DAY = { sun: 0, mon: 1, tue: 2, tues: 2, wed: 3, wednes: 3, thu: 4, thur: 4, thurs: 4, fri: 5, sat: 6, satur: 6 };
+  const parts = [];
+  if (/\bdaily\b|\bevery ?day\b/.test(s)) parts.push({ days: [0, 1, 2, 3, 4, 5, 6], n: 1 });
+  else for (const clause of s.split(/\band\b|,|;/)) {
+    const wk = clause.match(/every\s+(\d+)\s*(?:weeks?|wks?)/);
+    const n = /\b(alternating|every\s+other|biweekly|fortnightly)\b/.test(clause) ? 2 : (wk ? Math.max(1, parseInt(wk[1], 10)) : 1);
+    const days = [...clause.matchAll(/\b(sun|mon|tues?|wed(?:nes)?|thur?s?|fri|satur?)(?:day)?s?\b/g)]
+      .map(d => DAY[d[1]]).filter(x => x !== undefined);
+    if (days.length) parts.push({ days: [...new Set(days)], n });
+  }
+  if (!parts.length) return null;
+  const token = parts.map(p => p.days.map(i => RECUR_DAYS[i]).join('.') + '/' + p.n).join('+') + '@' + today();
+  return { stripped: String(text).replace(m[0], '').trim() || String(text).trim(), token };
+}
+
 app.post('/api/tasks', asyncRoute(async (req, res) => {
   const { task, quadrant, due, notes, scope, owner, tags, source } = req.body || {};
   if (!task || !quadrant) return res.status(400).json({ error: 'task and quadrant are required' });
+  // schedule bracket → recur tag + first-occurrence Due; unparsed brackets pass through
+  let taskText = task, taskTags = tags || '', taskDue = due || '';
+  const sched = parseScheduleBracket(task);
+  if (sched) {
+    taskText = sched.stripped;
+    taskTags = (taskTags ? taskTags + ',' : '') + 'recur=' + sched.token;
+    if (!taskDue) taskDue = nextRecurDate(parseRecurTag('recur=' + sched.token), today());
+  }
   const { headers, headerRow, rows } = await readTodoTab();
   const id = crypto.randomUUID();
   const rowObj = {
-    Task: task, Quadrant: quadrant, Scope: scope || 'Personal', Owner: owner || CFG.owner,
-    Due: due || '', Status: 'Open', Created: today(), Notes: notes || '',
+    Task: taskText, Quadrant: quadrant, Scope: scope || 'Personal', Owner: owner || CFG.owner,
+    Due: taskDue, Status: 'Open', Created: today(), Notes: notes || '',
     // agent callers (journal-read) pass source:'code'; browser clicks default to 'web'
-    Source: source || WRITE_SOURCE, Updated: nowIso(), Tags: tags || '', ID: id,
+    Source: source || WRITE_SOURCE, Updated: nowIso(), Tags: taskTags, ID: id,
     Order: req.body.order || '', Parent: req.body.parent || '',
   };
   const row = headers.map(h => rowObj[h] !== undefined ? rowObj[h] : '');
@@ -882,6 +945,16 @@ app.patch('/api/tasks/:id', asyncRoute(async (req, res) => {
 }));
 
 app.post('/api/tasks/:id/done', asyncRoute(async (req, res) => {
+  // recurring task: the check means "done for this occurrence" — stay open, advance Due
+  const { rows } = await readTodoTab();
+  const cur = rows.find(r => r.ID === req.params.id);
+  const rule = cur && parseRecurTag(cur.Tags);
+  if (rule) {
+    const next = nextRecurDate(rule, today());
+    const updated = await updateTaskById(req.params.id, { Due: next });
+    fireListHook('recurred', updated);
+    return res.json({ ok: true, task: updated, recurred: true, nextDue: next });
+  }
   const updated = await updateTaskById(req.params.id, { Status: 'done' });
   if (!updated) return res.status(404).json({ error: 'task not found: ' + req.params.id });
   fireListHook('done', updated);

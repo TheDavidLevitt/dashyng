@@ -1108,7 +1108,7 @@ function taskHtml(t, opts) {
   const star = opts.mon ? `<button class="q-btn sal-toggle${sal ? ' on' : ''}" title="${sal ? 'High salience — changes push to your journal' : 'Mark high-salience (push changes to your journal)'}">${sal ? '★' : '☆'}</button>` : '';
   return `<div class="q-task ${opts.child ? 'child' : ''}${sal ? ' q-salient' : ''}" draggable="true" data-id="${esc(t.ID)}" data-q="${esc(normQ(t.Quadrant))}" data-parent="${esc(opts.child ? t.Parent : '')}">
     ${toggle}${bullet}
-    <span class="q-body">${taskBodyHtml(t.Task)}${cnt}${srcBadge(t.Source)}${dueHtml(t)}${note}</span>
+    <span class="q-body">${taskBodyHtml(t.Task)}${cnt}${srcBadge(t.Source)}${dueHtml(t)}${(() => { const rc = recurOf(t); return rc ? ` <span class="q-recur" title="${esc(explainRecur(rc))}">🔁</span>` : ''; })()}${note}</span>
     ${star}
     <button class="q-btn move" title="Move / group">⇄</button>
     <button class="q-btn done" title="Mark done">✓</button>
@@ -1116,6 +1116,42 @@ function taskHtml(t, opts) {
 }
 // high salience = a `salient` tag or a leading "!" in the task text (mirrors the server watcher)
 const isSalientClient = t => /(^|,)\s*(salient|high)\s*($|,)/i.test(String(t.Tags || '')) || /^\s*!/.test(String(t.Task || ''));
+
+// —— recurring tasks: client mirror of the server's recur= grammar ——
+// Tags carry recur=<days>/<everyNweeks>[+…]@<anchor>; checking off advances Due instead of closing.
+const RECUR_DAYS = ['su', 'mo', 'tu', 'we', 'th', 'fr', 'sa'];
+const RECUR_LABELS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+function recurOf(t) {
+  const m = String(t.Tags || '').match(/(?:^|,)\s*recur=([^,\s]+)/i);
+  if (!m) return null;
+  const [body, anchor] = m[1].split('@');
+  const parts = String(body || '').split('+').map(p => {
+    const [ds, n] = p.split('/');
+    const days = String(ds || '').split('.').map(d => RECUR_DAYS.indexOf(d.slice(0, 2).toLowerCase())).filter(i => i >= 0);
+    return days.length ? { days, n: Math.max(1, parseInt(n, 10) || 1) } : null;
+  }).filter(Boolean);
+  return parts.length ? { parts, anchor: /^\d{4}-\d{2}-\d{2}$/.test(anchor || '') ? anchor : null } : null;
+}
+function explainRecur(rule) {
+  return rule.parts.map(p => {
+    const names = p.days.slice().sort((a, b) => ((a + 6) % 7) - ((b + 6) % 7)).map(i => RECUR_LABELS[i]).join(', ');
+    return (p.n === 1 ? 'every ' : p.n === 2 ? 'every other ' : `every ${p.n} weeks: `) + names;
+  }).join(' + ') + (rule.anchor ? ` (from ${rule.anchor})` : '');
+}
+function nextRecurClient(rule, fromIso) {
+  const from = new Date((fromIso || new Date().toISOString().slice(0, 10)) + 'T12:00:00Z');
+  const weekStart = d => { const x = new Date(d); x.setUTCDate(x.getUTCDate() - ((x.getUTCDay() + 6) % 7)); x.setUTCHours(0, 0, 0, 0); return x; };
+  const anchorWs = weekStart(new Date((rule.anchor || new Date().toISOString().slice(0, 10)) + 'T12:00:00Z'));
+  for (let i = 1; i <= 120; i++) {
+    const d = new Date(from); d.setUTCDate(d.getUTCDate() + i);
+    for (const p of rule.parts) {
+      if (!p.days.includes(d.getUTCDay())) continue;
+      const weeks = Math.round((weekStart(d) - anchorWs) / (7 * 864e5));
+      if (((weeks % p.n) + p.n) % p.n === 0) return d.toISOString().slice(0, 10);
+    }
+  }
+  return '';
+}
 
 // External async completions (done-handler's delayed re-render, journal-read finishing in
 // the background) must not clobber an inline task/list-name edit the user is mid-typing —
@@ -1308,7 +1344,7 @@ function renderSalient() { /* due-soon section removed 2026-06-15 (kept as no-op
 async function patchTask(id, body, path) {
   const r = await api(`/api/tasks/${encodeURIComponent(id)}${path || ''}`, { method: path ? 'POST' : 'PATCH', body: JSON.stringify(body || {}) });
   if (r.error) { showErr(r.error); return false; }
-  return true;
+  return r; // truthy response object — done-handler reads r.recurred
 }
 
 function attachHandlers() {
@@ -1319,7 +1355,13 @@ function attachHandlers() {
     const el = btn.closest('.q-task'); const id = el.dataset.id;
     el.classList.add('saving');
     await withTaskHistory('task done', async () => {
-      if (await patchTask(id, null, '/done')) {
+      const r = await patchTask(id, null, '/done');
+      if (r && r.recurred) { // recurring: row stays open, Due advances to next occurrence
+        const t = allTasks.find(t => t.ID === id);
+        if (t) { t.Due = r.nextDue || t.Due; t.Updated = new Date().toISOString(); }
+        el.classList.remove('saving');
+        renderMatrixSafe();
+      } else if (r) {
         el.classList.add('fading'); setTimeout(() => { el.remove(); }, 320);
         const t = allTasks.find(t => t.ID === id); if (t) { t.Status = 'done'; t.Updated = new Date().toISOString(); }
         setTimeout(renderMatrixSafe, 350);
@@ -1364,15 +1406,54 @@ function attachHandlers() {
     const roots = rootIdsIn(q), idx = roots.indexOf(id);
     const row = document.createElement('div');
     row.className = 'move-row';
-    let html = sortedQuads().map((l, i) => ({ l, i })).filter(x => x.l.key !== q)
-      .map(x => `<button data-to="${x.l.key}">${esc(listTitle(x.l, x.i).slice(0, 18))}</button>`).join('');
+    // "move to <list>" shortcuts removed 2026-07-31 — drag & drop covers moves, and the
+    // button row was drowning in list names. 🔁 opens the repeat editor instead.
+    const t0 = allTasks.find(x => x.ID === id);
+    const rc0 = t0 && recurOf(t0);
+    let html = `<button data-rc="1"${rc0 ? ' style="color:var(--accent)"' : ''}>🔁 repeat${rc0 ? ' ✓' : ''}</button>`;
     html += `<button data-ord="up">↑</button><button data-ord="down">↓</button>`;
     if (!isChild && idx > 0) html += `<button data-grp="indent">→ group under above</button>`;
     if (isChild) html += `<button data-grp="outdent">← ungroup</button>`;
     html += `<button data-rm="1" style="color:var(--red)">✕ remove</button>`;
     el.after(row);
     row.innerHTML = html;
-    row.querySelectorAll('[data-to]').forEach(b => b.onclick = () => withTaskHistory('move task', () => moveTask(id, b.dataset.to)));
+    row.querySelector('[data-rc]').onclick = () => {
+      const t = allTasks.find(x => x.ID === id); if (!t) return;
+      const ex = row.nextElementSibling;
+      if (ex && ex.classList.contains('recur-row')) { ex.remove(); return; }
+      const cur = recurOf(t), p0 = cur ? cur.parts[0] : null;
+      const rr = document.createElement('div');
+      rr.className = 'move-row recur-row';
+      rr.innerHTML = [1, 2, 3, 4, 5, 6, 0].map(i =>
+        `<label style="display:inline-flex;align-items:center;gap:2px;font-size:10px;cursor:pointer"><input type="checkbox" data-d="${i}"${p0 && p0.days.includes(i) ? ' checked' : ''}>${RECUR_LABELS[i].slice(0, 2)}</label>`).join('')
+        + ` <span class="tiny muted">every</span> <input type="number" data-n min="1" max="17" value="${p0 ? p0.n : 1}" style="width:36px;background:var(--bg2);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:11px"> <span class="tiny muted">wk</span>`
+        + ` <button data-exp>explain</button><button data-save style="color:var(--green)">save</button>${cur ? '<button data-clear style="color:var(--red)">clear</button>' : ''}`
+        + ` <span class="tiny muted" data-msg style="flex-basis:100%">${cur ? esc(explainRecur(cur)) : ''}</span>`;
+      row.after(rr);
+      const readRule = () => {
+        const days = [...rr.querySelectorAll('[data-d]')].filter(c => c.checked).map(c => +c.dataset.d);
+        const n = Math.max(1, Math.min(17, +rr.querySelector('[data-n]').value || 1));
+        return days.length ? { parts: [{ days, n }], anchor: (cur && cur.anchor) || new Date().toISOString().slice(0, 10) } : null;
+      };
+      rr.querySelector('[data-exp]').onclick = () => {
+        const r = readRule();
+        rr.querySelector('[data-msg]').textContent = r ? `${explainRecur(r)} — next: ${nextRecurClient(r)}` : 'pick at least one day';
+      };
+      rr.querySelector('[data-save]').onclick = () => withTaskHistory('set repeat', async () => {
+        const r = readRule();
+        if (!r) { rr.querySelector('[data-msg]').textContent = 'pick at least one day'; return; }
+        const token = r.parts.map(p => p.days.map(i => RECUR_DAYS[i]).join('.') + '/' + p.n).join('+') + '@' + r.anchor;
+        const tags = String(t.Tags || '').split(',').map(s => s.trim()).filter(s => s && !/^recur=/i.test(s));
+        tags.push('recur=' + token);
+        const due = nextRecurClient(r);
+        if (await patchTask(id, { Tags: tags.join(','), Due: due })) { t.Tags = tags.join(','); t.Due = due; renderMatrix(); }
+      });
+      const clearBtn = rr.querySelector('[data-clear]');
+      if (clearBtn) clearBtn.onclick = () => withTaskHistory('clear repeat', async () => {
+        const tags = String(t.Tags || '').split(',').map(s => s.trim()).filter(s => s && !/^recur=/i.test(s)).join(',');
+        if (await patchTask(id, { Tags: tags })) { t.Tags = tags; renderMatrix(); }
+      });
+    };
     row.querySelectorAll('[data-ord]').forEach(b => b.onclick = () => withTaskHistory('reorder task', () => nudge(id, b.dataset.ord === 'up' ? -1 : 1)));
     row.querySelectorAll('[data-grp]').forEach(b => b.onclick = () => withTaskHistory(b.dataset.grp === 'indent' ? 'group task' : 'ungroup task', () => b.dataset.grp === 'indent' ? indent(id) : outdent(id)));
     row.querySelectorAll('[data-rm]').forEach(b => b.onclick = () => withTaskHistory('remove task', async () => {
