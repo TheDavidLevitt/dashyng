@@ -104,7 +104,7 @@ const GUEST_ROUTES = (CFG.guestRoutes || []).filter(r => r && r.path && r.target
 const guestRouteOf = em => GUEST_ROUTES.find(r => (r.emails || []).map(normEmail).includes(em));
 // Inbound trust: when CFG.proxyAuthKey is set this instance ONLY answers its fronting proxy.
 const PROXY_AUTH_KEY = String(CFG.proxyAuthKey || '');
-async function proxyToInstance(route, req, res, email) {
+async function proxyToInstance(route, req, res, email, preview) {
   const url = route.target.replace(/\/$/, '') + req.originalUrl;
   const headers = { 'x-proxy-auth': String(route.key || ''), 'x-proxy-user': email };
   if (req.headers['content-type']) headers['content-type'] = req.headers['content-type'];
@@ -114,7 +114,16 @@ async function proxyToInstance(route, req, res, email) {
     const r = await fetch(url, { method: req.method, headers, body, redirect: 'manual' });
     res.status(r.status);
     for (const h of ['content-type', 'cache-control', 'location']) { const v = r.headers.get(h); if (v) res.set(h, v); }
-    res.send(Buffer.from(await r.arrayBuffer()));
+    const buf = Buffer.from(await r.arrayBuffer());
+    // OWNER PREVIEW: the view cookie is sticky (assets and APIs must follow the page), so
+    // an unmarked preview looks exactly like "my dashboard was replaced". Every previewed
+    // page carries its own way out. 2026-07-31: this bit the owner within the hour.
+    if (preview && (r.headers.get('content-type') || '').includes('text/html')) {
+      return res.send(buf.toString('utf8') + `<div style="position:fixed;left:0;right:0;bottom:0;z-index:99999;background:#b58900;color:#111;
+        font:600 12px/1.6 system-ui,sans-serif;text-align:center;padding:5px">👁 previewing ${esc(route.path)} — this is not your dashboard
+        <a href="${esc(route.path)}/exit" style="color:#111;margin-left:10px;text-decoration:underline">exit preview</a></div>`);
+    }
+    res.send(buf);
   } catch (e) { res.status(502).send('upstream instance unreachable'); }
 }
 // Google delivers the SAME account under several spellings: googlemail.com is an alias of
@@ -289,13 +298,22 @@ app.use((req, res, next) => {
         const vr = GUEST_ROUTES.find(r => r.path === req.path || req.path === r.path + '/exit');
         if (vr) {
           const on = req.path === vr.path;
-          res.set('Set-Cookie', `dash_view=${on ? encodeURIComponent(vr.path) : ''}; HttpOnly; SameSite=Lax; Path=/${on ? '' : '; Max-Age=0'}`);
+          // preview EXPIRES on its own (30 min): a forgotten cookie must never leave the
+          // owner staring at someone else's dashboard tomorrow morning
+          res.set('Set-Cookie', `dash_view=${on ? encodeURIComponent(vr.path) : ''}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${on ? 1800 : 0}`);
           return res.redirect('/');
         }
         const vp = cookieOf(req, 'dash_view');
         const rv = vp && GUEST_ROUTES.find(r => r.path === vp);
-        if (rv) return proxyToInstance(rv, req, res, email);
+        if (rv) return proxyToInstance(rv, req, res, email, true);
         return next();
+      }
+      // Proxied-instance guests: a whole dashboard of their own outranks the single-page
+      // carve-outs below — but someone who is ALSO a game guest keeps /junglefarm here.
+      const gr = guestRouteOf(email);
+      if (gr && !(GAME_GUEST_N.includes(email) && isGamePath(req.path))) {
+        if (req.path === gr.path) return res.redirect('/');
+        return proxyToInstance(gr, req, res, email);
       }
       // game guests: /junglefarm only — anything else bounces back to the game
       if (GAME_GUEST_N.includes(email)) {
@@ -314,12 +332,6 @@ app.use((req, res, next) => {
         if (isRanmaliPath(req.path)) return next();
         if (req.path.startsWith('/api/')) return res.status(403).json({ error: 'not authorized for this API' });
         return res.redirect(RANMALI_ROUTE);
-      }
-      // proxied-instance guests: EVERY request is served by their instance
-      const gr = guestRouteOf(email);
-      if (gr) {
-        if (req.path === gr.path) return res.redirect('/');
-        return proxyToInstance(gr, req, res, email);
       }
       // valid signature but email no longer on any list (e.g. guest removed) → re-login
     }
