@@ -3179,7 +3179,8 @@ If the request is not about layout/visibility/naming of sections or lists, outpu
 Request (may be in French): ${JSON.stringify(String(suggestion).slice(0, 400))}`;
   let raw = '';
   // gemini free tier first (this is a layout request, nothing personal), then the chain
-  try { raw = (await require('./providers').generateText(prompt, 'gemini-free')).text; } catch (e) { return { applied: false, reason: 'no LLM: ' + e.message.slice(0, 120) }; }
+  const pref = CFG.geminiFreeKey ? 'gemini-free' : (process.env.OPENAI_API_KEY ? 'openai' : undefined);
+  try { raw = (await require('./providers').generateText(prompt, pref)).text; } catch (e) { return { applied: false, reason: 'no LLM: ' + e.message.slice(0, 120) }; }
   const m = String(raw || '').match(/\{[\s\S]*\}/);
   const patch = m && ciSanitizePatch(m[0]);
   if (!patch) return { applied: false, reason: 'not a layout change' };
