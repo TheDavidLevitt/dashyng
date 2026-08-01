@@ -28,7 +28,7 @@
   --qmbg: #f5f3ff; --qmbd: #ddd6fe; --qmh: #5b21b6;
 }
 * { box-sizing: border-box; }
-body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; font-size: 14px;
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; font-size: calc(14px * var(--fontscale, 1));
   line-height: 1.45; color: var(--text); background: var(--bg); margin: 0; padding: 8px 10px 40px;
   max-width: 1000px; margin-inline: auto; }
 h1 { font-size: 19px; margin: 0; font-weight: 650; }
@@ -830,6 +830,10 @@ function cfgToggle() {
     <div class="cfg-row"><button id="cfg-qadd">＋ add list</button></div>
     ${appSettings.webhookSecret ? `<div class="cfg-row tiny muted" style="flex-wrap:wrap">Webhook signing secret: <code style="user-select:all;word-break:break-all">${esc(appSettings.webhookSecret)}</code>
       <span style="flex-basis:100%">Receivers verify <code>X-Dashboard-Signature: sha256=HMAC_SHA256(secret, raw&nbsp;body)</code>. Failed deliveries retry on backoff for ~8h.</span></div>` : ''}
+    <div class="cfg-head">Text size</div>
+    <div class="cfg-row"><select id="cfg-fontscale">${[['0.9', 'smaller'], ['1', 'normal'], ['1.1', 'larger'], ['1.2', 'largest']]
+      .map(([v, l]) => `<option value="${v}" ${String(appSettings.fontScale || '1') === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
+      <span class="tiny muted">scales the whole page</span></div>
     <div class="cfg-head">Calendar look-ahead — day boxes under Today</div>
     <div class="cfg-row"><select id="cfg-lookahead">${[['', 'off'], ['week', 'current week'], ['2weeks', '2 weeks'], ['5days', '+5 days'], ['7days', '+7 days']]
       .map(([v, l]) => `<option value="${v}" ${(appSettings.calendarLookahead || '') === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
@@ -930,10 +934,11 @@ function cfgToggle() {
       const v = row.querySelector('.cfg-cid').value.trim();
       return v ? { [v.startsWith('http') ? 'url' : 'id']: v, on: row.querySelector('.cfg-con').checked } : null;
     }).filter(Boolean);
-    const calendarLookahead = p.querySelector('#cfg-lookahead') ? p.querySelector('#cfg-lookahead').value : (appSettings.calendarLookahead || '');
+    const fontScale = p.querySelector('#cfg-fontscale') ? p.querySelector('#cfg-fontscale').value : (appSettings.fontScale || '1');
+  const calendarLookahead = p.querySelector('#cfg-lookahead') ? p.querySelector('#cfg-lookahead').value : (appSettings.calendarLookahead || '');
     const cycDate = ($('cfg-cyc-date') || {}).value || '';
     const cycle = cycDate ? { lastStart: cycDate, length: +($('cfg-cyc-len') || {}).value || 28 } : null;
-    api('/api/settings', { method: 'POST', body: JSON.stringify({ settings: { sections, quadrants, calendars, calendarLookahead, cycle } }) })
+    api('/api/settings', { method: 'POST', body: JSON.stringify({ settings: { sections, quadrants, calendars, calendarLookahead, fontScale, cycle } }) })
       .then(r => { if (r && r.error) { toast(r.error); return; } location.reload(); })
       .catch(e => toast(e.message));
   };
@@ -3728,8 +3733,10 @@ api('/api/plugins').then(({ plugins }) => {
   }
   applySettings(); // settings may already be in — re-apply so plugin order/visibility land
 }).catch(() => {});
+const applyFontScale = () => { const v = parseFloat(appSettings.fontScale); document.documentElement.style.setProperty('--fontscale', (v >= 0.8 && v <= 1.4) ? v : 1); };
 api('/api/settings').then(s => {
   appSettings = (s && s.settings) || appSettings;
+  applyFontScale();
   settingsMeta = { calendarDefault: (s && s.calendarDefault) || '', serviceAccount: (s && s.serviceAccount) || '' };
   userName = (s && s.userName) || ''; homeLocation = (s && s.homeLocation) || '';
   renderHeadline();

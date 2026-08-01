@@ -629,7 +629,10 @@ if (HAS_CLAUDE) fs.watchFile(CLAUDE_TOK_FILE, { interval: 60000 }, (cur, prev) =
 // (key) — tool-needing agent features (WebFetch/WebSearch summaries, media find) are
 // CLI-only. With NEITHER, single-tier instances refuse cleanly instead of queueing forever;
 // multi-tier (sheets store) instances still queue for a CLI-equipped tier to drain.
-const HAS_LLM = HAS_CLAUDE || !!process.env.ANTHROPIC_API_KEY;
+// a configured llm-relay counts as an inline LLM: runClaude forwards to the subscription
+// CLI on another tier, so nothing here needs the Mac RPC queue (whose drainer only serves
+// the owner's own sheet — a guest instance queueing there would wait forever).
+const HAS_LLM = HAS_CLAUDE || !!(CFG.llmRelayUrl && CFG.llmRelayKey) || !!process.env.ANTHROPIC_API_KEY;
 // Gmail evidence (flight/train/hotel confirmations) for location tracking: needs a
 // one-time offline-consent OAuth grant (separate from the Sign-in-with-Google session
 // login above — that one only proves identity, it isn't scoped for background API calls
@@ -1818,6 +1821,10 @@ app.post('/api/settings', asyncRoute(async (req, res) => {
     .map(c => ({ type: c.url ? 'ical' : 'gcal', id: String(c.id || '').slice(0, 120), url: String(c.url || '').slice(0, 300), on: c.on !== false }));
   if (typeof s.calendarLookahead === 'string' && ['', 'week', '2weeks', '5days', '7days'].includes(s.calendarLookahead))
     next.calendarLookahead = s.calendarLookahead;
+  if (s.fontScale !== undefined) { // page-wide text scale (⚙ Text size)
+    const v = parseFloat(s.fontScale);
+    if (v >= 0.8 && v <= 1.4) next.fontScale = String(v); else delete next.fontScale;
+  }
   if (s.newsSubtitles && typeof s.newsSubtitles === 'object') { // ✨ Describe regenerates the section blurbs
     next.newsSubtitles = {};
     for (const [k, v] of Object.entries(s.newsSubtitles))
@@ -2847,13 +2854,15 @@ async function buildNews() {
   const DEEPDIVE_SRC = /lesswrong|works in progress|karpathy|noahpinion|stratechery|new yorker|the atlantic|\batlantic\b|aeon|quanta|asterisk|wait but why|astral codex/i;
   // Section 3 (books & film, extra-long): culture pieces
   const BOOKFILM = /\b(novel|memoir|new book|book review|short story|film festival|new film|new movie|box office|biopic|documentary|movie review|screen adaptation|best films|best books)\b/i;
-  // Owner-specified tiering (hard-coded 2026-06-15): T1 Economist · T2 AJ+mainstream ·
-  // T3 Asia Times (wildcard) + X posters · T4 the rest. Used to ORDER the News section.
+  // Source tiering ORDERS the News section. The map is the OWNER'S taste, so it lives in
+  // config (newsTiers: [{match: <regex>, tier: 1-4}], config-local/env) — hard-coding a
+  // person's subscriptions here once leaked them to every guest instance and the public
+  // stub. No config = everything tier 4 (pure salience order); tweets stay tier 3.
+  const tierRules = (CFG.newsTiers || []).map(r => { try { return { re: new RegExp(r.match, 'i'), tier: Math.min(4, Math.max(1, +r.tier || 4)) }; } catch (e) { return null; } }).filter(Boolean);
   const sourceTier = it => {
-    const s = (it.source || '').toLowerCase();
-    if (/economist/.test(s)) return 1; // capped to top 4 below; overflow → T4
-    if (/jazeera|nyt|new york times|reuters|associated press|\bap\b|\bbbc\b|guardian|fox news|washington post|wapo|\bnpr\b|politico|the hill|\bcnn\b|cnbc|bloomberg|al jazeera/.test(s)) return 2;
-    if (/asia times/.test(s) || it.tweet || /^@/.test(String(it.source || ''))) return 3;
+    const s = String(it.source || '');
+    for (const r of tierRules) if (r.re.test(s)) return r.tier;
+    if (it.tweet || /^@/.test(s)) return 3;
     return 4;
   };
 
@@ -4556,6 +4565,7 @@ app.get('/api/activities', asyncRoute(async (req, res) => {
   const showOf = Object.fromEntries(acts.map(a => [a.activity, a.show]));
   const tab = await readTabCached(TODO_SHEET_ID, ACTEV_TAB, ACTEV_HEADERS, 120000).catch(() => ({ rows: [] }));
   const dismissedEvt = (await getDismissedSet().catch(() => ({ urls: new Set() }))).urls;
+  const dismissedToks = await getDismissedEvtToks().catch(() => ({}));
   const t0 = today();
   const horizon = new Date(Date.now() + 15 * 86400000).toISOString().slice(0, 10);
   const STOP2 = new Set(['vs', 'v', 'the', 'and', 'at', 'of', 'round', 'rd', 'match', 'live']);
@@ -4593,6 +4603,7 @@ app.get('/api/activities', asyncRoute(async (req, res) => {
       return true;
     })
     .filter(r => !dismissedEvt.has('evt:' + normTitle(r.Title) + '|' + r.Activity)) // swiped away = gone, every tier
+    .filter(r => !evtNearDismissed(dismissedToks, r.Activity, r.Title)) // …including the rescan's near-clone retitlings
     .map(r => ({ activity: r.Activity, date: r.Date, title: r.Title, time: r.Time, venue: r.Venue, url: r.URL, note: r.Note, show: showOf[r.Activity] || 'all' }))
     .sort((x, y) => x.date.localeCompare(y.date) || String(x.time).localeCompare(String(y.time)));
   const leads = events.filter(ev => {
@@ -5958,6 +5969,34 @@ async function getDismissedSet() {
   dismissedCache = { at: Date.now(), set: { urls, titles } };
   return dismissedCache.set;
 }
+// Event dismissals need FUZZY matching on top of the exact key: the daily rescan rewrites
+// titles with drift ("— 2nd Edition", en-dash vs em-dash, reworded venue) that defeats
+// normTitle equality, so a swiped-away event kept resurfacing as its own near-clone.
+// Tokens of every dismissed evt: title, grouped by activity; ≥70% overlap = same event.
+async function getDismissedEvtToks() {
+  const STOP = new Set(['the', 'and', 'at', 'of', 'a', 'in', 'on', 'for', 'to', 'day', 'edition', 'st', 'nd', 'rd', 'th', 'launch', 'closing', 'opening']);
+  const toks = t => String(t).toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(w => w.length > 1 && !STOP.has(w));
+  const out = {}; // activity → [Set(tokens)]
+  try {
+    const tab = await readTabCached(TODO_SHEET_ID, DISMISS_TAB, DISMISS_HEADERS, 30000);
+    const cutoff = Date.now() - 21 * 864e5;
+    for (const r of tab.rows) {
+      const m = /^evt:.*\|(.*)$/.exec(String(r.URL || ''));
+      if (!m) continue;
+      if (r.At && new Date(r.At).getTime() < cutoff) continue;
+      (out[m[1]] = out[m[1]] || []).push(new Set(toks(r.Title || '')));
+    }
+  } catch (e) {}
+  return out;
+}
+const evtNearDismissed = (dis, activity, title) => {
+  const STOPq = new Set(['the', 'and', 'at', 'of', 'a', 'in', 'on', 'for', 'to', 'day', 'edition', 'st', 'nd', 'rd', 'th', 'launch', 'closing', 'opening']);
+  const T = new Set(String(title).toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(w => w.length > 1 && !STOPq.has(w)));
+  return (dis[activity] || []).some(D => {
+    let n = 0; for (const x of T) if (D.has(x)) n++;
+    return n / Math.max(1, Math.min(T.size, D.size)) >= 0.7;
+  });
+};
 // Filter a built-news payload against the dismissal store (applied post-cache so a
 // swipe-left takes effect on the very next render, no full news rebuild needed).
 async function withDismissals(data) {

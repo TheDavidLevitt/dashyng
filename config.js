@@ -99,6 +99,10 @@ module.exports = {
   // proxyAuthKey (inbound): when set, EVERY request must carry X-Proxy-Auth: <key>
   // (identity arrives as X-Proxy-User) — the instance only answers its fronting proxy.
   proxyAuthKey: pick('proxyAuthKey', 'DASHBOARD_PROXY_AUTH_KEY', ''),
+  // News source tiering [{match: regex, tier: 1-4}] — the owner's taste, never shipped
+  newsTiers: (() => { const v = pick('newsTiers', 'DASHBOARD_NEWS_TIERS', null);
+    if (Array.isArray(v)) return v;
+    try { const a = JSON.parse(v); return Array.isArray(a) ? a : []; } catch (e) { return []; } })(),
   // LLM relay: a tier without the claude CLI forwards its LLM calls to a tier that has it
   // (POST {prompt} + X-Relay-Key), keeping everything on the owner's subscription.
   llmRelayUrl: pick('llmRelayUrl', 'DASHBOARD_LLM_RELAY_URL', ''),
