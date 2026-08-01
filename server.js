@@ -1450,12 +1450,29 @@ app.post('/api/prefs/reparse', asyncRoute(async (req, res) => {
 // desired news feed → complete row sets for all five driving tabs, previewed as per-tab
 // diffs and applied through the same /api/prefs/apply path as the ✎ editors.
 const DESCRIBE_TABS = ['SOURCES', 'SUBJECTS', 'PEOPLE', 'LOCATIONS', 'TOPOFMIND'];
+// A fresh prefs sheet (a guest's own datastore) has none of the driving tabs — create them
+// with their standard headers so Describe works from a blank canvas.
+const DESCRIBE_TAB_HEADERS = {
+  SOURCES: ['Source', 'URL', 'All', 'Top stories', 'Notes'],
+  SUBJECTS: ['Subject', 'Weight', 'Notes'],
+  PEOPLE: ['Name', 'Why', 'Deceased', 'Notes'],
+  LOCATIONS: ['Location', 'From', 'To', 'Notes'],
+  TOPOFMIND: ['Item', 'Added', 'Notes'],
+};
+async function ensureDescribeTabs() {
+  for (const t of DESCRIBE_TABS) await ensureTab(t, DESCRIBE_TAB_HEADERS[t], PREFS_SHEET_ID).catch(() => {});
+}
 async function doNewsDescribe({ text }) {
   // one batchGet, not five reads — the per-minute Sheets read quota is tight when
   // several instances share the service account
-  const resp = await store.values.batchGet({
-    spreadsheetId: PREFS_SHEET_ID, ranges: DESCRIBE_TABS.map(t => `'${t}'!A1:Z`),
-  });
+  let resp;
+  try {
+    resp = await store.values.batchGet({ spreadsheetId: PREFS_SHEET_ID, ranges: DESCRIBE_TABS.map(t => `'${t}'!A1:Z`) });
+  } catch (e) {
+    if (!/Unable to parse range/i.test(String(e.message || ''))) throw e;
+    await ensureDescribeTabs();
+    resp = await store.values.batchGet({ spreadsheetId: PREFS_SHEET_ID, ranges: DESCRIBE_TABS.map(t => `'${t}'!A1:Z`) });
+  }
   const cur = {};
   DESCRIBE_TABS.forEach((tab, i) => {
     const values = ((resp.data.valueRanges || [])[i] || {}).values || [];
