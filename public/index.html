@@ -2588,7 +2588,7 @@ function renderLookahead() {
         ${evs.length > 3 ? `<div class="la-ev tiny la-more">+${evs.length - 3} more — tap</div>` : ''}</div></div>`;
     }).join('') + '</div><div id="loc-strip"></div>';
     el.innerHTML = laToolbar() + leadStrip() + el.innerHTML
-      + `<div class="tiny" style="margin-top:3px"><a href="#" class="la-acts-link" style="color:var(--violet)">🎯 monitor events…</a></div>`;
+      + `<div class="tiny" style="margin-top:3px"><a href="#" class="la-acts-link" style="color:var(--violet)">🎯 What events do you want on your radar?</a></div>`;
     bindLeads(el); bindTravelInput(el);
     renderLocationStrip(el.querySelector('#loc-strip'), days, true);
     el.querySelectorAll('.la-acts-link').forEach(a => a.onclick = e => { e.preventDefault(); openIntEditor('ACTIVITIES'); });

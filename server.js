@@ -351,23 +351,18 @@ app.use((req, res, next) => {
         if (mr && (mr.emails || []).map(normEmail).includes(email)) return proxyToInstance(mr, req, res, email);
         return res.redirect(gr.path);   // unknown path, or a mount that is not theirs
       }
-      // game guests: /junglefarm only — anything else bounces back to the game
-      if (GAME_GUEST_N.includes(email)) {
-        if (isGamePath(req.path)) return next();
-        if (req.path.startsWith('/api/')) return res.status(403).json({ error: 'game guests only have /junglefarm' });
-        return res.redirect('/junglefarm/');
-      }
-      // biotech-tracker guests: the tracker page + /api/bio/* only
-      if (BIO_GUEST_N.includes(email)) {
-        if (isBioPath(req.path)) return next();
+      // Page carve-outs. Each list owns ITS OWN paths and nothing else — one guest can be
+      // on several lists at once (a game, a checklist page, a mounted dashboard), and
+      // whichever list was checked first must not swallow the paths of the others.
+      const grants = [
+        { on: GAME_GUEST_N.includes(email), owns: isGamePath(req.path), home: '/junglefarm/' },
+        { on: BIO_GUEST_N.includes(email), owns: isBioPath(req.path), home: BIO_ROUTE },
+        { on: RANMALI_GUEST_N.includes(email), owns: isRanmaliPath(req.path), home: RANMALI_ROUTE },
+      ].filter(g => g.on);
+      if (grants.length) {
+        if (grants.some(g => g.owns)) return next();
         if (req.path.startsWith('/api/')) return res.status(403).json({ error: 'not authorized for this API' });
-        return res.redirect(BIO_ROUTE);
-      }
-      // Hampr donate-checklist guests: the /ranmali page + /api/ranmali/* only
-      if (RANMALI_GUEST_N.includes(email)) {
-        if (isRanmaliPath(req.path)) return next();
-        if (req.path.startsWith('/api/')) return res.status(403).json({ error: 'not authorized for this API' });
-        return res.redirect(RANMALI_ROUTE);
+        return res.redirect(grants[0].home);   // their first grant is their landing page
       }
       // valid signature but email no longer on any list (e.g. guest removed) → re-login
     }
@@ -1346,8 +1341,23 @@ const EDITABLE_TABS = {
   ACTIVITIES: { key: 'Activity', label: 'Activities' },
 };
 function prefHeaderIdx(values) { for (let i = 0; i < Math.min(values.length, 4); i++) { if ((values[i] || []).length >= 2) return i; } return 0; }
+const EDITABLE_TAB_HEADERS = {
+  SOURCES: ['Source', 'URL', 'All', 'Top stories', 'Notes'],
+  SUBJECTS: ['Subject', 'Weight', 'Notes'],
+  PEOPLE: ['Author', 'Why', 'Deceased', 'Notes'],
+  TOPOFMIND: ['Subject', 'Added', 'Notes'],
+  REMINDERS: ['Reminder', 'Date', 'Notes'],
+  LOCATIONS: ['Location', 'From', 'Notes'],
+  ACTIVITIES: ['Activity', 'Instructions', 'Lead days', 'Show'],
+};
 async function loadEditablePref(tab) {
-  const r = await store.values.get({ spreadsheetId: PREFS_SHEET_ID, range: `'${tab}'!A1:Z` });
+  let r;
+  try { r = await store.values.get({ spreadsheetId: PREFS_SHEET_ID, range: `'${tab}'!A1:Z` }); }
+  catch (e) { // a fresh guest/public prefs sheet: create the tab and start blank
+    if (!/Unable to parse range/i.test(String(e.message || ''))) throw e;
+    await ensureTab(tab, EDITABLE_TAB_HEADERS[tab] || ['Item'], PREFS_SHEET_ID);
+    r = await store.values.get({ spreadsheetId: PREFS_SHEET_ID, range: `'${tab}'!A1:Z` });
+  }
   const values = r.data.values || [];
   const hi = prefHeaderIdx(values);
   const header = values[hi] || [];
@@ -4594,7 +4604,8 @@ async function loadActivitiesConfig() {
 }
 let actScanBusy = false;
 async function scanActivities() {
-  if (actScanBusy || !HAS_CLAUDE || process.env.DASHBOARD_NO_JOBS) return;
+  const scanAllowed = !process.env.DASHBOARD_NO_JOBS || process.env.DASHBOARD_SCAN_EVENTS;
+  if (actScanBusy || !hasLlm() || !scanAllowed) return;
   actScanBusy = true;
   try {
     const acts = await loadActivitiesConfig();
@@ -4623,7 +4634,9 @@ async function scanActivities() {
         const raw = await runClaude(
           `Today is ${today()} (${new Date().toLocaleDateString('en-US', { weekday: 'long' })}); assume the user's local timezone for event times.\n` +
           (projLoc ? `The owner's PROJECTED LOCATION over the coming weeks: ${projLoc}. If the activity's instructions imply a specific city (e.g. "this weekend in town", a home city) but the owner will be somewhere ELSE on the target date per this projection, search for that date's ACTUAL location instead — the instructions describe the KIND of thing to look for, not necessarily a fixed city.\n` : '') +
-          `You scan the web for events matching a personal interest.\nINTEREST: "${a.activity}"\nINSTRUCTIONS: ${a.instructions}\n` +
+          `You scan the web for events matching a personal interest.\nINTEREST: "${a.activity}"\nINSTRUCTIONS: ${a.instructions
+            .replace(/\[currentlocation\]/gi, locationOnDate(today()) || 'the user\'s current city')
+            .replace(/\[projectedlocation\]/gi, projLoc || locationOnDate(today()) || 'the user\'s current city')}\n` +
           `Use WebSearch/WebFetch. Find CONCRETE, DATED events in the NEXT 21 DAYS. Only real events with a source — NEVER invent; an empty list is a fine answer.\n` +
           `NEVER return a physical event in a city the owner will NOT be in on that date (per the projection above). Location-independent events (TV/streamed broadcasts, online) are fine anywhere — mark them "local": false.\n` +
           (known ? `ALREADY KNOWN (do NOT return these again, even reworded — only genuinely NEW events):\n${known}\n` : '') +
@@ -4649,7 +4662,7 @@ async function scanActivities() {
     }
   } finally { actScanBusy = false; }
 }
-if (HAS_CLAUDE) {
+if (HAS_CLAUDE || (CFG.llmRelayUrl && CFG.llmRelayKey)) {
   setTimeout(() => scanActivities().catch(() => {}), 90e3); // first pass shortly after boot
   setInterval(() => scanActivities().catch(() => {}), 4 * 3600e3);
 }
