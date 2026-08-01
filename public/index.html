@@ -1981,9 +1981,21 @@ function loadENotes() { return api('/api/enotes').then(d => { if (d && Array.isA
   const inp = document.getElementById('enote-in'), add = document.getElementById('enote-add'),
     cam = document.getElementById('enote-cam'), file = document.getElementById('enote-file');
   if (!inp || !add) return;
+  // list-intent notes become checklists ("moulin todo: a, b" · "create a list of…" ·
+  // a URL + the word list); everything else stays a plain quick note
+  const listIntent = t => (/^[^:]{2,60}:\s*.+[,;].+/.test(t) && !/https?:\/\//.test(t))
+    || /^\s*(create|make|fais|crée|génère)\b.*\b(list|checklist|liste)\b/i.test(t)
+    || (/https?:\/\/|www\./i.test(t) && /\b(list|liste|checklist)\b/i.test(t));
   const post = async () => {
     const text = inp.value.trim(); if (!text) return;
     inp.value = '';
+    if (listIntent(text)) {
+      toast && toast(T('building your list…'));
+      const r = await api('/api/enotes/make-list', { method: 'POST', body: JSON.stringify({ text }) });
+      if (r && r.ok) { toast && toast(`📝 ${r.name} — ${r.count}`); loadJLists(); }
+      else { toast && toast((r && r.error) || 'list failed', true); inp.value = text; }
+      return;
+    }
     const r = await api('/api/enotes', { method: 'POST', body: JSON.stringify({ text }) });
     if (r && r.notes) { enotes = r.notes; renderENotes(); }
   };

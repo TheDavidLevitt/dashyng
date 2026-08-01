@@ -5034,13 +5034,14 @@ async function runClaude(prompt, { tools, timeoutMs, module, model, served } = {
     }
   }
   if (!HAS_CLAUDE) {
-    if (tools) throw new Error('agent tools (web fetch/search) require the claude CLI');
     // subscription first: a configured relay forwards to a tier that HAS the claude CLI,
-    // so cloud instances never touch metered API keys for routine LLM work
+    // so cloud instances never touch metered API keys for routine LLM work. Web tools
+    // (fetch/search) ride the relay too — the CLI on the far end runs them.
+    if (tools && !(CFG.llmRelayUrl && CFG.llmRelayKey)) throw new Error('agent tools (web fetch/search) require the claude CLI');
     if (CFG.llmRelayUrl && CFG.llmRelayKey) {
       const r = await fetch(CFG.llmRelayUrl.replace(/\/$/, ''), {
         method: 'POST', headers: { 'content-type': 'application/json', 'x-relay-key': CFG.llmRelayKey },
-        body: JSON.stringify({ prompt, timeoutMs }),
+        body: JSON.stringify({ prompt, timeoutMs, ...(tools ? { tools } : {}) }),
       });
       const j = await r.json().catch(() => ({}));
       if (r.ok && j.text !== undefined) {
@@ -5629,6 +5630,33 @@ app.post('/api/elists/ext/:token/comment', asyncRoute(async (req, res) => {
   if (shared) { await sharedListAddComment(shared.sheetId, shared.tab || hit[0], String((req.body || {}).item || '').slice(0, 200), from, text); return res.json({ ok: true }); }
   await appendTabRow(ELIST_COMMENTS_TAB, ELIST_COMMENTS_HEADERS, [nowIso(), hit[0], String((req.body || {}).item || '').slice(0, 200), from, text]);
   res.json({ ok: true });
+}));
+// LLM-parsed / agentic list creation from the quick-note bar: "moulin todo: water
+// plants, close gate" → checklist; "create a checklist for camping in the desert" →
+// generated items; a URL in the request → the model fetches it first (web tools).
+app.post('/api/enotes/make-list', asyncRoute(async (req, res) => {
+  const text = String((req.body || {}).text || '').trim().slice(0, 500);
+  if (!text) return res.status(400).json({ error: 'text required' });
+  let name, items;
+  const m = /^([^:]{2,60}):\s*(.+)$/.exec(text);
+  if (m && /[,;]/.test(m[2]) && !/https?:\/\/|www\./i.test(text)) {
+    name = m[1].trim();
+    items = m[2].split(/[,;]/).map(x => x.trim()).filter(Boolean);
+  } else {
+    const hasUrl = /https?:\/\/|www\./i.test(text);
+    const prompt = 'Turn this request into a checklist. Reply with ONLY JSON: {"name":"...","items":["..."]}. '
+      + 'Max 25 items. Items the user dictated keep their exact wording and language; for generative requests invent sensible, concrete items.'
+      + (hasUrl ? ' The request references a website — fetch it and base the items on its ACTUAL content (e.g. a school supply list), not guesses.' : '')
+      + '\nRequest: ' + JSON.stringify(text);
+    const raw = await runClaude(prompt, { module: 'note-list', timeoutMs: hasUrl ? 110000 : 45000, ...(hasUrl ? { tools: 'WebFetch WebSearch' } : {}) });
+    let j = null; try { j = JSON.parse((raw.match(/\{[\s\S]*\}/) || [''])[0]); } catch (e) {}
+    if (!j || !j.name || !Array.isArray(j.items) || !j.items.length)
+      return res.json({ ok: false, error: "couldn't turn that into a list" });
+    name = String(j.name).slice(0, 60);
+    items = j.items.map(x => String(x).slice(0, 200)).slice(0, 25);
+  }
+  await elistsCreate(name, items);
+  res.json({ ok: true, name, count: items.length });
 }));
 // owner-side add-item (the ＋ input on each list box)
 app.post('/api/journal-lists/:id/add', asyncRoute(async (req, res) => {
