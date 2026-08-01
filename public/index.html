@@ -514,8 +514,13 @@ details summary { cursor: pointer; color: var(--text2); font-size: 12.5px; paddi
 <div id="promoted"></div>
 </section>
 
+<section data-sec="acts">
+<h2><span data-sec-title>Activity Preview</span> <button class="ib" onclick="openIntEditor('ACTIVITIES')" title="Activities the agent scans for">🎯</button></h2>
+<div id="actprev" class="card"><div class="empty tiny">No upcoming activity alerts.</div></div>
+</section>
+
 <section data-sec="today">
-<h2><span data-sec-title>Today</span> <button class="ib cal-cfg-btn" title="Calendars & look-ahead">✎</button> <button class="ib" onclick="openIntEditor('ACTIVITIES')" title="Activities the agent scans for (events land in the look-ahead)">🎯</button></h2>
+<h2><span data-sec-title>Today</span> <button class="ib cal-cfg-btn" title="Calendars & look-ahead">✎</button></h2>
 <div id="int-editor-cal" class="card" style="display:none;margin-bottom:6px"></div>
 <div id="today" class="card"><div class="empty">Loading calendar…</div></div>
 </section>
@@ -737,7 +742,7 @@ async function saveLinks() {
     box.querySelector('.lk-url').focus();
   };
 })();
-const SEC_DEFS = { links: 'Links', habits: 'Habits', brief: 'Agent brief', today: 'Today', todo: 'Persistent lists', jlists: 'Ephemeral notes', cinote: 'Note to CI', jobsboard: 'Job Openings', agents: 'Agent Stable', files: 'File manager', completed: 'Completed', media: 'Reading queue', markets: 'Markets', signals: 'Market signals', surf: 'Wind & waves', news: 'News', week: 'Week ahead' };
+const SEC_DEFS = { links: 'Links', habits: 'Habits', brief: 'Agent brief', acts: 'Activity Preview', today: 'Today', todo: 'Persistent lists', jlists: 'Ephemeral notes', cinote: 'Note to CI', jobsboard: 'Job Openings', agents: 'Agent Stable', files: 'File manager', completed: 'Completed', media: 'Reading queue', markets: 'Markets', signals: 'Market signals', surf: 'Wind & waves', news: 'News', week: 'Week ahead' };
 let appSettings = { sections: {}, quadrants: {}, calendars: [] };
 const secExpanded = new Set(); // session-local expansions of collapsed-by-default sections
 function setSecTitle(el, title) { // replace only the text node — keep the ＋/meta spans inside headings
@@ -1989,7 +1994,7 @@ function renderTodayCards() {
 // 5days/7days = the next N days starting today.
 let calEvents = null;
 let actData = { events: [], leads: [] }; // agent-scanned activity events (see ACTIVITIES pref tab)
-api('/api/activities').then(d => { if (d && Array.isArray(d.events)) { actData = d; renderLookahead(); renderTodayCards(); } }).catch(() => {});
+api('/api/activities').then(d => { if (d && Array.isArray(d.events)) { actData = d; renderLookahead(); renderActPreview(); renderTodayCards(); } }).catch(() => {});
 
 // ---------- journal-driven ad-hoc lists ----------
 // A `## Heading` in the journal that isn't a template section becomes an ephemeral todo
@@ -2237,6 +2242,16 @@ function leadStrip() {
   return leads.map(l => `<div class="la-lead swipecard" data-lk="${esc(leadKey(l))}">🎯 <b>${esc(l.title)}</b> — ${new Date(l.date + 'T12:00').toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })}${l.time ? ' ' + esc(l.time) + ' <span class="tiny">' + esc(TZ_ABBR) + '</span>' : ''}
     <span class="tiny">${esc([l.venue, l.note].filter(Boolean).join(' · '))}${l.url ? ' · <a href="' + esc(l.url) + '" target="_blank" rel="noopener">details ↗</a>' : ''} <span style="color:var(--violet)">[${esc(l.activity)}]</span></span>
     <button class="ib la-lead-x" title="Clear this alert">✕</button></div>`).join('');
+}
+// Activity Preview — its own widget above Today (owner decree 2026-08-01): the scanned
+// activity alerts, separated from the calendar. Same lead data, same swipe-to-clear.
+function renderActPreview() {
+  const el = document.getElementById('actprev'); if (!el) return;
+  const strip = leadStrip();
+  el.innerHTML = (strip || '<div class="empty tiny">No upcoming activity alerts.</div>')
+    + `<div class="tiny" style="margin-top:3px"><a href="#" class="la-acts-link" style="color:var(--violet)">🎯 What events do you want on your radar?</a></div>`;
+  bindLeads(el);
+  el.querySelectorAll('.la-acts-link').forEach(a => a.onclick = e => { e.preventDefault(); openIntEditor('ACTIVITIES'); });
 }
 function bindLeads(root) {
   root.querySelectorAll('.la-lead').forEach(row => {
@@ -2587,9 +2602,9 @@ function renderLookahead() {
         <div class="la-rbody">${evs.slice(0, 3).map(ev => evLine(ev)).join('')}
         ${evs.length > 3 ? `<div class="la-ev tiny la-more">+${evs.length - 3} more — tap</div>` : ''}</div></div>`;
     }).join('') + '</div><div id="loc-strip"></div>';
-    el.innerHTML = laToolbar() + leadStrip() + el.innerHTML
-      + `<div class="tiny" style="margin-top:3px"><a href="#" class="la-acts-link" style="color:var(--violet)">🎯 What events do you want on your radar?</a></div>`;
-    bindLeads(el); bindTravelInput(el);
+    el.innerHTML = laToolbar() + el.innerHTML;
+    renderActPreview();
+    bindTravelInput(el);
     renderLocationStrip(el.querySelector('#loc-strip'), days, true);
     el.querySelectorAll('.la-acts-link').forEach(a => a.onclick = e => { e.preventDefault(); openIntEditor('ACTIVITIES'); });
     el.querySelectorAll('.la-row').forEach(row => row.onclick = () => {

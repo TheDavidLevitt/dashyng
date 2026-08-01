@@ -2867,6 +2867,15 @@ async function buildNews() {
   const people = prefRows(prefs.PEOPLE).filter(r => String(r[2] || '').trim() === '1')
     .map(r => ({ name: r[0], category: r[3] || '', dead: DEAD.test(r[0]) || /deceased|historical/i.test((r[4]||'') + (r[5]||'')) }));
   const locations = prefRows(prefs.LOCATIONS).map(r => r[0]).filter(l => l && !STOP_TERMS.test(String(l).trim()) && !/prompt:/i.test(l));
+  // Ephemeral geographies: wherever the owner IS or WILL BE (14d) scores news too — merged
+  // at build time, never written to the LOCATIONS tab, so they evaporate the moment the
+  // location does. Pin a place on the tab (or keep it in travel plans) to make it stick.
+  {
+    const eph = new Set([locationOnDate(today())]);
+    for (const b of loadLocationBars()) if (b.end >= today() && b.start <= addDays(today(), 14) && b.location && b.location !== 'Location?') eph.add(b.location);
+    const have = new Set(locations.map(l => String(l).toLowerCase()));
+    for (const l of eph) if (l && !have.has(String(l).toLowerCase())) locations.push(l);
+  }
   const prefSources = [...prefRows(prefs.SOURCES).map(r => r[0]), ...Object.keys(loadNewsFeeds())].filter(Boolean);
 
   const highlight = [...new Set([
