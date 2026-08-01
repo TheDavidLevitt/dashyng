@@ -415,15 +415,16 @@ const WIDGETS = {
   media:   { title: 'Reading queue',    desc: 'Articles, books, podcasts to consume',              needs: { tabs: ['Media (Reading/Listening)'] } },
   markets: { title: 'Markets',          desc: 'Quotes, futures, portfolio, market plots',          needs: {}, configKeys: ['markets layout'] },
   signals: { title: 'Market signals',   desc: 'Agent-flagged market signals',                      needs: { tabs: ['Signals'] } },
-  surf:    { title: 'Wind & waves',     desc: 'Surf/kite forecast for configured spots',           needs: { location: true }, configKeys: ['surfSpots'] },
   news:    { title: 'News',             desc: 'Preference-driven news with swipe feedback',        needs: { llm: true, tabs: ['prefs sheet'] }, configKeys: ['SOURCES/SUBJECTS/PEOPLE/LOCATIONS/TOPOFMIND'] },
   week:    { title: 'Week ahead',       desc: 'Seven-day agenda list',                             needs: { calendar: true } },
 };
 app.get('/api/widgets', (req, res) => {
   const sections = loadSettings().sections || {};
   const reg = Object.entries(WIDGETS).map(([id, w]) => ({ id, ...w, hidden: !!(sections[id] || {}).hidden }));
-  for (const [key, p] of Object.entries(typeof PLUGINS === 'object' && PLUGINS ? PLUGINS : {}))
-    reg.push({ id: 'plugin:' + key, title: p.title || key, desc: p.desc || 'plugin', needs: p.needs || {}, plugin: true, hidden: !!(sections['plugin:' + key] || {}).hidden });
+  for (const [key, p] of Object.entries(typeof PLUGINS === 'object' && PLUGINS ? PLUGINS : {})) {
+    const id = p.core ? key : 'plugin:' + key; // core plugins = extracted sections, original key
+    reg.push({ id, title: p.title || key, desc: p.desc || 'plugin', needs: p.needs || {}, plugin: true, hidden: !!(sections[id] || {}).hidden });
+  }
   res.json({ widgets: reg });
 });
 
@@ -1784,60 +1785,6 @@ app.get('/api/settings', asyncRoute(async (req, res) => res.json({
   sheetUrl: TODO_SHEET_ID ? `https://docs.google.com/spreadsheets/d/${TODO_SHEET_ID}/edit` : '',
 })));
 
-// ---------- wind & waves (owner's home break): glanceable surf/kite check ----------
-// Open-Meteo forecast + marine APIs (free, keyless). Daylight hours only (06-20 local);
-// daily = the day's peak wind (that's what gates a session) + biggest wave w/ its period.
-// Spot roster: config surfSpots [{key,name,lat,lon}], else the legacy single spot. The
-// client sends its geolocation (?lat&lon → closest spot wins) or a manual ?spot=key.
-const SURF_SPOTS = (() => {
-  let s = Array.isArray(CFG.surfSpots) ? CFG.surfSpots.filter(x => x && +x.lat && +x.lon) : [];
-  if (!s.length && (CFG.surfSpotLat || CFG.surfSpotLon))
-    s = [{ key: 'home', name: CFG.surfSpotName || 'Home break', lat: CFG.surfSpotLat, lon: CFG.surfSpotLon }];
-  return s.map((x, i) => ({ key: String(x.key || 'spot' + i).slice(0, 24), name: String(x.name || x.key || 'Spot').slice(0, 60), lat: +x.lat, lon: +x.lon, tz: x.tz ? String(x.tz).slice(0, 40) : '' }));
-})();
-const surfDist = (a, b, lat, lon) => { const dl = (a - lat), dn = (b - lon) * Math.cos(lat * Math.PI / 180); return dl * dl + dn * dn; };
-app.get('/api/surf/spots', asyncRoute(async (req, res) => res.json({ spots: SURF_SPOTS.map(s => ({ key: s.key, name: s.name, tz: s.tz || undefined })) })));
-let surfCache = {}; // per spot key
-app.get('/api/surf', asyncRoute(async (req, res) => {
-  if (!SURF_SPOTS.length) return res.json({ unconfigured: true, hint: 'Set surfSpots (or surfSpotName/Lat/Lon) to enable the wind & waves check.' });
-  let spot = SURF_SPOTS.find(s => s.key === String(req.query.spot || ''));
-  if (!spot && isFinite(+req.query.lat) && isFinite(+req.query.lon) && req.query.lat !== '')
-    spot = [...SURF_SPOTS].sort((a, b) => surfDist(a.lat, a.lon, +req.query.lat, +req.query.lon) - surfDist(b.lat, b.lon, +req.query.lat, +req.query.lon))[0];
-  if (!spot) spot = SURF_SPOTS[0];
-  const c = surfCache[spot.key];
-  if (c && Date.now() - c.at < 60 * 60000) return res.json(c.data);
-  const LAT = spot.lat, LON = spot.lon;
-  const [w, m] = await Promise.all([
-    fetch(`https://api.open-meteo.com/v1/forecast?latitude=${LAT}&longitude=${LON}&hourly=wind_speed_10m,wind_direction_10m&wind_speed_unit=kn&forecast_days=7&timezone=auto`).then(r => r.json()),
-    fetch(`https://marine-api.open-meteo.com/v1/marine?latitude=${LAT}&longitude=${LON}&hourly=wave_height,wave_period&forecast_days=7&timezone=auto`).then(r => r.json()).catch(() => null),
-  ]);
-  const wt = w?.hourly?.time || [];
-  if (!wt.length) { track('surf', false, 'open-meteo empty'); return res.json({ error: 'forecast unavailable' }); }
-  const ws = w.hourly.wind_speed_10m, wd = w.hourly.wind_direction_10m;
-  const mIdx = new Map((m?.hourly?.time || []).map((t, i) => [t, i]));
-  const byDay = {};
-  wt.forEach((t, i) => {
-    const [date, hm] = t.split('T'); const h = +hm.slice(0, 2);
-    if (h < 6 || h > 20) return; // daylight only
-    const mi = mIdx.get(t);
-    (byDay[date] = byDay[date] || []).push({ h, wind: ws[i], dir: wd[i],
-      wave: mi != null ? m.hourly.wave_height[mi] : null, period: mi != null ? m.hourly.wave_period[mi] : null });
-  });
-  const dates = Object.keys(byDay).sort();
-  const daily = dates.slice(0, 7).map(date => {
-    const rows = byDay[date].filter(x => x.wind != null);
-    if (!rows.length) return { date };
-    const top = rows.reduce((a, b) => b.wind > a.wind ? b : a, rows[0]);       // peak wind of the day
-    const wv = rows.reduce((a, b) => (b.wave || 0) > (a.wave || 0) ? b : a, rows[0]); // biggest wave
-    return { date, wind: top.wind, dir: top.dir, wave: wv.wave, period: wv.period };
-  });
-  const hours = dates.slice(0, 2).map(date => ({ date, slots: byDay[date].filter(x => x.h % 3 === 0) })); // 06 09 12 15 18
-  const data = { at: nowIso(), spot: spot.name, spotKey: spot.key, daily, hours };
-  track('surf', true, `${daily.length}d / ${hours.length}×3h`);
-  surfCache[spot.key] = { at: Date.now(), data };
-  res.json(data);
-}));
-
 // ---------- API key management (🔑 in ⚙): stored keys hydrate process.env at boot ----------
 // Disk tiers (Mac/VM): ~/.config/dashboard/api-keys.json, mode 600 — outside every repo.
 // Cloud Run (ephemeral fs): GCP Secret Manager, secret 'dashboard-api-keys', one JSON payload.
@@ -1987,11 +1934,11 @@ async function withPluginNews(data) {
   return data;
 }
 app.get('/api/plugins', asyncRoute(async (req, res) =>
-  res.json({ plugins: Object.values(PLUGINS).map(p => ({ key: p.key, title: p.title || p.key, client: p.client || null })) })));
+  res.json({ plugins: Object.values(PLUGINS).map(p => ({ key: p.key, core: !!p.core, title: p.title || p.key, client: p.client || null })) })));
 app.get('/api/plugin/:key', asyncRoute(async (req, res) => {
   const p = PLUGINS[req.params.key];
   if (!p) return res.status(404).json({ error: 'no such plugin' });
-  try { res.json({ data: await p.data() }); } catch (e) { res.status(500).json({ error: e.message }); }
+  try { res.json({ data: await p.data(pluginCtx()) }); } catch (e) { res.status(500).json({ error: e.message }); }
 }));
 app.post('/api/settings', asyncRoute(async (req, res) => {
   // Best-effort freshness: pull the cross-tier envelope only if the network answers fast.

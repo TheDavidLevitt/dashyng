@@ -142,18 +142,6 @@ input.sec-rename { display: inline-block; max-width: 200px; font-size: inherit; 
   border: 1px solid var(--violet); border-radius: 8px; padding: 1px 7px; vertical-align: 2px; opacity: 0.8; }
 .en-box { border-style: dashed !important; border-color: var(--violet) !important; background: color-mix(in srgb, var(--violet) 6%, var(--card2)) !important; }
 #enote-bar input { border-style: dashed; }
-/* wind & waves — glanceable boxes; amber >12kt, red >15kt */
-.surf-row { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 5px; }
-.surf-hrow { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; margin-top: 4px; }
-.surf-hlbl { font-size: 10px; font-weight: 700; text-transform: uppercase; color: var(--text3); min-width: 44px; }
-.surf-d { background: var(--card2); border: 1px solid var(--border); border-radius: 5px; padding: 3px 6px;
-  font-size: 11px; text-align: center; min-width: 58px; font-variant-numeric: tabular-nums; }
-.surf-d.wA { background: rgba(255, 170, 0, 0.16); border-color: rgba(255, 170, 0, 0.5); }
-.surf-d.wR { background: rgba(255, 70, 70, 0.18); border-color: rgba(255, 70, 70, 0.55); }
-.surf-lbl { font-size: 9px; text-transform: uppercase; color: var(--text3); font-weight: 700; }
-.surf-w { font-weight: 650; }
-.surf-v { font-size: 10px; color: var(--text2); }
-.surf-ar { display: inline-block; font-size: 10px; }
 .la-ev { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text); line-height: 1.35; }
 .la-ev .la-t { color: var(--text3); font-variant-numeric: tabular-nums; }
 .la-ev.la-act { color: var(--violet); } /* agent-scanned activity events */
@@ -610,11 +598,6 @@ details summary { cursor: pointer; color: var(--text2); font-size: 12.5px; paddi
 <div id="signals" class="card" style="margin-top:4px"><div class="empty">Loading signals…</div></div></details>
 </section>
 
-<section data-sec="surf">
-<h2><span data-sec-title>Wind &amp; waves</span> <select id="surf-spot-sel" class="tiny" style="background:var(--card2);color:var(--text2);border:1px solid var(--border);border-radius:4px;font-size:11px"></select> <span class="muted" style="font-size:12px" id="surf-spot"></span></h2>
-<div class="card" id="surf"><div class="empty">Loading forecast…</div></div>
-</section>
-
 <section data-sec="news">
 <h2><span data-sec-title>News</span> <span class="muted" id="news-ts"></span></h2>
 <h2 id="summaries-head" style="display:none;margin-top:0">News Summaries <span class="muted" id="summaries-meta"></span></h2>
@@ -742,7 +725,7 @@ async function saveLinks() {
     box.querySelector('.lk-url').focus();
   };
 })();
-const SEC_DEFS = { links: 'Links', habits: 'Habits', brief: 'Agent brief', acts: 'Activity Preview', today: 'Today', todo: 'Persistent lists', jlists: 'Ephemeral notes', cinote: 'Note to CI', jobsboard: 'Job Openings', agents: 'Agent Stable', files: 'File manager', completed: 'Completed', media: 'Reading queue', markets: 'Markets', signals: 'Market signals', surf: 'Wind & waves', news: 'News', week: 'Week ahead' };
+const SEC_DEFS = { links: 'Links', habits: 'Habits', brief: 'Agent brief', acts: 'Activity Preview', today: 'Today', todo: 'Persistent lists', jlists: 'Ephemeral notes', cinote: 'Note to CI', jobsboard: 'Job Openings', agents: 'Agent Stable', files: 'File manager', completed: 'Completed', media: 'Reading queue', markets: 'Markets', signals: 'Market signals', news: 'News', week: 'Week ahead' };
 let appSettings = { sections: {}, quadrants: {}, calendars: [] };
 const secExpanded = new Set(); // session-local expansions of collapsed-by-default sections
 function setSecTitle(el, title) { // replace only the text node — keep the ＋/meta spans inside headings
@@ -2554,63 +2537,6 @@ function markCycle() { // "?" beside Today (when today is in the window) and Age
   put('section[data-sec="brief"] [data-sec-title]', [0, 1, 2, 3, 4].some(k => set.has(isoPlus(k))));
 }
 // ---------- wind & waves (home break, config-keyed) ----------
-// Spot selection: 'auto' geolocates (closest configured spot wins; timezone fallback when
-// geolocation is denied/blocked — e.g. plain-http on the LAN), or a manual pick that sticks
-// per-device via localStorage. The tz→spot fallback comes from each spot's optional `tz`
-// field in the server's roster — nothing location-specific lives in this file.
-let surfSpotsCache = null;
-async function surfQuery() {
-  const pick = localStorage.getItem('surfSpot') || 'auto';
-  if (pick !== 'auto') return '?spot=' + encodeURIComponent(pick);
-  const geo = await new Promise(r => {
-    if (!navigator.geolocation) return r(null);
-    const t = setTimeout(() => r(null), 2500);
-    navigator.geolocation.getCurrentPosition(
-      p => { clearTimeout(t); r(p.coords); }, () => { clearTimeout(t); r(null); },
-      { maximumAge: 3600000, timeout: 2200, enableHighAccuracy: false });
-  });
-  if (geo) return `?lat=${geo.latitude.toFixed(3)}&lon=${geo.longitude.toFixed(3)}`;
-  try {
-    if (!surfSpotsCache) surfSpotsCache = (await api('/api/surf/spots')).spots || [];
-    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    const m = surfSpotsCache.find(s => s.tz && s.tz === tz);
-    if (m) return '?spot=' + encodeURIComponent(m.key);
-  } catch (e) {}
-  return '';
-}
-function wireSurfSel() {
-  const sel = $('surf-spot-sel'); if (!sel || sel.options.length) return;
-  api('/api/surf/spots').then(({ spots }) => {
-    if (!spots || spots.length < 2) { sel.style.display = 'none'; return; }
-    const cur = localStorage.getItem('surfSpot') || 'auto';
-    sel.innerHTML = `<option value="auto">📍 auto</option>` + spots.map(s => `<option value="${esc(s.key)}" ${s.key === cur ? 'selected' : ''}>${esc(s.name)}</option>`).join('');
-    if (cur === 'auto') sel.value = 'auto';
-    sel.onchange = () => { localStorage.setItem('surfSpot', sel.value); loadSurf(); };
-  }).catch(() => { sel.style.display = 'none'; });
-}
-async function loadSurf() {
-  wireSurfSel();
-  api('/api/surf' + await surfQuery()).then(d => {
-    const el = $('surf'); if (!el) return;
-    const lbl = $('surf-spot'); if (lbl && d && d.spot) lbl.textContent = d.spot;
-    if (d && d.unconfigured) { el.innerHTML = `<div class="empty">${esc(d.hint)}</div>`; return; }
-    if (!d || d.error || !(d.daily || []).length) { el.innerHTML = `<div class="empty">${esc((d && d.error) || 'forecast unavailable')}</div>`; return; }
-    const cls = w => w > 15 ? ' wR' : w > 12 ? ' wA' : '';
-    const arrow = dir => dir == null ? '' : `<span class="surf-ar" style="transform:rotate(${(dir + 180) % 360}deg)">↑</span>`;
-    const wv = x => x.wave != null ? `${x.wave.toFixed(1)}m·${Math.round(x.period || 0)}s` : '—';
-    const dayLbl = iso => { const d = new Date(iso + 'T12:00:00'); return d.toLocaleDateString('en-GB', { weekday: 'short' }) + ' ' + d.getDate(); };
-    const daily = d.daily.map(x => `<div class="surf-d${cls(x.wind)}">
-        <div class="surf-lbl">${esc(dayLbl(x.date))}</div>
-        <div class="surf-w">${x.wind != null ? Math.round(x.wind) + 'kt' : '—'} ${arrow(x.dir)}</div>
-        <div class="surf-v">${wv(x)}</div></div>`).join('');
-    const hourly = (d.hours || []).map(day => `<div class="surf-hrow"><span class="surf-hlbl">${esc(dayLbl(day.date))}</span>` +
-      day.slots.map(x => `<div class="surf-d surf-h${cls(x.wind)}">
-        <div class="surf-lbl">${String(x.h).padStart(2, '0')}h</div>
-        <div class="surf-w">${Math.round(x.wind)}kt ${arrow(x.dir)}</div>
-        <div class="surf-v">${wv(x)}</div></div>`).join('') + '</div>').join('');
-    el.innerHTML = `<div class="surf-row">${daily}</div>${hourly}`;
-  }).catch(() => { const el = $('surf'); if (el) el.innerHTML = '<div class="empty">forecast unreachable</div>'; });
-}
 function renderLookahead() {
   const today0 = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   let el = document.getElementById('lookahead');
@@ -3869,7 +3795,7 @@ $('cfg-btn').onclick = cfgToggle;
 api('/api/plugins').then(({ plugins }) => {
   if (!plugins || !plugins.length) return;
   for (const p of plugins) {
-    const key = 'plugin:' + p.key;
+    const key = p.core ? p.key : 'plugin:' + p.key; // core plugin = extracted section, original key
     SEC_DEFS[key] = p.title;
     const sec = document.createElement('section');
     sec.dataset.sec = key;
@@ -3897,7 +3823,6 @@ api('/api/settings').then(s => {
   renderLookahead(); // settings may land after the calendar fetch
   markCycle();       // pink "?" on Today / Agent brief when the window overlaps
 }).catch(() => {});
-loadSurf();
 loadLocation();
 $('list-add-btn').onclick = quadAddList;
 // capability-driven degradation: with no LLM anywhere (no CLI, no API key, no other tier
