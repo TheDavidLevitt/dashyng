@@ -96,35 +96,46 @@ const isBioPath = p => p === BIO_ROUTE || p.startsWith(BIO_ROUTE + '/') || p.sta
 const RANMALI_ROUTE = '/ranmali';
 const RANMALI_GUEST_EMAILS = CFG.ranmaliEmails;
 const isRanmaliPath = p => p === RANMALI_ROUTE || p.startsWith(RANMALI_ROUTE + '/') || p.startsWith('/api/ranmali/');
-// Guest proxy routes (CFG.guestRoutes): a guest listed on a route is served a DIFFERENT
-// dashboard instance entirely — every request forwards to route.target with a shared-secret
-// header pair (X-Proxy-Auth / X-Proxy-User), so one OAuth client + one hostname front N
-// scoped instances. The owner previews an instance at its entry path (/exit returns).
+// Guest proxy routes (CFG.guestRoutes): another dashboard instance MOUNTED at a path.
+// /cha and everything under it forwards to that instance with a shared-secret header pair
+// (X-Proxy-Auth / X-Proxy-User), so one OAuth client + one hostname front N scoped
+// instances. The mount is a true path prefix — stripped on the way out, re-added to
+// redirects, and announced to the page as window.__BASE__ so its own fetches come back
+// under /cha. No cookie, no modes: dashyng.com is yours, dashyng.com/cha is theirs, and
+// both work in two tabs at once. (An earlier sticky-cookie "preview mode" made visiting
+// /cha silently replace your whole dashboard — deleted 2026-07-31.)
 const GUEST_ROUTES = (CFG.guestRoutes || []).filter(r => r && r.path && r.target);
 const guestRouteOf = em => GUEST_ROUTES.find(r => (r.emails || []).map(normEmail).includes(em));
+const routeForPath = p => GUEST_ROUTES.find(r => p === r.path || p.startsWith(r.path + '/'));
 // Inbound trust: when CFG.proxyAuthKey is set this instance ONLY answers its fronting proxy.
 const PROXY_AUTH_KEY = String(CFG.proxyAuthKey || '');
-async function proxyToInstance(route, req, res, email, preview) {
-  const url = route.target.replace(/\/$/, '') + req.originalUrl;
+async function proxyToInstance(route, req, res, email) {
+  const upstreamPath = req.originalUrl.slice(route.path.length) || '/';
   const headers = { 'x-proxy-auth': String(route.key || ''), 'x-proxy-user': email };
   if (req.headers['content-type']) headers['content-type'] = req.headers['content-type'];
   const body = ['GET', 'HEAD'].includes(req.method) ? undefined
     : (req.headers['content-type'] || '').includes('json') ? JSON.stringify(req.body || {}) : undefined;
   try {
-    const r = await fetch(url, { method: req.method, headers, body, redirect: 'manual' });
+    const r = await fetch(route.target.replace(/\/$/, '') + upstreamPath, { method: req.method, headers, body, redirect: 'manual' });
     res.status(r.status);
-    for (const h of ['content-type', 'cache-control', 'location']) { const v = r.headers.get(h); if (v) res.set(h, v); }
+    for (const h of ['content-type', 'cache-control']) { const v = r.headers.get(h); if (v) res.set(h, v); }
+    const loc = r.headers.get('location'); // upstream thinks it lives at /, so re-mount its redirects
+    if (loc) res.set('location', loc.startsWith('/') ? route.path + loc : loc);
     const buf = Buffer.from(await r.arrayBuffer());
-    // OWNER PREVIEW: the view cookie is sticky (assets and APIs must follow the page), so
-    // an unmarked preview looks exactly like "my dashboard was replaced". Every previewed
-    // page carries its own way out. 2026-07-31: this bit the owner within the hour.
-    if (preview && (r.headers.get('content-type') || '').includes('text/html')) {
-      return res.send(buf.toString('utf8') + `<div style="position:fixed;left:0;right:0;bottom:0;z-index:99999;background:#b58900;color:#111;
-        font:600 12px/1.6 system-ui,sans-serif;text-align:center;padding:5px">👁 previewing ${esc(route.path)} — this is not your dashboard
-        <a href="${esc(route.path)}/exit" style="color:#111;margin-left:10px;text-decoration:underline">exit preview</a></div>`);
+    if ((r.headers.get('content-type') || '').includes('text/html')) {
+      const html = buf.toString('utf8');
+      const inject = `<script>window.__BASE__=${JSON.stringify(route.path)}</script>`;
+      const at = html.search(/<head[^>]*>/i);
+      return res.send(at === -1 ? inject + html
+        : html.slice(0, at + html.match(/<head[^>]*>/i)[0].length) + inject + html.slice(at + html.match(/<head[^>]*>/i)[0].length));
     }
     res.send(buf);
-  } catch (e) { res.status(502).send('upstream instance unreachable'); }
+  } catch (e) {
+    // A bare "unreachable" once hid a ReferenceError as a network fault and 502'd every
+    // proxied page (2026-07-31). A proxy fault must always name itself.
+    console.error('proxyToInstance failed:', route.path, e.message);
+    res.status(502).send('proxy error: ' + String(e.message || e).slice(0, 200));
+  }
 }
 // Google delivers the SAME account under several spellings: googlemail.com is an alias of
 // gmail.com (it is what some regions/older phones return), dots in a gmail local part are
@@ -219,7 +230,7 @@ app.get('/auth/callback', asyncRoute(async (req, res) => {
   const nextPath = next.split('?')[0];
   if (BIO_GUEST_N.includes(email)) return res.redirect(isBioPath(nextPath) ? next : BIO_ROUTE);
   if (RANMALI_GUEST_N.includes(email)) return res.redirect(isRanmaliPath(nextPath) ? next : RANMALI_ROUTE);
-  if (guestRouteOf(email)) return res.redirect(next || '/'); // proxied-instance guest — gate routes every path
+  { const gr = guestRouteOf(email); if (gr) return res.redirect(routeForPath(nextPath) ? next : gr.path); }
   res.redirect(isGamePath(nextPath) ? next : '/junglefarm/');
 }));
 app.get('/auth/logout', (req, res) => {
@@ -294,25 +305,18 @@ app.use((req, res, next) => {
     if (sess) {
       const email = normEmail(sess.email);
       if (emailAllowed(email)) {
-        // owner preview of a proxied instance: entry path sets a view cookie, /exit clears
-        const vr = GUEST_ROUTES.find(r => r.path === req.path || req.path === r.path + '/exit');
-        if (vr) {
-          const on = req.path === vr.path;
-          // preview EXPIRES on its own (30 min): a forgotten cookie must never leave the
-          // owner staring at someone else's dashboard tomorrow morning
-          res.set('Set-Cookie', `dash_view=${on ? encodeURIComponent(vr.path) : ''}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${on ? 1800 : 0}`);
-          return res.redirect('/');
-        }
-        const vp = cookieOf(req, 'dash_view');
-        const rv = vp && GUEST_ROUTES.find(r => r.path === vp);
-        if (rv) return proxyToInstance(rv, req, res, email, true);
+        // the owner sees a mounted instance by visiting its path. Nothing sticky, nothing
+        // to exit: / is always their own dashboard, /cha is always the other one.
+        const mr = routeForPath(req.path);
+        if (mr) return proxyToInstance(mr, req, res, email);
         return next();
       }
       // Proxied-instance guests: a whole dashboard of their own outranks the single-page
       // carve-outs below — but someone who is ALSO a game guest keeps /junglefarm here.
       const gr = guestRouteOf(email);
       if (gr && !(GAME_GUEST_N.includes(email) && isGamePath(req.path))) {
-        if (req.path === gr.path) return res.redirect('/');
+        // guests live under the mount too, so page and API share one URL shape
+        if (!routeForPath(req.path)) return res.redirect(gr.path);
         return proxyToInstance(gr, req, res, email);
       }
       // game guests: /junglefarm only — anything else bounces back to the game

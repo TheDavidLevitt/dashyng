@@ -656,7 +656,12 @@ const hour = now.getHours();
 const greetWord = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
 let userName = '', homeLocation = '', headlineLoc = { text: '', sourceUrl: '' }; // filled in by /api/settings + /api/location
 
-const api = (path, opts) => fetch(path, opts ? { headers: {'Content-Type': 'application/json'}, ...opts } : undefined).then(r => r.json());
+// BASE: when this instance is served under a path prefix by a fronting dashboard
+// (window.__BASE__ injected by that proxy), every request it makes must carry the prefix.
+// Empty for a normally-hosted instance, so both modes run the same build.
+const BASE = (window.__BASE__ || '').replace(/\/$/, '');
+const url = p => (BASE && String(p).startsWith('/') ? BASE + p : p);
+const api = (path, opts) => fetch(url(path), opts ? { headers: {'Content-Type': 'application/json'}, ...opts } : undefined).then(r => r.json());
 
 function srcBadge(src) {
   if (!src) return '';
@@ -1434,7 +1439,7 @@ function attachHandlers() {
       rr.innerHTML = [1, 2, 3, 4, 5, 6, 0].map(i =>
         `<label style="display:inline-flex;align-items:center;gap:2px;font-size:10px;cursor:pointer"><input type="checkbox" data-d="${i}"${p0 && p0.days.includes(i) ? ' checked' : ''}>${RECUR_LABELS[i].slice(0, 2)}</label>`).join('')
         + ` <span class="tiny muted">every</span> <input type="number" data-n min="1" max="17" value="${p0 ? p0.n : 1}" style="width:36px;background:var(--bg2);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:11px"> <span class="tiny muted">wk</span>`
-        + ` <button data-exp>explain</button><button data-save style="color:var(--green)">save</button>${cur ? '<button data-clear style="color:var(--red)">clear</button>' : ''}`
+        + ` <button data-save style="color:var(--green)">save</button>${cur ? '<button data-clear style="color:var(--red)">clear</button>' : ''}`
         + ` <input data-desc placeholder="describe it — e.g. every tuesday and alternating thursdays" style="flex:1;min-width:170px;background:var(--bg2);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:11px;padding:1px 5px"><button data-parse>describe</button>`
         + ` <span class="tiny muted" data-msg style="flex-basis:100%">${cur ? esc(explainRecur(cur)) : ''}</span>`;
       row.after(rr);
@@ -1464,10 +1469,10 @@ function attachHandlers() {
       };
       rr.querySelector('[data-parse]').onclick = doParse;
       rr.querySelector('[data-desc]').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); doParse(); } };
-      rr.querySelector('[data-exp]').onclick = () => {
-        const r = readRule();
-        rr.querySelector('[data-msg]').textContent = r ? `${explainRecur(r)} — next: ${nextRecurClient(r)}` : 'pick at least one day';
-      };
+      // live rule readout — the old "explain" button only restated what the checkboxes said
+      const showRule = () => { const r = readRule();
+        rr.querySelector('[data-msg]').textContent = r ? `${explainRecur(r)} — next: ${nextRecurClient(r)}` : 'pick at least one day'; };
+      rr.querySelectorAll('[data-d],[data-n]').forEach(el => el.onchange = showRule);
       rr.querySelector('[data-save]').onclick = () => withTaskHistory('set repeat', async () => {
         const r = readRule();
         if (!r) { rr.querySelector('[data-msg]').textContent = 'pick at least one day'; return; }
@@ -1844,7 +1849,7 @@ function renderENotes() {
     <button class="jl-x" title="Remove">✕</button>
     ${n.type === 'image'
       ? (n.tier === enotesTier
-          ? `<a href="/api/enotes/img/${esc(n.id)}" target="_blank"><img src="/api/enotes/img/${esc(n.id)}" style="max-width:100%;border-radius:5px" loading="lazy"></a>`
+          ? `<a href="${url('/api/enotes/img/' + esc(n.id))}" target="_blank"><img src="${url('/api/enotes/img/' + esc(n.id))}" style="max-width:100%;border-radius:5px" loading="lazy"></a>`
           : `<div class="tiny muted">📷 captured on another device</div>`) + (n.caption ? `<div class="tiny">${esc(n.caption)}</div>` : '')
       : n.type === 'link'
       ? `<a href="${esc(n.text)}" target="_blank" rel="noopener" class="tiny" style="word-break:break-all">🔗 ${esc(n.text.replace(/^https?:\/\//, '').slice(0, 60))}</a>`
@@ -3941,7 +3946,7 @@ api('/api/agent-stable').then(d => {
 api('/api/filesystem').then(d => {
   if (d.unavailable) { $('filemgr').style.display = 'none'; return; }
   $('fm-meta').textContent = `(${d.totalFiles.toLocaleString()} tracked files · ${d.changed24h} changed 24h)`;
-  const openInFinder = (p, ev) => { ev.preventDefault(); fetch('/api/open?path=' + encodeURIComponent(p)).then(r => { if (!r.ok) alert('Open works on the Mac instance only'); }); };
+  const openInFinder = (p, ev) => { ev.preventDefault(); fetch(url('/api/open?path=' + encodeURIComponent(p))).then(r => { if (!r.ok) alert('Open works on the Mac instance only'); }); };
   window._openF = openInFinder;
   const fileLink = (p, label) => p.startsWith('…/')
     ? `<a href="https://drive.google.com/drive/search?q=${encodeURIComponent(p.split('/').pop())}" target="_blank">${esc(label)}</a>`

@@ -83,6 +83,10 @@ module.exports = {
   ranmaliEmails: (() => { const v = pick('ranmaliEmails', 'RANMALI_EMAILS', '');
     return (Array.isArray(v) ? v : String(v).split(','))
       .map(s => String(s).trim().toLowerCase()).filter(Boolean); })(),
+  // Spreadsheet shared with other people's instances — the sync home for records that are
+  // genuinely joint rather than per-owner (e.g. the cycle plugin's state, so two dashboards
+  // track one cycle). '' → such plugins fall back to todoSheetId and stay private.
+  sharedSheetId: pick('sharedSheetId', 'DASHBOARD_SHARED_SHEET_ID', ''),
   // Reverse-proxy instance routing (both halves generic; values live in env/config-local):
   // guestRoutes (outbound): [{path:'/x', target:'https://…', emails:[…], key:'secret'}] —
   // signed-in guests on a route are served that other dashboard instance for EVERY request;
