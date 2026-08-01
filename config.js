@@ -99,6 +99,11 @@ module.exports = {
   // proxyAuthKey (inbound): when set, EVERY request must carry X-Proxy-Auth: <key>
   // (identity arrives as X-Proxy-User) — the instance only answers its fronting proxy.
   proxyAuthKey: pick('proxyAuthKey', 'DASHBOARD_PROXY_AUTH_KEY', ''),
+  // Display languages in priority order (e.g. ['en','fr']). Incoming text in a language
+  // NOT on the list is translated to the FIRST entry; on-list languages are never
+  // translated between each other. '' = no translation anywhere.
+  languages: (() => { const v = pick('languages', 'DASHBOARD_LANGS', '');
+    return (Array.isArray(v) ? v : String(v).split(',')).map(x => String(x).trim().toLowerCase()).filter(Boolean); })(),
   // News source tiering [{match: regex, tier: 1-4}] — the owner's taste, never shipped
   newsTiers: (() => { const v = pick('newsTiers', 'DASHBOARD_NEWS_TIERS', null);
     if (Array.isArray(v)) return v;

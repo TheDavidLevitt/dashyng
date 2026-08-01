@@ -5387,11 +5387,47 @@ async function elistsPayload() {
 // One shared list in the Ephemeral-payload shape. Kept separate from elistsPayload so the
 // EXTERNAL token API can serve a list whether or not it has been promoted to a Task List —
 // promotion is an owner-side display choice and must never change the published contract.
+// ---------- display-language translation ----------
+// CFG.languages = priority list (['en','fr']). Text whose SCRIPT proves a language not on
+// the list (Sinhala, Arabic, CJK, …) is translated to languages[0]; anything in an on-list
+// language is left exactly as typed — en↔fr never translate into each other. Cached on
+// disk by content hash, so each string costs one LLM call ever.
+const FOREIGN_SCRIPTS = [[/[\u0D80-\u0DFF]/, 'si'], [/[\u0600-\u06FF]/, 'ar'], [/[\u0900-\u097F]/, 'hi'],
+  [/[\u4E00-\u9FFF]/, 'zh'], [/[\u3040-\u30FF]/, 'ja'], [/[\uAC00-\uD7AF]/, 'ko'],
+  [/[\u0400-\u04FF]/, 'ru'], [/[\u0E00-\u0E7F]/, 'th'], [/[\u10A0-\u10FF]/, 'ka'], [/[\u0590-\u05FF]/, 'he']];
+const foreignLangOf = t => { for (const [re, l] of FOREIGN_SCRIPTS) if (re.test(String(t))) return l; return null; };
+const TRANS_FILE = path.join(__dirname, 'data', 'translations.json');
+let transCache = null;
+function transLoad() { if (!transCache) { try { transCache = JSON.parse(fs.readFileSync(TRANS_FILE, 'utf8')); } catch (e) { transCache = {}; } } return transCache; }
+function transSave() { try { fs.writeFileSync(TRANS_FILE, JSON.stringify(transCache)); } catch (e) {} }
+const transKey = (t, lang) => lang + ':' + crypto.createHash('sha1').update(String(t)).digest('hex').slice(0, 16);
+async function translateForDisplay(texts) {
+  const target = (CFG.languages || [])[0];
+  if (!target) return {};
+  const cache = transLoad();
+  const need = [...new Set(texts.filter(t => t && foreignLangOf(t) && !(CFG.languages || []).includes(foreignLangOf(t))))];
+  const out = {};
+  const miss = [];
+  for (const t of need) { const k = transKey(t, target); if (cache[k]) out[t] = cache[k]; else miss.push(t); }
+  if (miss.length) {
+    try {
+      const raw = await runClaude('Translate each string to ' + target + '. Reply with ONLY a JSON array of the translations, same order, same length.\n'
+        + JSON.stringify(miss.slice(0, 20)), { module: 'display-translate', timeoutMs: 30000 });
+      const arr = JSON.parse((raw.match(/\[[\s\S]*\]/) || ['[]'])[0]);
+      miss.slice(0, 20).forEach((t, i) => { if (typeof arr[i] === 'string' && arr[i].trim()) { out[t] = arr[i].trim(); cache[transKey(t, target)] = out[t]; } });
+      transSave();
+    } catch (e) {} // untranslated beats blocked — the original text still shows
+  }
+  return out;
+}
+
 async function sharedListView(slug, cfg) {
   const { items, comments } = await sharedListRead(cfg.sheetId, cfg.tab || slug);
+  const tr = await translateForDisplay([...items.map(i => i.text), ...comments.map(c => c.Text)]);
+  const disp = t => tr[t] || t;
   return { id: 'jl:' + slug, heading: cfg.label || (cfg.name ? cfg.name + ' tasks' : slug), persistent: true, shared: true,
-    items: items.map(i => ({ text: i.text, done: i.mark === 'Y', doer: i.mark === 'D',
-      comments: comments.filter(c => c.Item === i.text || !c.Item).map(c => ({ from: c.From, text: c.Text, at: c.At })) })) };
+    items: items.map(i => ({ text: disp(i.text), orig: tr[i.text] ? i.text : undefined, done: i.mark === 'Y', doer: i.mark === 'D',
+      comments: comments.filter(c => c.Item === i.text || !c.Item).map(c => ({ from: c.From, text: disp(c.Text), at: c.At })) })) };
 }
 app.get('/api/journal-lists', asyncRoute(async (req, res) => res.json({ lists: await elistsPayload() })));
 app.post('/api/journal-lists/scan', asyncRoute(async (req, res) => {
@@ -5544,6 +5580,8 @@ function parseSharedId(id) {
 async function sharedTasksFor(bind) {
   const tab = bind.cfg.tab || bind.slug;
   const { items, comments } = await sharedListRead(bind.cfg.sheetId, tab);
+  const tr = await translateForDisplay([...items.map(i => i.text), ...comments.map(c => c.Text)]);
+  const disp = x => tr[x] || x;
   const t = today();
   const out = [];
   for (const i of items) {
@@ -5557,12 +5595,12 @@ async function sharedTasksFor(bind) {
       await sharedListSetDoerCols(bind.cfg.sheetId, tab, i.row, { reportedOn: '', occFrom, doneLog: log.slice(-30).join(',') });
       Object.assign(i, { mark: '', reportedOn: '', occFrom, doneLog: log.slice(-30).join(',') });
     }
-    const mine = comments.filter(c => c.Item === i.text || !c.Item).map(c => ({ from: c.From, text: c.Text, at: c.At }));
+    const mine = comments.filter(c => c.Item === i.text || !c.Item).map(c => ({ from: c.From, text: disp(c.Text), at: c.At }));
     const past = i.occFrom ? mine.filter(c => String(c.at || '').slice(0, 10) < i.occFrom) : [];
     const now = i.occFrom ? mine.filter(c => !(String(c.at || '').slice(0, 10) < i.occFrom)) : mine;
     const doneLog = (i.doneLog || '').split(',').map(s => s.trim()).filter(Boolean);
     out.push({
-      ID: `sh:${bind.slug}:${i.row}`, Task: i.text, Quadrant: bind.key,
+      ID: `sh:${bind.slug}:${i.row}`, Task: disp(i.text), TaskOrig: tr[i.text] ? i.text : undefined, Quadrant: bind.key,
       Status: i.mark === 'Y' ? 'done' : 'Open', Due: i.due || '', Tags: i.tags || '',
       Scope: 'Shared', Owner: bind.cfg.name || '', Notes: '', Created: '', Updated: '',
       Source: 'shared', Order: '', Parent: '',

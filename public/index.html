@@ -2078,7 +2078,8 @@ function renderJList() {
       };
       row.querySelector('.jl-chk').onchange = ev => {
         it.done = ev.target.checked; row.classList.toggle('done', it.done);
-        api(`/api/journal-lists/${encodeURIComponent(list.id)}/item`, { method: 'POST', body: JSON.stringify({ text: it.text, done: it.done }) });
+        // translated items keep their ORIGINAL text as the storage key
+        api(`/api/journal-lists/${encodeURIComponent(list.id)}/item`, { method: 'POST', body: JSON.stringify({ text: it.orig || it.text, done: it.done }) });
       };
     });
   });
