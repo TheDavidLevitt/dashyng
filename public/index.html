@@ -848,7 +848,8 @@ function cfgToggle() {
       <label><input type="checkbox" class="cfg-con" ${c.on !== false ? 'checked' : ''}></label>
       <input class="cfg-cid" value="${esc(c.url || c.id || '')}" placeholder="calendar id or .ics URL" style="flex:1">
       <button class="cfg-cdel">✕</button></div>`).join('')}</div>
-    <div class="cfg-row"><button id="cfg-caladd">＋ calendar</button><span class="tiny muted">empty list = the default calendar</span></div>
+    <div class="cfg-row"><button id="cfg-caladd">＋ calendar</button><span class="tiny muted">empty list = the default calendar</span>
+      <a href="${url('/auth/calendar/connect')}" style="margin-left:auto"><button type="button">🔗 Connect Google Calendar</button></a></div>
     <div class="cfg-head">Location tracking — evidence sources for the headline &amp; look-ahead bars</div>
     <div class="tiny muted" style="margin-bottom:3px">Calendar (multi-day events) and Locations-of-interest always run. Gmail (flight/train/hotel confirmations) needs a one-time consent:
       ${caps.gmail ? '<b style="color:var(--green)">connected</b> · <a href="/auth/gmail/connect" target="_blank">reconnect</a> · <a href="/auth/gmail/disconnect">disconnect</a>' : '<a href="/auth/gmail/connect" target="_blank"><b>connect Gmail →</b></a>'}

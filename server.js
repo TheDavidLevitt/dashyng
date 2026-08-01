@@ -218,6 +218,7 @@ if (location.hostname.startsWith('www.')) location.replace(location.href.replace
 });
 app.get('/auth/callback', asyncRoute(async (req, res) => {
   if (req.query.state === 'gmail') return gmailConsentReturn(req, res);
+  if (req.query.state === 'gcal') return gcalConsentReturn(req, res);
   const c = new OAuth2Client(OAUTH_ID, OAUTH_SECRET, redirectUri(req));
   const { tokens } = await c.getToken(req.query.code);
   const ticket = await c.verifyIdToken({ idToken: tokens.id_token, audience: OAUTH_ID });
@@ -247,6 +248,29 @@ app.get('/auth/logout', (req, res) => {
 // API access). Requires GOOGLE_OAUTH_CLIENT_ID/SECRET already configured for Sign-in-with-
 // Google; the Gmail API must be enabled on the same GCP project (gcloud services enable
 // gmail.googleapis.com — already done for the reference project).
+// ---------- Google Calendar connect (guest/public instances) ----------
+// One button: OAuth with calendar.readonly, refresh token into the settings store (the
+// instance's own sheet cell — survives Cloud Run restarts). The owner-tier alternative
+// (share the calendar with the service account) keeps working; this is for instances
+// whose user has no service account to share with.
+app.get('/auth/calendar/connect', (req, res) => {
+  if (!OAUTH_ID) return res.status(501).send('Set GOOGLE_OAUTH_CLIENT_ID/SECRET first — see .env.example.');
+  const c = new OAuth2Client(OAUTH_ID, OAUTH_SECRET, redirectUri(req));
+  res.redirect(c.generateAuthUrl({ scope: ['https://www.googleapis.com/auth/calendar.readonly', 'email'], access_type: 'offline', prompt: 'consent', state: 'gcal' }));
+});
+async function gcalConsentReturn(req, res) {
+  const c = new OAuth2Client(OAUTH_ID, OAUTH_SECRET, redirectUri(req));
+  const { tokens } = await c.getToken(req.query.code);
+  if (!tokens.refresh_token) return res.status(400).send('Google did not return a refresh token — revoke prior access at https://myaccount.google.com/permissions and try again.');
+  const next = { ...loadSettings(), gcalToken: { refresh_token: tokens.refresh_token, connectedAt: nowIso() } };
+  await saveSettings(next);
+  res.send('Calendar connected. <a href="/">← back</a>');
+}
+app.get('/auth/calendar/disconnect', asyncRoute(async (req, res) => {
+  const next = { ...loadSettings() }; delete next.gcalToken;
+  await saveSettings(next); res.redirect('/');
+}));
+
 app.get('/auth/gmail/connect', (req, res) => {
   if (!OAUTH_ID) return res.status(501).send('Set GOOGLE_OAUTH_CLIENT_ID/SECRET first (same as Sign-in-with-Google) — see .env.example.');
   const c = new OAuth2Client(OAUTH_ID, OAUTH_SECRET, redirectUri(req));
@@ -1902,8 +1926,16 @@ async function fetchCalendarEvents(daysAhead) {
   const now = new Date();
   const timeMin = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const weekEnd = new Date(now.getTime() + daysAhead * 24 * 3600 * 1000);
-  const cfg = (loadSettings().calendars || []).filter(c => c.on !== false);
-  const sources = cfg.length ? cfg : [{ type: 'gcal', id: CALENDAR_ID }];
+  const settings0 = loadSettings();
+  const cfg = (settings0.calendars || []).filter(c => c.on !== false);
+  const sources = cfg.length ? cfg : [{ type: 'gcal', id: CALENDAR_ID || (settings0.gcalToken ? 'primary' : '') }];
+  // user-connected calendar (OAuth refresh token) — used for gcal reads when present
+  let userCal = null;
+  if (settings0.gcalToken && settings0.gcalToken.refresh_token && OAUTH_ID) {
+    const oc = new OAuth2Client(OAUTH_ID, OAUTH_SECRET);
+    oc.setCredentials({ refresh_token: settings0.gcalToken.refresh_token });
+    userCal = google.calendar({ version: 'v3', auth: oc });
+  }
   const events = [];
   const errors = [];
   await pmap(sources, async src => {
@@ -1913,7 +1945,7 @@ async function fetchCalendarEvents(daysAhead) {
         if (!r.ok) throw new Error(`ical HTTP ${r.status}`);
         events.push(...parseIcs(await r.text(), timeMin, weekEnd).map(e => ({ ...e, source: src.url.slice(0, 40) })));
       } else {
-        const r = await calendar.events.list({
+        const r = await (userCal || calendar).events.list({
           calendarId: src.id || CALENDAR_ID, timeMin: timeMin.toISOString(), timeMax: weekEnd.toISOString(),
           singleEvents: true, orderBy: 'startTime', maxResults: 50,
         });
