@@ -24,6 +24,8 @@ module.exports = {
   // configured, local-JSON otherwise — the zero-Google blank-canvas default)
   store: pick('store', 'DASHBOARD_STORE', 'auto'),
   todoSheetId: pick('todoSheetId', 'DASHBOARD_SHEET_ID', ''),
+  // tab holding the task rows; '' keeps the historical name for existing sheets
+  todoTab: pick('todoTab', 'DASHBOARD_TODO_TAB', ''),
   prefsSheetId: pick('prefsSheetId', 'DASHBOARD_PREFS_SHEET_ID', ''),
   stableSheetId: pick('stableSheetId', 'STABLE_SHEET_ID', ''), // '' → resolved to todoSheetId (pre-split behavior)
   calendarId: pick('calendarId', 'DASHBOARD_CALENDAR_ID', ''), // '' = calendar section shows its setup hint
@@ -97,6 +99,10 @@ module.exports = {
   // proxyAuthKey (inbound): when set, EVERY request must carry X-Proxy-Auth: <key>
   // (identity arrives as X-Proxy-User) — the instance only answers its fronting proxy.
   proxyAuthKey: pick('proxyAuthKey', 'DASHBOARD_PROXY_AUTH_KEY', ''),
+  // Guest-CI auto-apply: '1' = a note in the CI box modifies THIS instance's settings
+  // immediately (whitelisted layout ops only), logged as an idea; capped per day.
+  ciAutoApply: pick('ciAutoApply', 'DASHBOARD_CI_AUTO_APPLY', ''),
+  ciApplyPerDay: Number(pick('ciApplyPerDay', 'DASHBOARD_CI_APPLY_PER_DAY', 20)) || 20,
   // Google AI Studio FREE tier (rate-limited, may train on data → non-personal modules only)
   geminiFreeKey: pick('geminiFreeKey', 'GEMINI_API_KEY', ''),
   geminiFreeModel: pick('geminiFreeModel', 'GEMINI_FREE_MODEL', 'gemini-2.5-flash'),

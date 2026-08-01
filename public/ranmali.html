@@ -1,24 +1,32 @@
 <!doctype html>
-<html lang="en">
+<html lang="si">
 <head>
 <meta charset="utf-8">
-<!-- Hampr donate checklist — phone-only page for Ranmali (Samsung / Chrome Android).
-     One photo per clothing piece from the Thriftr "Donate" Drive folder; she ticks each
-     piece as she physically takes it, then presses Done, which moves the checked photos
-     to "Donated" (server reparents them in Drive). Served behind the dashboard's Google
-     sign-in; guests on RANMALI_EMAILS can reach only this page. -->
+<!-- Ranmali's page — phone-only (Samsung / Chrome Android). Two sections:
+     (1) tasks David shares from his dashboard — today's list plus a 3-day look-ahead,
+         one box per day; she reports items done, David confirms on his side;
+     (2) the Hampr donate checklist — photos from the Thriftr "Donate" Drive folder,
+         Done moves the ticked ones to "Donated".
+     ALL user-facing copy is bilingual, Sinhala first (David 2026-08-01).
+     Served behind the dashboard's Google sign-in; RANMALI_EMAILS guests reach only this. -->
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0d1117">
-<title>Clothes · Hampr</title>
+<title>අද වැඩ · Tasks</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
   html, body { background: #0d1117; color: #e6edf3; font-family: system-ui, sans-serif; }
-  body { min-height: 100dvh; padding-bottom: calc(96px + env(safe-area-inset-bottom)); }
+  /* Sinhala needs more leading than Latin — set it globally rather than per block */
+  body { min-height: 100dvh; line-height: 1.5; padding-bottom: calc(96px + env(safe-area-inset-bottom)); }
+  .en { color: #8b949e; }                     /* the English half of every bilingual string */
 
+  h1, h2 { line-height: 1.35; }
   header { padding: 18px 16px 6px; }
-  header h1 { font-size: 22px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
-  header .hint { margin-top: 4px; font-size: 14px; line-height: 1.45; color: #9aa4b2; }
-  header .hint .si { display: block; font-size: 13.5px; }
+  header h1 { font-size: 21px; font-weight: 700; }
+  header h1 .en { font-size: 18px; }
+  header .hint { margin-top: 6px; font-size: 15px; color: #c9d1d9; }
+  header .hint .en { display: block; font-size: 14px; }
+  header .sub { margin-top: 8px; font-size: 13.5px; color: #9aa4b2; }
+  header .sub .en { display: block; font-size: 12.5px; }
 
   #status { padding: 40px 16px; text-align: center; color: #9aa4b2; font-size: 15px; }
   #status .big { font-size: 44px; margin-bottom: 10px; }
@@ -29,7 +37,6 @@
   .card img { display: block; width: 100%; min-height: 120px; background: #21262d; }
   .card.checked { border-color: #2ea043; }
   .card.checked img { opacity: .38; }
-  /* the tick — always visible so it reads as a checkbox, fills green when checked */
   .tick { position: absolute; top: 10px; right: 10px; width: 44px; height: 44px;
           border-radius: 50%; border: 3px solid #e6edf3; background: rgba(13,17,23,.55);
           display: flex; align-items: center; justify-content: center;
@@ -41,10 +48,13 @@
 
   #bar { position: fixed; left: 0; right: 0; bottom: 0; padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
          background: rgba(13,17,23,.92); backdrop-filter: blur(6px); border-top: 1px solid #30363d; }
-  #doneBtn { width: 100%; padding: 16px; border: 0; border-radius: 12px; font-size: 19px;
-             font-weight: 700; font-family: inherit; background: #2ea043; color: #fff; }
+  #doneBtn { width: 100%; padding: 15px; border: 0; border-radius: 12px; font-size: 18px;
+             font-weight: 700; font-family: inherit; line-height: 1.3; background: #2ea043; color: #fff; }
+  #doneBtn .en { color: rgba(255,255,255,.8); }
   #doneBtn:disabled { background: #21262d; color: #57606a; }
+  #doneBtn:disabled .en { color: #57606a; }
   #doneBtn.confirm { background: #d29922; color: #0d1117; }
+  #doneBtn.confirm .en { color: rgba(13,17,23,.7); }
   #toast { position: fixed; left: 50%; transform: translateX(-50%);
            bottom: calc(96px + env(safe-area-inset-bottom)); background: #2ea043; color: #fff;
            padding: 10px 18px; border-radius: 999px; font-size: 15px; font-weight: 600;
@@ -52,71 +62,152 @@
   #toast.err { background: #da3633; }
   #toast.show { opacity: 1; }
 
-  /* ---- task checklist (lists David shares from his dashboard) ---- */
-  #tasks { padding: 4px 12px 0; }
-  #tasks h2 { font-size: 18px; font-weight: 700; padding: 8px 4px 2px; }
-  #tasks .listHead { font-size: 14.5px; font-weight: 600; color: #9aa4b2; padding: 10px 4px 6px; }
+  /* ---- tasks ---- */
+  #tasks { padding: 6px 12px 0; }
+  #tasks h2 { font-size: 19px; font-weight: 700; padding: 10px 4px 6px; }
+  #tasks h2 .en { font-size: 16px; }
+  #tasks .listHead { font-size: 14px; font-weight: 600; color: #9aa4b2; padding: 8px 4px 4px; }
   .task { background: #161b22; border: 2px solid #30363d; border-radius: 12px; margin-bottom: 8px; }
   .task .rowMain { display: flex; align-items: center; gap: 12px; padding: 12px; }
   .task .box { flex: 0 0 34px; height: 34px; border-radius: 50%; border: 3px solid #e6edf3;
                display: flex; align-items: center; justify-content: center; font-size: 20px; color: transparent; }
-  .task .txt { flex: 1; font-size: 16px; line-height: 1.35; overflow-wrap: anywhere; }
-  .task .lbl { display: block; font-size: 12px; margin-top: 2px; }
-  .task.reported { border-color: #d29922; }
-  .task.reported .box { background: #d29922; border-color: #d29922; color: #0d1117; }
-  .task.reported .lbl { color: #d29922; }
-  .task.done { border-color: #2ea043; opacity: .65; }
-  .task.done .box { background: #2ea043; border-color: #2ea043; color: #fff; }
-  .task.done .txt { text-decoration: line-through; }
-  .task.done .lbl { color: #2ea043; }
+  .task .txt { flex: 1; font-size: 16px; overflow-wrap: anywhere; }
+  .task .lbl { display: block; font-size: 12.5px; margin-top: 2px; }
+  .task.doneRow { border-color: #2ea043; }
+  .task.doneRow .box { background: #2ea043; border-color: #2ea043; color: #fff; }
+  /* strike ONLY the task text: text-decoration propagates to descendants and a child
+     cannot undo it, so the "completed" label must sit outside the struck span */
+  .task.doneRow .body { text-decoration: line-through; opacity: .7; }
+  .task.doneRow .lbl { color: #2ea043; }
   .task .ask { flex: 0 0 auto; border: 0; background: #21262d; color: #9aa4b2; font-size: 17px;
                padding: 8px 11px; border-radius: 10px; font-family: inherit; }
   .task .cmts { padding: 0 12px 8px 58px; }
-  .task .cmt { font-size: 13px; color: #9aa4b2; padding: 2px 0; overflow-wrap: anywhere; }
+  .task .cmt { font-size: 13.5px; color: #9aa4b2; padding: 3px 0; overflow-wrap: anywhere; }
   .task .cmt b { color: #b8c2cc; font-weight: 600; }
-  .task .askRow { display: none; gap: 8px; padding: 0 12px 12px 58px; }
+  /* a reply from David reads as an answer *under* her question: indented, accented */
+  .task .cmt.reply { margin-left: 10px; padding-left: 10px; border-left: 3px solid #388bfd; color: #c9d1d9; }
+  .task .cmt.reply b { color: #58a6ff; }
+  .task .cmt .at { color: #6e7681; font-size: 12px; }
+  .task .hist { flex: 0 0 auto; border: 0; background: #21262d; color: #8b949e; font-size: 15px;
+                padding: 8px 10px; border-radius: 10px; font-family: inherit; }
+  .task .histPanel { display: none; padding: 0 12px 10px 58px; }
+  .task .histPanel.open { display: block; }
+  .task .histPanel .hTitle { font-size: 12.5px; font-weight: 700; color: #8b949e; padding: 2px 0 4px; }
+  .task .histPanel .done { font-size: 13px; color: #2ea043; padding-bottom: 6px; }
+  .task .askRow { display: none; flex-direction: column; gap: 8px; padding: 0 12px 12px 58px; }
   .task .askRow.open { display: flex; }
+  .task .askRow .askHint { font-size: 12px; color: #8b949e; }
+  .task .askRow .askLine { display: flex; gap: 8px; }
   .task .askRow input { flex: 1; min-width: 0; background: #0d1117; border: 1px solid #30363d;
                border-radius: 10px; color: #e6edf3; font-size: 15px; padding: 10px; font-family: inherit; }
   .task .askRow button { border: 0; background: #2ea043; color: #fff; font-weight: 700;
                border-radius: 10px; padding: 0 16px; font-size: 15px; font-family: inherit; }
+  .chip { display: inline-block; font-size: 11.5px; font-weight: 700; border-radius: 999px;
+          padding: 2px 8px; margin-left: 6px; vertical-align: 2px; }
+  .chip.late { background: #da3633; color: #fff; }
+
+  /* one box per look-ahead day — the separation between days must be unmistakable */
+  .dayBox { background: #0f141b; border: 2px solid #30363d; border-radius: 14px;
+            margin-bottom: 14px; overflow: hidden; }
+  .dayHead { display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+             padding: 10px 12px; background: #161b22; border-bottom: 2px solid #30363d;
+             font-size: 15px; font-weight: 700; }
+  .dayHead .en { font-size: 13px; font-weight: 600; }
+  .dayHead .date { font-size: 12px; color: #8b949e; font-weight: 600; white-space: nowrap; }
+  .dayBody { padding: 10px 10px 2px; }
+  .dayBody .task { background: #161b22; }
+  .dayBody .empty { padding: 2px 4px 12px; font-size: 13.5px; color: #6e7681; }
 </style>
 </head>
 <body>
+
 <section id="tasks" hidden>
-  <h2>📋 Tasks for today · අද වැඩ</h2>
-  <div id="taskLists"></div>
+  <h2>📋 අද වැඩ <span class="en">· Tasks for today</span></h2>
+  <div id="taskToday"></div>
+  <div id="aheadWrap" hidden>
+    <h2>🗓️ ඉදිරි දින 3 <span class="en">· 3-day look-ahead</span></h2>
+    <div id="taskAhead"></div>
+  </div>
 </section>
 
 <header>
-  <h1>🧺 Clothes for donation</h1>
-  <div class="hint">Please take and help us give to someone who can use it.
-    <span class="si">කරුණාකර මේ ඇඳුම් අරගෙන, පාවිච්චි කරන්න පුළුවන් කෙනෙකුට දෙන්න අපට උදව් කරන්න.</span>
+  <h1>🧺 පරිත්‍යාග සඳහා ඇඳුම් <span class="en">· Clothes for donation</span></h1>
+  <div class="hint">කරුණාකර මේ ඇඳුම් අරගෙන, පාවිච්චි කරන්න පුළුවන් කෙනෙකුට දෙන්න අපට උදව් කරන්න.
+    <span class="en">Please take and help us give to someone who can use it.</span>
   </div>
-  <div class="hint" style="margin-top:6px; font-size:13px">Tick ✓ each piece as you take it, then press Done.
-    <span class="si" style="font-size:12.5px">ඇඳුම ගත්තාම ✓ කරන්න. ඉවර වුණාම Done ඔබන්න.</span>
+  <div class="sub">ඇඳුම ගත්තාම ✓ කරන්න. ඔක්කොම ඉවර වුණාම “ඉවරයි” ඔබන්න.
+    <span class="en">Tick ✓ each piece as you take it, then press Done.</span>
   </div>
 </header>
 
-<div id="status"><div class="big">⏳</div>Loading…</div>
+<div id="status"><div class="big">⏳</div>පූරණය වෙනවා… <span class="en">Loading…</span></div>
 <div id="list"></div>
 
 <div id="bar" hidden>
-  <button id="doneBtn" disabled>Done</button>
+  <button id="doneBtn" disabled>ඉවරයි <span class="en">· Done</span></button>
 </div>
 <div id="toast"></div>
 
 <script>
 (() => {
   const $ = id => document.getElementById(id);
+  // every user-facing string in one place: [Sinhala, English] — Sinhala always leads
+  const T = {
+    loading:    ['පූරණය වෙනවා…', 'Loading…'],
+    allDone:    ['ඔක්කොම ඉවරයි!', 'All done — nothing left.'],
+    loadFail:   ['පූරණය කරන්න බැරි වුණා. අන්තර්ජාලය බලලා නැවත උත්සාහ කරන්න.', 'Could not load — check the internet and refresh.'],
+    saveFail:   ['සුරකින්න බැරි වුණා — නැවත උත්සාහ කරන්න', 'Could not save — try again'],
+    sendFail:   ['යවන්න බැරි වුණා — නැවත උත්සාහ කරන්න', 'Could not send — try again'],
+    sent:       ['යැව්වා ✓', 'Sent to David'],
+    completed:  ['සම්පූර්ණයි ✓', 'completed'],
+    late:       ['පරක්කුයි', 'late'],
+    already:    ['මේක දැනටමත් තහවුරු කරලා', 'Already confirmed by David'],
+    nothing:    ['වැඩ නැහැ', 'nothing'],
+    nothingToday: ['අද වෙන වැඩ නැහැ', 'nothing else for today'],
+    history:    ['ඉතිහාසය', 'History'],
+    askHint:    ['සිංහලෙන් හෝ ඉංග්‍රීසියෙන් ලියන්න', 'Write in Sinhala or English'],
+    askPlace:   ['ප්‍රශ්නයක් ලියන්න…', 'Ask a question…'],
+    send:       ['යවන්න', 'Send'],
+    done:       ['ඉවරයි', 'Done'],
+    pressAgain: ['නැවත ඔබන්න', 'Press again to finish'],
+    moved:      ['ගත්තා. ස්තූතියි!', 'moved. Thank you!'],
+    tomorrow:   ['හෙට', 'Tomorrow'],
+  };
+  const SI_DAYS = ['ඉරිදා', 'සඳුදා', 'අඟහරුවාදා', 'බදාදා', 'බ්‍රහස්පතින්දා', 'සිකුරාදා', 'සෙනසුරාදා'];
+  const EN_DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const EN_MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  // <si> · <en, dimmed> — one helper so no string can drift out of the bilingual shape
+  function bi(pair, tag) {
+    const el = document.createElement(tag || 'span');
+    el.appendChild(document.createTextNode(pair[0] + ' '));
+    const en = document.createElement('span'); en.className = 'en'; en.textContent = '· ' + pair[1];
+    el.appendChild(en);
+    return el;
+  }
+  const biText = pair => pair[0] + ' · ' + pair[1];
+  const fmtDay = iso => { const d = new Date(Date.parse(String(iso).slice(0, 10) + 'T00:00:00Z'));
+    return isNaN(d) ? iso : d.getUTCDate() + ' ' + EN_MON[d.getUTCMonth()]; };
+  // one comment line; anyone who is not her is answering her, so it renders as a reply
+  function cmtEl(c, withDate) {
+    const d = document.createElement('div');
+    d.className = 'cmt' + (/^ranmali$/i.test(String(c.from || '').trim()) ? '' : ' reply');
+    const b = document.createElement('b'); b.textContent = c.from + ': ';
+    d.append(b, document.createTextNode(c.text));
+    if (withDate && c.at) {
+      const s = document.createElement('span'); s.className = 'at'; s.textContent = ' · ' + fmtDay(c.at);
+      d.appendChild(s);
+    }
+    return d;
+  }
+
   const checked = new Set();
   let items = [];
-  let confirmArmed = false;
-  let confirmTimer = null;
-  let busy = false;
+  let confirmArmed = false, confirmTimer = null, busy = false;
 
-  function showStatus(icon, text) {
-    $('status').innerHTML = `<div class="big">${icon}</div>${text}`;
+  function showStatus(icon, pair) {
+    $('status').innerHTML = '';
+    const big = document.createElement('div'); big.className = 'big'; big.textContent = icon;
+    $('status').append(big, bi(pair, 'div'));
     $('status').style.display = 'block';
   }
   function toast(msg, isErr) {
@@ -124,22 +215,18 @@
     t.textContent = msg;
     t.className = isErr ? 'err show' : 'show';
     clearTimeout(t._h);
-    t._h = setTimeout(() => t.className = t.className.replace(' show', '').replace('show', ''), 3000);
+    t._h = setTimeout(() => { t.className = ''; }, 3000);
   }
-  function disarmConfirm() {
-    confirmArmed = false;
-    clearTimeout(confirmTimer);
-    updateBar();
-  }
+  function disarmConfirm() { confirmArmed = false; clearTimeout(confirmTimer); updateBar(); }
   function updateBar() {
-    const n = checked.size;
-    const btn = $('doneBtn');
+    const n = checked.size, btn = $('doneBtn');
     $('bar').hidden = items.length === 0;
     btn.disabled = n === 0 || busy;
     btn.classList.toggle('confirm', confirmArmed && n > 0);
-    btn.textContent = busy ? '⏳ …'
-      : confirmArmed && n > 0 ? `Press again to finish ✓ ${n}`
-      : n > 0 ? `Done ✓ ${n}` : 'Done';
+    btn.innerHTML = '';
+    if (busy) { btn.textContent = '⏳ …'; return; }
+    btn.appendChild(bi(confirmArmed && n > 0 ? T.pressAgain : T.done));
+    if (n > 0) btn.appendChild(document.createTextNode(' ✓ ' + n));
   }
 
   function render() {
@@ -148,7 +235,8 @@
     for (const it of items) {
       const card = document.createElement('div');
       card.className = 'card' + (checked.has(it.id) ? ' checked' : '');
-      card.innerHTML = `<img src="${it.imgUrl}" alt="clothing photo" loading="lazy"><div class="tick">✓</div>`;
+      card.innerHTML = '<img alt="" loading="lazy"><div class="tick">✓</div>';
+      card.querySelector('img').src = it.imgUrl;
       card.onclick = () => {
         if (busy) return;
         checked.has(it.id) ? checked.delete(it.id) : checked.add(it.id);
@@ -157,13 +245,13 @@
       };
       list.appendChild(card);
     }
-    if (items.length === 0) showStatus('🎉', 'All done! Nothing left.<br>ඔක්කොම ඉවරයි!');
+    if (items.length === 0) showStatus('🎉', T.allDone);
     else $('status').style.display = 'none';
     updateBar();
   }
 
   async function load() {
-    showStatus('⏳', 'Loading…');
+    showStatus('⏳', T.loading);
     try {
       const r = await fetch('/api/ranmali/items');
       if (r.status === 401) { location.href = '/auth/login?next=' + encodeURIComponent('/ranmali'); return; }
@@ -172,16 +260,15 @@
       for (const id of [...checked]) if (!items.some(it => it.id === id)) checked.delete(id);
       render();
     } catch (e) {
-      showStatus('😕', 'Could not load. Check internet and pull to refresh.<br>අන්තර්ජාලය බලලා නැවත උත්සාහ කරන්න.');
+      showStatus('😕', T.loadFail);
       $('bar').hidden = true;
     }
   }
 
   $('doneBtn').onclick = async () => {
     if (busy || checked.size === 0) return;
-    if (!confirmArmed) {           // two-tap confirm instead of a system dialog
-      confirmArmed = true;
-      updateBar();
+    if (!confirmArmed) {                    // two-tap confirm instead of a system dialog
+      confirmArmed = true; updateBar();
       confirmTimer = setTimeout(disarmConfirm, 6000);
       return;
     }
@@ -189,55 +276,78 @@
     busy = true; updateBar();
     try {
       const ids = [...checked];
-      const r = await fetch('/api/ranmali/done', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ids }),
-      });
+      const r = await fetch('/api/ranmali/done', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }) });
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const out = await r.json();
       for (const id of out.moved) checked.delete(id);
       items = items.filter(it => !out.moved.includes(it.id));
-      if (out.failed.length) toast(`${out.moved.length} moved, ${out.failed.length} failed — try again`, true);
-      else toast(`✓ ${out.moved.length} moved. Thank you! ස්තූතියි!`);
-    } catch (e) {
-      toast('Could not save — try again / නැවත උත්සාහ කරන්න', true);
-    }
+      if (out.failed.length) toast(`${out.moved.length} ✓ / ${out.failed.length} ✕ — ${biText(T.saveFail)}`, true);
+      else toast('✓ ' + out.moved.length + ' ' + biText(T.moved));
+    } catch (e) { toast(biText(T.saveFail), true); }
     busy = false;
     render();
   };
 
-  // ---- task checklist (lists David shares from his dashboard) ----
-  // Tap = report done (amber, undoable by tapping again); green = David confirmed.
+  // ---- tasks David shares from his dashboard ----
+  // Tap = report done (green ✓ "completed", tap again to undo). Once David confirms it on
+  // his side it locks. Reported items stay visible, checked, until midnight — the server
+  // decides that (it stamps the report date), so a page left open self-corrects.
   let taskBusy = false;
   function taskRow(list, it) {
+    const isDone = it.status !== 'open';
     const row = document.createElement('div');
-    row.className = 'task' + (it.status === 'done' ? ' done' : it.status === 'reported' ? ' reported' : '');
+    row.className = 'task' + (isDone ? ' doneRow' : '');
     const main = document.createElement('div'); main.className = 'rowMain';
     const box = document.createElement('div'); box.className = 'box'; box.textContent = '✓';
-    const txt = document.createElement('div'); txt.className = 'txt'; txt.textContent = it.text;
-    const lbl = document.createElement('span'); lbl.className = 'lbl';
-    lbl.textContent = it.status === 'done' ? 'Done ✓ · හරි'
-      : it.status === 'reported' ? 'Reported ✓ David will check · කිව්වා' : '';
+    const txt = document.createElement('div'); txt.className = 'txt';
+    const bodySpan = document.createElement('span'); bodySpan.className = 'body';
+    bodySpan.textContent = it.text;
+    txt.appendChild(bodySpan);
+    if (it.late) {
+      const c = document.createElement('span'); c.className = 'chip late'; c.textContent = biText(T.late);
+      txt.appendChild(c);
+    }
+    const lbl = bi(T.completed); lbl.className = 'lbl';
+    if (!isDone) lbl.style.display = 'none';
     txt.appendChild(lbl);
     const ask = document.createElement('button'); ask.className = 'ask'; ask.textContent = '💬';
-    ask.setAttribute('aria-label', 'ask a question');
-    main.append(box, txt, ask); row.appendChild(main);
+    ask.setAttribute('aria-label', biText(T.askPlace));
+    // history is offered only when an earlier round left something behind
+    const hist = it.history ? document.createElement('button') : null;
+    if (hist) { hist.className = 'hist'; hist.textContent = '🕘'; hist.setAttribute('aria-label', biText(T.history)); }
+    main.append(box, txt, ...(hist ? [hist] : []), ask); row.appendChild(main);
+
     const cmts = document.createElement('div'); cmts.className = 'cmts';
-    for (const c of it.comments || []) {
-      const d = document.createElement('div'); d.className = 'cmt';
-      const b = document.createElement('b'); b.textContent = c.from + ': ';
-      d.append(b, document.createTextNode(c.text)); cmts.appendChild(d);
-    }
+    (it.comments || []).forEach(c => cmts.appendChild(cmtEl(c)));
     row.appendChild(cmts);
+
+    if (hist) {                                  // this task's earlier rounds, folded away
+      const panel = document.createElement('div'); panel.className = 'histPanel';
+      const title = bi(T.history, 'div'); title.className = 'hTitle';
+      panel.appendChild(title);
+      if (it.history.done.length) {
+        const d = document.createElement('div'); d.className = 'done';
+        d.textContent = '✓ ' + it.history.done.map(fmtDay).join(', ');
+        panel.appendChild(d);
+      }
+      it.history.comments.forEach(c => panel.appendChild(cmtEl(c, true)));
+      row.appendChild(panel);
+      hist.onclick = ev => { ev.stopPropagation(); panel.classList.toggle('open'); };
+    }
+
     const askRow = document.createElement('div'); askRow.className = 'askRow';
+    const hint = bi(T.askHint, 'div'); hint.className = 'askHint';
+    const line = document.createElement('div'); line.className = 'askLine';
     const inp = document.createElement('input');
-    inp.placeholder = 'Ask David… · ප්‍රශ්නයක් අහන්න'; inp.maxLength = 500;
-    const send = document.createElement('button'); send.textContent = 'Send';
-    askRow.append(inp, send); row.appendChild(askRow);
+    inp.placeholder = biText(T.askPlace); inp.maxLength = 500;
+    const send = document.createElement('button'); send.textContent = T.send[0];
+    line.append(inp, send); askRow.append(hint, line); row.appendChild(askRow);
 
     main.onclick = async (ev) => {
       if (ev.target === ask) { askRow.classList.toggle('open'); if (askRow.classList.contains('open')) inp.focus(); return; }
-      if (taskBusy || it.status === 'done') return;
+      if (taskBusy) return;
+      if (it.status === 'confirmed') { toast(biText(T.already)); return; }  // locked, but never silent
       taskBusy = true;
       const undo = it.status === 'reported';
       try {
@@ -246,10 +356,10 @@
           body: JSON.stringify({ list: list.id, item: it.text, undo }) });
         if (!r.ok) throw new Error('HTTP ' + r.status);
         it.status = (await r.json()).status;
-        row.className = 'task' + (it.status === 'done' ? ' done' : it.status === 'reported' ? ' reported' : '');
-        lbl.textContent = it.status === 'done' ? 'Done ✓ · හරි'
-          : it.status === 'reported' ? 'Reported ✓ David will check · කිව්වා' : '';
-      } catch (e) { toast('Could not save — try again / නැවත උත්සාහ කරන්න', true); }
+        const nowDone = it.status !== 'open';
+        row.classList.toggle('doneRow', nowDone);
+        lbl.style.display = nowDone ? 'block' : 'none';
+      } catch (e) { toast(biText(T.saveFail), true); }
       taskBusy = false;
     };
     send.onclick = async () => {
@@ -261,33 +371,60 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ list: list.id, item: it.text, text }) });
         if (!r.ok) throw new Error('HTTP ' + r.status);
-        const d = document.createElement('div'); d.className = 'cmt';
-        const b = document.createElement('b'); b.textContent = 'Ranmali: ';
-        d.append(b, document.createTextNode(text)); cmts.appendChild(d);
+        cmts.appendChild(cmtEl({ from: 'Ranmali', text }));
         inp.value = ''; askRow.classList.remove('open');
-        toast('Sent to David ✓ · යැව්වා');
-      } catch (e) { toast('Could not send — try again / නැවත උත්සාහ කරන්න', true); }
+        toast(biText(T.sent));
+      } catch (e) { toast(biText(T.sendFail), true); }
       send.disabled = false;
     };
     return row;
   }
+
+  function dayBox(offset, todayIso, rows) {
+    const d = new Date(Date.parse(todayIso + 'T00:00:00Z') + offset * 86400000);
+    const wd = d.getUTCDay();
+    const box = document.createElement('div'); box.className = 'dayBox';
+    const head = document.createElement('div'); head.className = 'dayHead';
+    head.appendChild(bi(offset === 1 ? T.tomorrow : [SI_DAYS[wd], EN_DAYS[wd]]));
+    const date = document.createElement('span'); date.className = 'date';
+    date.textContent = d.getUTCDate() + ' ' + EN_MON[d.getUTCMonth()];
+    head.appendChild(date);
+    const body = document.createElement('div'); body.className = 'dayBody';
+    if (rows.length) rows.forEach(r => body.appendChild(r));
+    else { const e = bi(T.nothing, 'div'); e.className = 'empty'; body.appendChild(e); }
+    box.append(head, body);
+    return box;
+  }
+
   async function loadTasks() {
     // never clobber in-progress interaction: an open question box or an in-flight report
     if (document.querySelector('.askRow.open') || taskBusy) return;
     try {
       const r = await fetch('/api/ranmali/tasks');
-      if (!r.ok) return; // tasks are optional — the clothes section stands alone
-      const lists = (await r.json()).lists;
-      const wrap = $('taskLists');
-      wrap.innerHTML = '';
-      for (const l of lists) {
-        if (lists.length > 1) {
+      if (!r.ok) return;                       // tasks are optional — the clothes section stands alone
+      const data = await r.json();
+      const todayWrap = $('taskToday'), aheadWrap = $('taskAhead');
+      todayWrap.innerHTML = ''; aheadWrap.innerHTML = '';
+      let nToday = 0, nAhead = 0;
+      const ahead = { 1: [], 2: [], 3: [] };
+      for (const l of data.lists) {
+        // open work first, then what she has already completed today
+        const mine = l.items.filter(i => i.day === 0)
+          .sort((a, b) => (a.status === 'open' ? 0 : 1) - (b.status === 'open' ? 0 : 1));
+        if (data.lists.length > 1 && mine.length) {
           const h = document.createElement('div'); h.className = 'listHead'; h.textContent = l.heading;
-          wrap.appendChild(h);
+          todayWrap.appendChild(h);
         }
-        for (const it of l.items) wrap.appendChild(taskRow(l, it));
+        for (const it of mine) { todayWrap.appendChild(taskRow(l, it)); nToday++; }
+        for (const it of l.items) if (it.day >= 1 && it.day <= 3) { ahead[it.day].push(taskRow(l, it)); nAhead++; }
       }
-      $('tasks').hidden = !lists.some(l => l.items.length);
+      for (const off of [1, 2, 3]) aheadWrap.appendChild(dayBox(off, data.today, ahead[off]));
+      if (nToday === 0) { const e = bi(T.nothingToday, 'div'); e.className = 'empty'; todayWrap.appendChild(e); }
+      // once she has ANY task the three day boxes always render (empty ones say "nothing"),
+      // so the shape of the week is stable; with no tasks at all the section stays away.
+      const any = nToday + nAhead > 0;
+      $('tasks').hidden = !any;
+      $('aheadWrap').hidden = !any;
     } catch (e) { /* keep whatever is on screen */ }
   }
 

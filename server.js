@@ -13,7 +13,9 @@ const CFG = require('./config');
 const PORT = CFG.port;
 const KEY_FILE = CFG.keyFile;
 const TODO_SHEET_ID = CFG.todoSheetId;
-const TODO_TAB = 'Todo (Eisenhower Matrix)';
+// Tab name is per-deployment: existing sheets keep their historical name, a fresh one
+// gets the plain 'Todo'. ("Eisenhower" is jargon that earned its way off the UI.)
+const TODO_TAB = CFG.todoTab || 'Todo (Eisenhower Matrix)';
 const MEDIA_TAB = 'Media (Reading/Listening)';
 const PREFS_SHEET_ID = CFG.prefsSheetId;
 // agent-stable data (Usage/Decisions/APA tabs) may live in its OWN spreadsheet, separated
@@ -52,7 +54,7 @@ const calendar = google.calendar({ version: 'v3', auth });
 if (STORE_MODE === 'local') {
   (async () => {
     const SEED = {
-      'Todo (Eisenhower Matrix)': ['Task', 'Quadrant', 'Scope', 'Owner', 'Due', 'Status', 'Created', 'Notes', 'Source', 'Updated', 'Tags', 'ID', 'Order', 'Parent'],
+      [TODO_TAB]: ['Task', 'Quadrant', 'Scope', 'Owner', 'Due', 'Status', 'Created', 'Notes', 'Source', 'Updated', 'Tags', 'ID', 'Order', 'Parent'],
       'Media (Reading/Listening)': ['Title', 'Source', 'Type', 'URL', 'Length_min', 'Priority', 'Status', 'Added', 'Added_by', 'Notes', 'ID'],
     };
     for (const [tab, headers] of Object.entries(SEED)) {
@@ -484,6 +486,17 @@ app.put('/junglefarm/api/save', asyncRoute(async (req, res) => {
 
 // no-cache on HTML so an already-open dashboard always picks up freshly-deployed JS on reload
 // (the inline script lives in index.html; stale HTML = stale frontend logic after a deploy).
+// UI language: a locale like fr-FR makes the page load its translation pack (chrome
+// strings only — entries stay in whatever language they were typed in)
+const UI_LANG = String(CFG.locale || '').slice(0, 2).toLowerCase();
+app.get('/', (req, res, next) => {
+  if (UI_LANG === 'en' || !UI_LANG) return next();
+  fs.readFile(path.join(__dirname, 'public', 'index.html'), 'utf8', (err, html) => {
+    if (err) return next();
+    const tag = `<script>window.__UI_LANG__=${JSON.stringify(UI_LANG)}</script>`;
+    res.type('html').send(html.replace(/<head[^>]*>/i, m => m + tag));
+  });
+});
 app.use(express.static(__dirname + '/public', {
   setHeaders: (res, p) => { if (p.endsWith('.html')) res.setHeader('Cache-Control', 'no-cache, must-revalidate'); },
 }));
@@ -1056,6 +1069,20 @@ app.patch('/api/tasks/:id', asyncRoute(async (req, res) => {
   if (!updated) return res.status(404).json({ error: 'task not found: ' + req.params.id });
   fireListHook('updated', updated);
   res.json({ ok: true, task: updated });
+}));
+
+// Owner reply on a shared row — lands in the same D:G log the helper's page reads, so the
+// answer shows inline under their question on every surface — both owners' and the helper's.
+app.post('/api/tasks/:id/comment', asyncRoute(async (req, res) => {
+  const sh = parseSharedId(req.params.id);
+  if (!sh) return res.status(400).json({ error: 'comments live on shared rows only' });
+  const text = String((req.body || {}).text || '').trim().slice(0, 500);
+  if (!text) return res.status(400).json({ error: 'text required' });
+  const { items } = await sharedListRead(sh.cfg.sheetId, sh.tab);
+  const it = items.find(i => i.row === sh.row);
+  if (!it) return res.status(404).json({ error: 'item not found' });
+  await sharedListAddComment(sh.cfg.sheetId, sh.tab, it.text, CFG.userName || CFG.owner || 'me', text);
+  res.json({ ok: true });
 }));
 
 app.post('/api/tasks/:id/done', asyncRoute(async (req, res) => {
@@ -3089,9 +3116,91 @@ async function writeFeedbackEntry(entry) {
   if (HAS_JOURNAL) fs.appendFileSync(FEEDBACK_FILE, line + '\n');
   else await appendTabRow(FB_TAB, FB_HEADERS, [line, nowIso(), '']);
 }
+// ---- guest CI: "How would you like to change this dashboard?" ----
+// On an instance with CFG.ciAutoApply, a freeform suggestion is applied IMMEDIATELY as a
+// settings patch (sections shown/hidden/renamed/reordered, list labels/layout) — nothing
+// else is reachable: the LLM must answer in a whitelisted patch shape, the patch goes
+// through the same sanitizer as the ⚙ panel, and unparseable answers fall back to
+// capture-only. Every suggestion is also logged as an idea row. Cap: CFG.ciApplyPerDay.
+const CI_APPLY_LOG = path.join(__dirname, 'data', 'ci-apply-log.json');
+function ciAppliedToday() {
+  try { const j = JSON.parse(fs.readFileSync(CI_APPLY_LOG, 'utf8')); return j.date === today() ? j.n : 0; } catch (e) { return 0; }
+}
+function ciBumpApplied() {
+  const n = ciAppliedToday() + 1;
+  try { fs.writeFileSync(CI_APPLY_LOG, JSON.stringify({ date: today(), n })) } catch (e) {}
+  return n;
+}
+function ciSanitizePatch(raw) {
+  let p; try { p = typeof raw === 'string' ? JSON.parse(raw) : raw; } catch (e) { return null; }
+  if (!p || typeof p !== 'object') return null;
+  const out = {};
+  if (p.sections && typeof p.sections === 'object') {
+    out.sections = {};
+    for (const [k, v] of Object.entries(p.sections)) {
+      if (!v || typeof v !== 'object') continue;
+      const e = {};
+      if (typeof v.hidden === 'boolean') e.hidden = v.hidden;
+      if (typeof v.title === 'string' && v.title.trim()) e.title = v.title.trim().slice(0, 60);
+      if (Number.isFinite(+v.order)) e.order = +v.order;
+      if (typeof v.collapsed === 'boolean') e.collapsed = v.collapsed;
+      if (Object.keys(e).length) out.sections[String(k).slice(0, 40)] = e;
+    }
+    if (!Object.keys(out.sections).length) delete out.sections;
+  }
+  if (p.quadrants && typeof p.quadrants === 'object') {
+    out.quadrants = {};
+    for (const [k, v] of Object.entries(p.quadrants)) {
+      if (!v || typeof v !== 'object') continue;
+      const e = {};
+      if (typeof v.label === 'string' && v.label.trim()) e.label = v.label.trim().slice(0, 60);
+      if (typeof v.sub === 'string') e.sub = v.sub.slice(0, 120);
+      if (Number.isFinite(+v.order)) e.order = +v.order;
+      if (v.w >= 1 && v.w <= 12) e.w = Math.round(v.w);
+      if (typeof v.collapsed === 'boolean') e.collapsed = v.collapsed;
+      if (['bullets', 'ranked'].includes(v.style)) e.style = v.style;
+      if (Object.keys(e).length) out.quadrants[String(k).slice(0, 40)] = e;
+    }
+    if (!Object.keys(out.quadrants).length) delete out.quadrants;
+  }
+  return Object.keys(out).length ? out : null;
+}
+async function ciTryApply(suggestion) {
+  if (!CFG.ciAutoApply) return { applied: false };
+  const perDay = Number(CFG.ciApplyPerDay) || 20;
+  if (ciAppliedToday() >= perDay) return { applied: false, reason: 'daily limit reached' };
+  const s = loadSettings();
+  const prompt = `You configure a personal dashboard. Turn the user's request into a JSON settings patch and output ONLY the JSON (no prose, no fences).
+Allowed shape: {"sections":{"<key>":{"hidden":bool,"title":"…","order":num,"collapsed":bool}},"quadrants":{"<key>":{"label":"…","sub":"…","order":num,"w":1-12,"collapsed":bool,"style":"bullets"|"ranked"}}}
+Section keys: links habits brief today todo jlists cinote jobsboard agents files completed media markets signals surf news week plugin:nature-weather plugin:cycle
+Current sections config: ${JSON.stringify(s.sections || {}).slice(0, 1500)}
+Current lists config: ${JSON.stringify(s.quadrants || {}).slice(0, 1500)}
+If the request is not about layout/visibility/naming of sections or lists, output exactly {}.
+Request (may be in French): ${JSON.stringify(String(suggestion).slice(0, 400))}`;
+  let raw = '';
+  // gemini free tier first (this is a layout request, nothing personal), then the chain
+  try { raw = (await require('./providers').generateText(prompt, 'gemini-free')).text; } catch (e) { return { applied: false, reason: 'no LLM: ' + e.message.slice(0, 120) }; }
+  const m = String(raw || '').match(/\{[\s\S]*\}/);
+  const patch = m && ciSanitizePatch(m[0]);
+  if (!patch) return { applied: false, reason: 'not a layout change' };
+  const next = loadSettings();
+  next.sections = { ...(next.sections || {}), ...Object.fromEntries(Object.entries(patch.sections || {}).map(([k, v]) => [k, { ...(next.sections || {})[k], ...v }])) };
+  next.quadrants = { ...(next.quadrants || {}), ...Object.fromEntries(Object.entries(patch.quadrants || {}).map(([k, v]) => [k, { ...(next.quadrants || {})[k], ...v }])) };
+  saveSettings(next);
+  const n = ciBumpApplied();
+  return { applied: true, patch, n, perDay };
+}
+
 app.post('/api/feedback', asyncRoute(async (req, res) => {
   const { kind, title, url, source, context, subjects, person, author } = req.body || {};
   if (!kind) return res.status(400).json({ error: 'kind required' });
+  // guest-CI instance: a comment is a change request — apply it now, remember it as an idea
+  if (kind === 'comment' && context && CFG.ciAutoApply) {
+    const r = await ciTryApply(context);
+    await writeFeedbackEntry({ at: nowIso(), kind: 'idea', signal: 1, title: '', source: 'ci', url: '',
+      subjects: [], person: '', author: '', context: String(context).slice(0, 500) + (r.applied ? ' [applied]' : '') }).catch(() => {});
+    return res.json({ ok: true, applied: !!r.applied, reason: r.reason || '', reload: !!r.applied });
+  }
   const entry = {
     at: nowIso(), kind, signal: SIGNAL_BY_KIND[kind] ?? 0,
     title: title || '', source: source || '', url: url || '',
@@ -5271,16 +5380,21 @@ app.post('/api/journal-lists/:id/item', asyncRoute(async (req, res) => {
 // List — recurrence and due dates per entry. The EXTERNAL contract is A:B + D:G only, so
 // adding these can never disturb a helper agent reading the list.
 async function sharedListRead(sheetId, tab) {
-  const r = await store.values.get({ spreadsheetId: sheetId, range: `'${tab}'!A1:J300` }).catch(() => null);
+  // K:M are the doer-side occurrence columns (see sharedListSetDoerCols): when the doer
+  // last reported this row, when its current occurrence began, and the dates of the
+  // occurrences already closed. The mark alone can say neither *when* nor *which round*.
+  const r = await store.values.get({ spreadsheetId: sheetId, range: `'${tab}'!A1:M300` }).catch(() => null);
   const grid = (r && r.data.values) || [];
   const items = [], comments = [];
   for (let i = 1; i < grid.length; i++) {
     const row = grid[i] || [];
     const text = String(row[0] || '').trim();
     if (text) items.push({ row: i + 1, text, mark: String(row[1] || '').trim().toUpperCase(),
-      due: String(row[7] || '').trim(), tags: String(row[8] || '').trim(), uid: String(row[9] || '').trim() });
+      due: String(row[7] || '').trim(), tags: String(row[8] || '').trim(), uid: String(row[9] || '').trim(),
+      reportedOn: String(row[10] || '').trim(), occFrom: String(row[11] || '').trim(),
+      doneLog: String(row[12] || '').trim() });
     if (String(row[3] || '').trim() || String(row[6] || '').trim())
-      comments.push({ At: row[3] || '', Item: row[4] || '', From: row[5] || '', Text: row[6] || '' });
+      comments.push({ row: i + 1, At: row[3] || '', Item: row[4] || '', From: row[5] || '', Text: row[6] || '' });
   }
   return { items, comments };
 }
@@ -5291,6 +5405,22 @@ async function sharedListEnsureHeaders(sheetId, tab) {
 async function sharedListSetMark(sheetId, tab, row, mark) {
   await store.values.update({ spreadsheetId: sheetId, range: `'${tab}'!B${row}`, valueInputOption: 'RAW', requestBody: { values: [[mark]] } });
 }
+// Doer-side occurrence columns, all outside the external A:B + D:G contract and outside
+// the task metadata in H:J, so nothing else on the sheet notices them:
+//   K ReportedOn     — date the doer last reported this row done ('' = not reported)
+//   L OccurrenceFrom — date the CURRENT round began; comments older than it are history
+//   M DoneLog        — comma-separated dates of rounds already closed (completion history)
+// They exist because "done" is a day-scoped fact, and a recurring row's conversation must
+// not follow it into the next occurrence.
+async function sharedListSetDoerCols(sheetId, tab, row, cols) {
+  const data = [];
+  if (cols.reportedOn !== undefined) data.push({ range: `'${tab}'!K${row}`, values: [[cols.reportedOn]] });
+  if (cols.occFrom !== undefined) data.push({ range: `'${tab}'!L${row}`, values: [[cols.occFrom]] });
+  if (cols.doneLog !== undefined) data.push({ range: `'${tab}'!M${row}`, values: [[cols.doneLog]] });
+  if (data.length) await store.values.batchUpdate({ spreadsheetId: sheetId, requestBody: { valueInputOption: 'RAW', data } }).catch(() => {});
+}
+// just the report stamp — what both doer paths (this page, the token bridge) reach for
+const sharedListSetReported = (sheetId, tab, row, date) => sharedListSetDoerCols(sheetId, tab, row, { reportedOn: date });
 async function sharedListAddItem(sheetId, tab, text, meta) {
   const { items } = await sharedListRead(sheetId, tab);
   const row = (items.length ? Math.max(...items.map(i => i.row)) : 1) + 1;
@@ -5318,7 +5448,10 @@ async function sharedListClearRow(sheetId, tab, row) {
 }
 async function sharedListAddComment(sheetId, tab, item, from, text) {
   const { items, comments } = await sharedListRead(sheetId, tab);
-  const row = Math.max(1, ...items.map(i => i.row), ...comments.map((c, i) => i + 2)) + 1;
+  // the next free row is past every row actually in use — deriving it from each comment's
+  // POSITION in the array instead of its row number lands the write on top of an existing
+  // comment as soon as the log has gaps (it silently overwrote a question, 2026-08-01)
+  const row = Math.max(1, ...items.map(i => i.row), ...comments.map(c => c.row)) + 1;
   await store.values.update({ spreadsheetId: sheetId, range: `'${tab}'!D${row}:G${row}`, valueInputOption: 'RAW',
     requestBody: { values: [[nowIso(), item || '', from, text]] } });
 }
@@ -5345,14 +5478,35 @@ function parseSharedId(id) {
 async function sharedTasksFor(bind) {
   const tab = bind.cfg.tab || bind.slug;
   const { items, comments } = await sharedListRead(bind.cfg.sheetId, tab);
-  return items.map(i => ({
-    ID: `sh:${bind.slug}:${i.row}`, Task: i.text, Quadrant: bind.key,
-    Status: i.mark === 'Y' ? 'done' : 'Open', Due: i.due || '', Tags: i.tags || '',
-    Scope: 'Shared', Owner: bind.cfg.name || '', Notes: '', Created: '', Updated: '',
-    Source: 'shared', Order: '', Parent: '',
-    doerDone: i.mark === 'D',
-    comments: comments.filter(c => c.Item === i.text).map(c => ({ from: c.From, text: c.Text, at: c.At })),
-  }));
+  const t = today();
+  const out = [];
+  for (const i of items) {
+    // same rollover as the doer's page (ranmaliRollsOver) — whichever surface reads
+    // first after a round closes does the reset, so all three stay in step
+    if (ranmaliRollsOver(i, t)) {
+      const log = (i.doneLog ? i.doneLog.split(',') : []).map(s => s.trim()).filter(Boolean);
+      log.push(i.reportedOn);
+      const occFrom = (i.due && i.due > i.reportedOn) ? i.due : t;
+      await sharedListSetMark(bind.cfg.sheetId, tab, i.row, '');
+      await sharedListSetDoerCols(bind.cfg.sheetId, tab, i.row, { reportedOn: '', occFrom, doneLog: log.slice(-30).join(',') });
+      Object.assign(i, { mark: '', reportedOn: '', occFrom, doneLog: log.slice(-30).join(',') });
+    }
+    const mine = comments.filter(c => c.Item === i.text || !c.Item).map(c => ({ from: c.From, text: c.Text, at: c.At }));
+    const past = i.occFrom ? mine.filter(c => String(c.at || '').slice(0, 10) < i.occFrom) : [];
+    const now = i.occFrom ? mine.filter(c => !(String(c.at || '').slice(0, 10) < i.occFrom)) : mine;
+    const doneLog = (i.doneLog || '').split(',').map(s => s.trim()).filter(Boolean);
+    out.push({
+      ID: `sh:${bind.slug}:${i.row}`, Task: i.text, Quadrant: bind.key,
+      Status: i.mark === 'Y' ? 'done' : 'Open', Due: i.due || '', Tags: i.tags || '',
+      Scope: 'Shared', Owner: bind.cfg.name || '', Notes: '', Created: '', Updated: '',
+      Source: 'shared', Order: '', Parent: '',
+      doerDone: i.mark === 'D', reportedOn: i.reportedOn || '',
+      lastDone: doneLog[doneLog.length - 1] || '', // greys a recurring row between rounds
+      comments: now,
+      history: (past.length || doneLog.length) ? { comments: past, done: doneLog } : null,
+    });
+  }
+  return out;
 }
 async function sharedTasksAll() {
   const out = [];
@@ -5383,7 +5537,14 @@ app.post('/api/elists/ext/:token/complete', asyncRoute(async (req, res) => {
     const { items } = await sharedListRead(shared.sheetId, shared.tab || hit[0]);
     const it = items.find(i => i.text === want);
     if (!it) return res.status(404).json({ error: 'item not found — GET the list for exact item texts' });
-    if (it.mark !== 'Y') await sharedListSetMark(shared.sheetId, shared.tab || hit[0], it.row, 'D');
+    if (it.mark !== 'Y') {
+      await sharedListSetMark(shared.sheetId, shared.tab || hit[0], it.row, 'D');
+      await sharedListSetReported(shared.sheetId, shared.tab || hit[0], it.row, today()); // K: when the doer said so
+      // recurring row: the report closes THIS round, so Due advances now — the owners'
+      // dashboards grey it out "until next due" off that very date
+      const rule = parseRecurTag(it.tags);
+      if (rule) await sharedListSetTask(shared.sheetId, shared.tab || hit[0], it.row, { Due: nextRecurDate(rule, today()) });
+    }
     return res.json({ ok: true, status: 'reported-complete' });
   }
   const { lists } = await elistsRead();
@@ -5417,6 +5578,20 @@ app.post('/api/journal-lists/:id/add', asyncRoute(async (req, res) => {
   await elistsAppendItems(l, [text]);
   res.json({ ok: true });
 }));
+// owner-side REPLY to a doer's question. Same comment log the doer writes to, so the
+// answer lands directly under her question (the log is read in time order per item) and
+// shows on both her page and this dashboard. Owner-gated: guests never reach /api/journal-lists/*.
+app.post('/api/journal-lists/:id/comment', asyncRoute(async (req, res) => {
+  const slug = String(req.params.id).replace(/^jl:/, '');
+  const item = String((req.body || {}).item || '').slice(0, 200);
+  const text = String((req.body || {}).text || '').trim().slice(0, 500);
+  const from = String((req.body || {}).from || CFG.userName || 'David').slice(0, 40);
+  if (!text) return res.status(400).json({ error: 'text required' });
+  const shared = sharedCfgOf(slug);
+  if (shared) await sharedListAddComment(shared.sheetId, shared.tab || slug, item, from, text);
+  else await appendTabRow(ELIST_COMMENTS_TAB, ELIST_COMMENTS_HEADERS, [nowIso(), slug, item, from, text]);
+  res.json({ ok: true, from });
+}));
 
 // ---- Ranmali task checklist: session-authed view of lists shared to "Ranmali" ----
 // David creates/fills lists on his dashboard and shares them (settings.listShares entries
@@ -5427,21 +5602,103 @@ app.post('/api/journal-lists/:id/add', asyncRoute(async (req, res) => {
 const ranmaliShareSlugs = () => new Set(Object.entries(loadSettings().listShares || {})
   .filter(([, v]) => v && /^ranmali$/i.test(String(v.name || '').trim()))
   .map(([slug]) => slug));
+// A round of a task is over once she has reported it AND the day has turned — for a
+// recurring row, or one whose Due has since moved on, the next round starts clean.
+// Closing it here (rather than at read time on her page) is what makes the reset real:
+// the mark clears, the completion is logged to M, and L starts a fresh comment window so
+// last time's conversation does not come back with the task.
+function ranmaliRollsOver(i, t) {
+  if (i.mark !== 'D' || !i.reportedOn || i.reportedOn >= t) return false;
+  return !!parseRecurTag(i.tags) || !!(i.due && i.due > i.reportedOn);
+}
+// What her page shows for one shared row, or null when it should not appear at all.
+// Runs AFTER any rollover above, so a 'D' still standing means "reported, this round".
+//   · reported/confirmed today → today's box, checked (stays all day, gone at midnight)
+//   · reported/confirmed on an earlier round → hidden (David's dashboard owns the history)
+//   · otherwise → open, grouped by Due: ≤today, or 1–3 days ahead
+function ranmaliItemView(i, t) {
+  const dnum = s => Date.parse(s + 'T00:00:00Z');
+  const due = i.due || '', rep = i.reportedOn || '', mark = i.mark;
+  if ((mark === 'D' || mark === 'Y') && (rep === t || (mark === 'Y' && due === t)))
+    return { day: 0, status: mark === 'Y' ? 'confirmed' : 'reported', late: false };
+  if (mark === 'Y' || mark === 'D') return null;
+  const d = due ? Math.round((dnum(due) - dnum(t)) / 864e5) : 0;
+  if (d > 3) return null;
+  // a recurring row whose Due is stale means David has not confirmed yet — his lag is
+  // not her lateness, so the red chip is for one-off work only
+  return { day: Math.max(0, d), status: 'open', late: d < 0 && !parseRecurTag(i.tags) };
+}
 app.get('/api/ranmali/tasks', asyncRoute(async (req, res) => {
-  const slugs = ranmaliShareSlugs();
-  const lists = (await elistsPayload()).filter(l => slugs.has(l.id.replace(/^jl:/, '')));
-  res.json({ lists: lists.map(l => ({ id: l.id.replace(/^jl:/, ''), heading: l.heading,
-    items: l.items.map(i => ({ text: i.text, status: i.done ? 'done' : i.doer ? 'reported' : 'open',
-      comments: i.comments })) })) });
+  // Promoted shares (listShares[slug].sheetId — a real Task List on the family sheet)
+  // carry Due/Tags per row: today's work plus a 3-day look-ahead.
+  // Un-promoted shares still come from Ephemeral Lists (undated → all "today", no expiry).
+  const t = today();
+  const lists = [];
+  let elists = null; // lazy — only read the tab if some share is un-promoted
+  for (const slug of ranmaliShareSlugs()) {
+    const cfg = sharedCfgOf(slug);
+    if (cfg) {
+      const tab = cfg.tab || slug;
+      const { items, comments } = await sharedListRead(cfg.sheetId, tab);
+      const shown = [];
+      for (const i of items) {
+        // A 'D' with no date is a report from a path that did not stamp K (a helper agent
+        // writing the sheet, a hand edit, an older build). Read it as "reported today"
+        // rather than letting the row vanish: unseen work is the one failure that matters.
+        if (i.mark === 'D' && !i.reportedOn) {
+          await sharedListSetDoerCols(cfg.sheetId, tab, i.row, { reportedOn: t });
+          i.reportedOn = t;
+        }
+        if (ranmaliRollsOver(i, t)) {
+          const log = (i.doneLog ? i.doneLog.split(',') : []).map(s => s.trim()).filter(Boolean);
+          log.push(i.reportedOn);
+          const occFrom = (i.due && i.due > i.reportedOn) ? i.due : t;
+          await sharedListSetMark(cfg.sheetId, tab, i.row, '');
+          await sharedListSetDoerCols(cfg.sheetId, tab, i.row, { reportedOn: '', occFrom, doneLog: log.slice(-30).join(',') });
+          Object.assign(i, { mark: '', reportedOn: '', occFrom, doneLog: log.slice(-30).join(',') });
+        }
+        const v = ranmaliItemView(i, t);
+        if (!v) continue;
+        // this round's conversation stays inline; everything older folds into history
+        const mine = comments.filter(c => c.Item === i.text || !c.Item)
+          .map(c => ({ from: c.From, text: c.Text, at: c.At }));
+        const past = i.occFrom ? mine.filter(c => String(c.at || '').slice(0, 10) < i.occFrom) : [];
+        const now = i.occFrom ? mine.filter(c => !(String(c.at || '').slice(0, 10) < i.occFrom)) : mine;
+        const doneLog = (i.doneLog || '').split(',').map(s => s.trim()).filter(Boolean);
+        shown.push({ text: i.text, due: i.due || '', ...v, comments: now,
+          history: (past.length || doneLog.length) ? { comments: past, done: doneLog } : null });
+      }
+      lists.push({ id: slug, heading: cfg.label || (cfg.name ? cfg.name + ' tasks' : slug), items: shown });
+    } else {
+      if (!elists) elists = await elistsPayload();
+      const l = elists.find(x => x.id === 'jl:' + slug);
+      if (l) lists.push({ id: slug, heading: l.heading,
+        items: l.items.map(i => ({ text: i.text, due: '', day: 0, late: false,
+          status: i.done ? 'confirmed' : i.doer ? 'reported' : 'open', comments: i.comments })) });
+    }
+  }
+  res.json({ today: t, lists });
 }));
 app.post('/api/ranmali/tasks/report', asyncRoute(async (req, res) => {
   const { list, item, undo } = req.body || {};
   if (!ranmaliShareSlugs().has(String(list))) return res.status(404).json({ error: 'list not shared' });
+  const want = String(item || '');
+  const cfg = sharedCfgOf(String(list));
+  if (cfg) {
+    const tab = cfg.tab || String(list);
+    const { items } = await sharedListRead(cfg.sheetId, tab);
+    const it = items.find(i => i.text === want);
+    if (!it) return res.status(404).json({ error: 'item not found' });
+    if (it.mark === 'Y') return res.json({ ok: true, status: 'confirmed' }); // owner check is final
+    await sharedListSetMark(cfg.sheetId, tab, it.row, undo ? '' : 'D');
+    await sharedListSetReported(cfg.sheetId, tab, it.row, undo ? '' : today());
+    return res.json({ ok: true, status: undo ? 'open' : 'reported' });
+  }
   const { lists } = await elistsRead();
   const l = lists.find(x => x.slug === String(list) && !x.completedAt);
-  const it = l && l.items.find(i => i.text === String(item || ''));
+  const it = l && l.items.find(i => i.text === want);
   if (!it) return res.status(404).json({ error: 'item not found' });
-  if (it.mark === 'Y') return res.json({ ok: true, status: 'done' }); // owner check is final
+  if (it.mark === 'Y') return res.json({ ok: true, status: 'confirmed' }); // owner check is final
   await elistsSetMark(l, it.row, undo ? '' : 'D');
   res.json({ ok: true, status: undo ? 'open' : 'reported' });
 }));
@@ -5450,6 +5707,8 @@ app.post('/api/ranmali/tasks/comment', asyncRoute(async (req, res) => {
   const text = String((req.body || {}).text || '').trim().slice(0, 500);
   if (!ranmaliShareSlugs().has(String(list))) return res.status(404).json({ error: 'list not shared' });
   if (!text) return res.status(400).json({ error: 'text required' });
+  const cfg = sharedCfgOf(String(list));
+  if (cfg) { await sharedListAddComment(cfg.sheetId, cfg.tab || String(list), String(item || '').slice(0, 200), 'Ranmali', text); return res.json({ ok: true }); }
   await appendTabRow(ELIST_COMMENTS_TAB, ELIST_COMMENTS_HEADERS, [nowIso(), String(list), String(item || '').slice(0, 200), 'Ranmali', text]);
   res.json({ ok: true });
 }));

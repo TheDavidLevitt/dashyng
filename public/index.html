@@ -246,6 +246,17 @@ input.loc-bar-input { font-size: 10.5px; width: 100%; padding: 0 3px; background
 .q.drop-target { outline: 2px dashed var(--accent); outline-offset: -2px; }
 .q-task.drop-before { box-shadow: 0 -2px 0 0 var(--accent); }
 .q-task.drop-after { box-shadow: 0 2px 0 0 var(--accent); }
+.q-task.q-settled { opacity: .45; }
+.q-task.q-settled .q-body { text-decoration: line-through; text-decoration-color: var(--text2); }
+.q-thread { margin: 0 0 3px 30px; }
+.q-cline { font-size: 11px; color: var(--text2); padding: 1px 0; }
+.q-cline b { color: var(--accent); }
+.q-histbox { border-left: 2px solid var(--border); padding-left: 7px; margin: 2px 0; }
+.q-reply { display: flex; gap: 4px; margin-top: 2px; }
+.q-reply-in { flex: 1; max-width: 260px; background: var(--bg2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 4px; font-size: 11px; padding: 1px 6px; }
+.q-task.q-settled + .q-thread { opacity: .55; }
+.q-reported { font-size: 10px; color: var(--green); opacity: .85; white-space: nowrap; }
 .q-task.child { padding-left: 18px; font-size: 11.5px; opacity: 0.92; }
 .q-task.child .q-bullet { color: var(--accent); opacity: 0.6; }
 .hl { color: var(--amber); font-weight: 600; }
@@ -507,7 +518,7 @@ details summary { cursor: pointer; color: var(--text2); font-size: 12.5px; paddi
 </section>
 
 <section data-sec="todo">
-<h2><span data-sec-title>Task Lists</span> <button id="list-add-btn" title="add a list" style="background:var(--card);color:var(--accent);border:1px solid var(--border);border-radius:4px;font-size:11px;line-height:15px;padding:0 6px;cursor:pointer;vertical-align:1px">＋ list</button></h2>
+<h2><span data-sec-title>Persistent lists</span> <button id="list-add-btn" title="add a list" style="background:var(--card);color:var(--accent);border:1px solid var(--border);border-radius:4px;font-size:11px;line-height:15px;padding:0 6px;cursor:pointer;vertical-align:1px">＋ list</button></h2>
 <div id="eisen-error"></div>
 <div id="eisen"><div class="empty">Loading sheet…</div></div>
 <div class="tiny" style="margin-top:4px">
@@ -723,7 +734,7 @@ async function saveLinks() {
     box.querySelector('.lk-url').focus();
   };
 })();
-const SEC_DEFS = { links: 'Links', habits: 'Habits', brief: 'Agent brief', today: 'Today', todo: 'Task Lists', jlists: 'Ephemeral notes', cinote: 'Note to CI', jobsboard: 'Job Openings', agents: 'Agent Stable', files: 'File manager', completed: 'Completed', media: 'Reading queue', markets: 'Markets', signals: 'Market signals', surf: 'Wind & waves', news: 'News', week: 'Week ahead' };
+const SEC_DEFS = { links: 'Links', habits: 'Habits', brief: 'Agent brief', today: 'Today', todo: 'Persistent lists', jlists: 'Ephemeral notes', cinote: 'Note to CI', jobsboard: 'Job Openings', agents: 'Agent Stable', files: 'File manager', completed: 'Completed', media: 'Reading queue', markets: 'Markets', signals: 'Market signals', surf: 'Wind & waves', news: 'News', week: 'Week ahead' };
 let appSettings = { sections: {}, quadrants: {}, calendars: [] };
 const secExpanded = new Set(); // session-local expansions of collapsed-by-default sections
 function setSecTitle(el, title) { // replace only the text node — keep the ＋/meta spans inside headings
@@ -1105,6 +1116,66 @@ function taskBodyHtml(text) {
   }
   return esc(text);
 }
+// A helper reported this done but I haven't confirmed it. Until the next occurrence comes
+// round it reads as settled — greyed, with how long ago the report came in — rather than
+// sitting in the list looking undone. Both our dashboards show the same thing.
+function reportedHtml(t) {
+  const on = t.reportedOn || (isSettled(t) && t.lastDone) || '';
+  if (!on) return '';
+  const d = Math.round((Date.parse(todayIso() + 'T00:00:00Z') - Date.parse(on + 'T00:00:00Z')) / 864e5);
+  const when = d <= 0 ? T('today') : d === 1 ? T('yesterday') : T('%d days ago').replace('%d', d);
+  return ` <span class="q-reported">${T('last reported completed')}: ${when}</span>`;
+}
+// grey until its next occurrence is actually due: a fresh report (reportedOn) settles the
+// row immediately; after the day rolls over, a recurring row stays settled off its last
+// completed round (lastDone) until Due comes back to today. One-offs stay settled once
+// reported until the owner confirms.
+function isSettled(t) {
+  if (t.Status === 'done') return false;
+  if (t.reportedOn) return !t.Due || t.Due > todayIso();
+  return !!(t.lastDone && recurOf(t) && t.Due && t.Due > todayIso());
+}
+const todayIso = () => new Date().toISOString().slice(0, 10);
+// ---- UI language packs (chrome only — user-entered content is never translated) ----
+// The server injects window.__UI_LANG__ when config.locale isn't English.
+const I18N_PACKS = { fr: {
+  'today': "aujourd'hui", 'yesterday': 'hier', '%d days ago': 'il y a %d jours',
+  'last reported completed': 'signalé fait', 'completed': 'terminé',
+  'conversation & completion history': 'historique de la conversation et des tâches',
+  'reply…': 'répondre…',
+  'Persistent lists': 'Listes persistantes', 'Ephemeral notes': 'Notes éphémères',
+  'Note to CI': 'Comment veux-tu changer ce tableau de bord ?',
+  'How would you like to change this dashboard?': 'Comment veux-tu changer ce tableau de bord ?',
+  'Task Lists': 'Listes persistantes',
+  'Links': 'Liens', 'Habits': 'Habitudes', 'Agent brief': 'Brief', 'Today': "Aujourd'hui",
+  'Reading queue': 'À lire', 'Markets': 'Marchés', 'News': 'Actus', 'Week ahead': 'La semaine',
+  'Wind & waves': 'Vent & vagues', 'Completed': 'Terminées', 'File manager': 'Fichiers',
+  'a comment for the CI to read…': 'écris ce que tu veux changer…',
+  'Send': 'Envoyer', '＋ add item…': '＋ ajouter…',
+  'New task — Enter saves, Esc cancels': 'Nouvelle tâche — Entrée valide, Échap annule',
+  'Mark done': 'Marquer fait', 'Move / group': 'Déplacer / grouper',
+  'save': 'enregistrer', 'clear': 'effacer', 'describe': 'décrire', 'every': 'tous les', 'wk': 'sem',
+  'describe it — e.g. every tuesday and alternating thursdays': 'décris-le — p.ex. tous les mardis et un jeudi sur deux',
+  'pick at least one day': 'choisis au moins un jour',
+  'applied — reloading…': 'appliqué — rechargement…', 'noted for the nightly pass': 'noté pour la prochaine passe',
+} };
+window.__I18N__ = I18N_PACKS[window.__UI_LANG__] || null;
+const T = s => (window.__I18N__ && window.__I18N__[s]) || s;
+// boot-time pass over the static chrome (dynamic renders use T() at the call site)
+function applyI18n() {
+  if (!window.__I18N__) return;
+  document.querySelectorAll('[data-sec-title]').forEach(el => { el.textContent = T(el.textContent.trim()); });
+  document.querySelectorAll('input[placeholder],textarea[placeholder]').forEach(el => {
+    el.placeholder = T(el.placeholder); });
+  document.querySelectorAll('button').forEach(b => {
+    const t = b.textContent.trim(); if (window.__I18N__[t]) b.textContent = T(t);
+    if (b.title && window.__I18N__[b.title]) b.title = T(b.title);
+  });
+  document.documentElement.lang = window.__UI_LANG__;
+}
+document.addEventListener('DOMContentLoaded', applyI18n);
+setTimeout(applyI18n, 2500); // once more after the first dynamic renders settle
+
 function taskHtml(t, opts) {
   const note = opts.showNotes && t.Notes ? ` <span class="q-note">— ${esc(t.Notes)}</span>` : '';
   const kids = opts.childCount || 0;
@@ -1115,15 +1186,31 @@ function taskHtml(t, opts) {
   const bullet = opts.rank ? `<span class="q-bullet q-rank">${opts.rank}.</span>` : '<span class="q-bullet">•</span>';
   const sal = isSalientClient(t);
   const star = opts.mon ? `<button class="q-btn sal-toggle${sal ? ' on' : ''}" title="${sal ? 'High salience — changes push to your journal' : 'Mark high-salience (push changes to your journal)'}">${sal ? '★' : '☆'}</button>` : '';
-  return `<div class="q-task ${opts.child ? 'child' : ''}${sal ? ' q-salient' : ''}" draggable="true" data-id="${esc(t.ID)}" data-q="${esc(normQ(t.Quadrant))}" data-parent="${esc(opts.child ? t.Parent : '')}">
+  return `<div class="q-task ${opts.child ? 'child' : ''}${sal ? ' q-salient' : ''}${isSettled(t) ? ' q-settled' : ''}" draggable="true" data-id="${esc(t.ID)}" data-q="${esc(normQ(t.Quadrant))}" data-parent="${esc(opts.child ? t.Parent : '')}">
     ${toggle}${bullet}
     <span class="q-body">${taskBodyHtml(t.Task)}${cnt}${srcBadge(t.Source)}${dueHtml(t)}${(() => { const rc = recurOf(t); return rc ? ` <span class="q-recur" title="${esc(explainRecur(rc))}">🔁</span>` : ''; })()}${
     // shared-tab lists: the doer's "reported done" flag and their comments ride along
     t.doerDone ? ' <span class="q-doer" title="Reported done by the doer — check it off yourself to close it">✋</span>' : ''}${
-    (t.comments || []).length ? ` <span class="q-cmt" title="${esc(t.comments.map(c => `${c.from}: ${c.text}`).join('\n'))}">💬${t.comments.length}</span>` : ''}${note}</span>
+    (t.comments || []).length ? ` <span class="q-cmt" title="${esc(t.comments.map(c => `${c.from}: ${c.text}`).join('\n'))}">💬${t.comments.length}</span>` : ''}${reportedHtml(t)}${note}</span>
     ${star}
+    ${t.history ? `<button class="q-btn q-hist" title="${T('conversation & completion history')}">🕓</button>` : ''}
     <button class="q-btn move" title="Move / group">⇄</button>
     <button class="q-btn done" title="Mark done">✓</button>
+  </div>${sharedThreadHtml(t)}`;
+}
+// Shared rows carry a conversation: the helper's questions with my replies inline under
+// them (one thread per occurrence), a reply box, and a 🕓-expanded history of past
+// occurrences — each with its conversation and the dates the round was completed.
+function sharedThreadHtml(t) {
+  if (!String(t.ID || '').startsWith('sh:')) return '';
+  const convo = (t.comments || []).map(c =>
+    `<div class="q-cline"><b>${esc(c.from)}</b>: ${esc(c.text)}</div>`).join('');
+  const hist = t.history ? `<div class="q-histbox" data-for="${esc(t.ID)}" style="display:none">
+      ${(t.history.done || []).length ? `<div class="q-cline tiny">✓ ${T('completed')}: ${t.history.done.map(esc).join(' · ')}</div>` : ''}
+      ${(t.history.comments || []).map(c => `<div class="q-cline tiny"><b>${esc(c.from)}</b>: ${esc(c.text)} <span class="muted">${esc(String(c.at || '').slice(0, 10))}</span></div>`).join('')}
+    </div>` : '';
+  return `<div class="q-thread" data-id="${esc(t.ID)}">${convo}${hist}
+    <div class="q-reply"><input class="q-reply-in" placeholder="${T('reply…')}"><button class="q-reply-go ib">↩</button></div>
   </div>`;
 }
 // high salience = a `salient` tag or a leading "!" in the task text (mirrors the server watcher)
@@ -1379,6 +1466,25 @@ function attachHandlers() {
         setTimeout(renderMatrixSafe, 350);
       } else el.classList.remove('saving');
     });
+  });
+
+  // shared-row conversation: 🕓 history toggle + inline reply
+  rootEl.querySelectorAll('.q-btn.q-hist').forEach(btn => btn.onclick = e => {
+    e.stopPropagation();
+    const id = btn.closest('.q-task').dataset.id;
+    const box = rootEl.querySelector(`.q-histbox[data-for="${CSS.escape(id)}"]`);
+    if (box) box.style.display = box.style.display === 'none' ? '' : 'none';
+  });
+  rootEl.querySelectorAll('.q-thread').forEach(th => {
+    const id = th.dataset.id;
+    const input = th.querySelector('.q-reply-in'), go = th.querySelector('.q-reply-go');
+    const send = async () => {
+      const text = input.value.trim(); if (!text) return;
+      input.value = '';
+      const r = await api(`/api/tasks/${encodeURIComponent(id)}/comment`, { method: 'POST', body: JSON.stringify({ text }) });
+      if (r && r.error) showErr(r.error); else loadTasks();
+    };
+    if (go) { go.onclick = send; input.onkeydown = e => { if (e.key === 'Enter') send(); }; }
   });
 
   // ☆/★ salience toggle on Monitor items — sets/clears the `salient` tag; a high-salience
@@ -1965,8 +2071,13 @@ setInterval(loadJLists, 90000); // pick up new journal headings without a reload
     btn.disabled = true; st.textContent = 'sending…';
     const r = await api('/api/feedback', { method: 'POST', body: JSON.stringify({ kind: 'comment', context: text }) });
     btn.disabled = false;
-    if (r && r.ok) { inp.value = ''; st.textContent = 'saved ✓'; setTimeout(() => { st.textContent = ''; }, 2500); }
-    else { st.textContent = 'failed'; }
+    if (r && r.ok && r.applied) { // guest-CI instance: the change is already live
+      inp.value = ''; st.textContent = T('applied — reloading…');
+      setTimeout(() => location.reload(), 900);
+    } else if (r && r.ok) {
+      inp.value = ''; st.textContent = r.reason ? `${T('noted for the nightly pass')} (${r.reason})` : 'saved ✓';
+      setTimeout(() => { st.textContent = ''; }, 4000);
+    } else { st.textContent = 'failed'; }
   };
   btn.onclick = send;
   inp.onkeydown = e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); send(); } };
@@ -3553,10 +3664,13 @@ function makeSwipeable(card, { onLeft, onRight }) {
 
 
 // ---------- load everything in parallel ----------
-api('/api/tasks').then(r => {
-  if (r.error) { showErr('Sheet unreachable: ' + r.error); $('eisen').innerHTML = ''; return; }
-  allTasks = r.tasks; renderMatrix();
-}).catch(e => showErr(String(e)));
+function loadTasks() {
+  return api('/api/tasks').then(r => {
+    if (r.error) { showErr('Sheet unreachable: ' + r.error); $('eisen').innerHTML = ''; return; }
+    allTasks = r.tasks; renderMatrix();
+  }).catch(e => showErr(String(e)));
+}
+loadTasks();
 
 api('/api/calendar').then(r => {
   if (r.error) {

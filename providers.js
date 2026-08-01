@@ -317,7 +317,7 @@ async function listProviders() {
   };
 }
 
-const TEXT_CHAIN = { 'vertex-gemini': geminiText, 'claude-cli': claudeCliText, 'anthropic-api': anthropicText, 'grok': grokText, 'openai': openaiText };
+const TEXT_CHAIN = { 'vertex-gemini': geminiText, 'gemini-free': geminiFreeText, 'claude-cli': claudeCliText, 'anthropic-api': anthropicText, 'grok': grokText, 'openai': openaiText };
 
 // Try the requested provider first (if any), then the rest of the chain in order.
 async function generateText(prompt, preferred) {
