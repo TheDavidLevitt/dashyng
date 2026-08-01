@@ -340,10 +340,16 @@ app.use((req, res, next) => {
       // Proxied-instance guests: a whole dashboard of their own outranks the single-page
       // carve-outs below — but someone who is ALSO a game guest keeps /junglefarm here.
       const gr = guestRouteOf(email);
-      if (gr && !(GAME_GUEST_N.includes(email) && isGamePath(req.path))) {
-        // guests live under the mount too, so page and API share one URL shape
-        if (!routeForPath(req.path)) return res.redirect(gr.path);
-        return proxyToInstance(gr, req, res, email);
+      // a mounted instance outranks the single-page carve-outs below, except on the paths
+      // those carve-outs own — a guest may hold a whole dashboard AND a page here
+      if (gr && !(GAME_GUEST_N.includes(email) && isGamePath(req.path))
+             && !(RANMALI_GUEST_N.includes(email) && isRanmaliPath(req.path))) {
+        // serve whichever mount the URL names (a guest can be on several), never the
+        // guest's home mount regardless of path — that sliced the prefix off the wrong
+        // route and forwarded a mangled path upstream
+        const mr = routeForPath(req.path);
+        if (mr && (mr.emails || []).map(normEmail).includes(email)) return proxyToInstance(mr, req, res, email);
+        return res.redirect(gr.path);   // unknown path, or a mount that is not theirs
       }
       // game guests: /junglefarm only — anything else bounces back to the game
       if (GAME_GUEST_N.includes(email)) {
@@ -656,7 +662,8 @@ if (HAS_CLAUDE) fs.watchFile(CLAUDE_TOK_FILE, { interval: 60000 }, (cur, prev) =
 // a configured llm-relay counts as an inline LLM: runClaude forwards to the subscription
 // CLI on another tier, so nothing here needs the Mac RPC queue (whose drainer only serves
 // the owner's own sheet — a guest instance queueing there would wait forever).
-const HAS_LLM = HAS_CLAUDE || !!(CFG.llmRelayUrl && CFG.llmRelayKey) || !!process.env.ANTHROPIC_API_KEY;
+const hasLlm = () => HAS_CLAUDE || !!(CFG.llmRelayUrl && CFG.llmRelayKey) || !!process.env.ANTHROPIC_API_KEY || require('./providers').hasUserKey('openrouter');
+const HAS_LLM = HAS_CLAUDE || !!(CFG.llmRelayUrl && CFG.llmRelayKey) || !!process.env.ANTHROPIC_API_KEY; // static tiers; hasLlm() adds the ⚙ user key
 // Gmail evidence (flight/train/hotel confirmations) for location tracking: needs a
 // one-time offline-consent OAuth grant (separate from the Sign-in-with-Google session
 // login above — that one only proves identity, it isn't scoped for background API calls
@@ -1862,6 +1869,11 @@ app.post('/api/settings', asyncRoute(async (req, res) => {
     .map(c => ({ type: c.url ? 'ical' : 'gcal', id: String(c.id || '').slice(0, 120), url: String(c.url || '').slice(0, 300), on: c.on !== false }));
   if (typeof s.calendarLookahead === 'string' && ['', 'week', '2weeks', '5days', '7days'].includes(s.calendarLookahead))
     next.calendarLookahead = s.calendarLookahead;
+  if (s.openrouterKey !== undefined) { // ⚙ LLM access (public tier w/o CLI/relay)
+    const v = String(s.openrouterKey || '').trim().slice(0, 200);
+    if (v) next.openrouterKey = v; else delete next.openrouterKey;
+    require('./providers').setUserKey('openrouter', v);
+  }
   if (s.fontScale !== undefined) { // page-wide text scale (⚙ Text size)
     const v = parseFloat(s.fontScale);
     if (v >= 0.8 && v <= 1.4) next.fontScale = String(v); else delete next.fontScale;
@@ -2049,6 +2061,15 @@ app.post('/api/location/set', asyncRoute(async (req, res) => {
   res.json({ ok: true, name });
 }));
 app.get('/api/location/current', asyncRoute(async (req, res) => res.json({ location: locationOnDate(today()) })));
+// which engine answers LLM work here — drives the ⚙ "LLM access" row
+app.get('/api/llm/status', (req, res) => {
+  const engine = HAS_CLAUDE ? 'claude-cli (subscription)'
+    : (CFG.llmRelayUrl && CFG.llmRelayKey) ? 'relay (shared subscription)'
+    : process.env.ANTHROPIC_API_KEY ? 'anthropic API key'
+    : require('./providers').hasUserKey('openrouter') ? 'OpenRouter key (yours)'
+    : 'none';
+  res.json({ engine, needsKey: engine === 'none' });
+});
 async function barSearchForEvent({ title, date, venue }) {
   const loc = locationOnDate(date) || 'the owner\'s city';
   let text = '', servedBy = 'grok';
@@ -5107,8 +5128,13 @@ async function runClaude(prompt, { tools, timeoutMs, module, model, served } = {
       }
       throw new Error('llm-relay failed: ' + String(j.error || r.status).slice(0, 200));
     }
+    const pv = require('./providers');
+    if (!process.env.ANTHROPIC_API_KEY && pv.hasUserKey('openrouter')) {
+      mark('openrouter (user key)'); // ⚙-entered key — the public tier's own funding
+      return await pv.openrouterText(prompt);
+    }
     mark(model || 'anthropic-api');
-    return await require('./providers').anthropicText(prompt, model, module); // API-key path (stub default)
+    return await pv.anthropicText(prompt, model, module); // API-key path (stub default)
   }
   try {
     const stdout = await runClaudeRaw(prompt, { tools, timeoutMs, model });
@@ -8014,6 +8040,7 @@ function localIPs() {
   return out;
 }
 
+try { require('./providers').setUserKey('openrouter', (loadSettings().openrouterKey || '')); } catch (e) {}
 app.listen(PORT, '0.0.0.0', async () => {
   console.log(`Dashboard listening on 0.0.0.0:${PORT}`);
   for (const ip of localIPs()) console.log(`  → http://${ip.split(' ')[0]}:${PORT}  ${ip.split(' ')[1] || ''}`);

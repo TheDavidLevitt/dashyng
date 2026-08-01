@@ -317,7 +317,26 @@ async function listProviders() {
   };
 }
 
-const TEXT_CHAIN = { 'vertex-gemini': geminiText, 'gemini-free': geminiFreeText, 'claude-cli': claudeCliText, 'anthropic-api': anthropicText, 'grok': grokText, 'openai': openaiText };
+const TEXT_CHAIN = { 'vertex-gemini': geminiText, 'gemini-free': geminiFreeText, 'claude-cli': claudeCliText, 'anthropic-api': anthropicText, 'grok': grokText, 'openai': openaiText, 'openrouter': openrouterText };
+
+// user-supplied keys (⚙ panel, settings store) — the public-tier path when the host has
+// no claude CLI, no relay, and no env key. OpenRouter suggested: one key, every model.
+const userKeys = {};
+function setUserKey(provider, key) { userKeys[provider] = String(key || '').trim(); }
+const hasUserKey = provider => !!(userKeys[provider]);
+async function openrouterText(prompt, model) {
+  const key = require('./config').openrouterKey || userKeys.openrouter;
+  if (!key) throw new Error('no OpenRouter key');
+  const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST', headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: model || 'anthropic/claude-haiku-4.5', messages: [{ role: 'user', content: prompt }] }),
+  });
+  if (!r.ok) throw new Error('openrouter HTTP ' + r.status);
+  const j = await r.json();
+  const text = j.choices?.[0]?.message?.content;
+  if (!text) throw new Error('openrouter empty response');
+  return text;
+}
 
 // Try the requested provider first (if any), then the rest of the chain in order.
 async function generateText(prompt, preferred) {
@@ -340,4 +359,4 @@ async function generateImage(prompt, opts) {
   return { provider: 'vertex-imagen', images };
 }
 
-module.exports = { listProviders, generateText, generateImage, embedText, geminiText, geminiFreeText, geminiFreeAllowed, grokText, grokAgent, apaModelText, apaAdapters, apaProviderFor, probeVertex, openrouterModels, openrouterResolveId, openrouterPrice, GEMINI_MODEL, EMBED_MODEL, EMBED_DIM, IMAGEN_MODEL, VERTEX_LOCATION };
+module.exports = { listProviders, generateText, setUserKey, hasUserKey, openrouterText, generateImage, embedText, geminiText, geminiFreeText, geminiFreeAllowed, grokText, grokAgent, apaModelText, apaAdapters, apaProviderFor, probeVertex, openrouterModels, openrouterResolveId, openrouterPrice, GEMINI_MODEL, EMBED_MODEL, EMBED_DIM, IMAGEN_MODEL, VERTEX_LOCATION };
