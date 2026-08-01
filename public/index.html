@@ -1954,11 +1954,9 @@ function renderTodayCards() {
   }).map(ev => ({ kind: 'cal', title: ev.summary || '(no title)', date: isoToday,
     time: ev.start?.dateTime ? new Date(ev.start.dateTime).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : '',
     venue: ev.location || '', url: '', note: '', activity: '' }));
-  const allow = show => { const v = String(show || 'all').toLowerCase();
-    return v === 'all' || v.split(/[,\s]+/).includes(today0.toLocaleDateString('en-US', { weekday: 'short' }).toLowerCase()); };
-  const acts = (actData.events || []).filter(a => a.date === isoToday && allow(a.show))
-    .map(a => ({ kind: 'act', title: a.title, date: a.date, time: a.time || '', venue: a.venue || '', url: a.url || '', note: a.note || '', activity: a.activity }));
-  const cards = [...evs, ...acts].sort((a, b) => String(a.time || '99').localeCompare(String(b.time || '99')));
+  // Scanned SUGGESTIONS live in the Activity Preview widget — Today shows only what is
+  // actually on the calendar (a suggestion gets here by being swiped right / scheduled).
+  const cards = evs.sort((a, b) => String(a.time || '99').localeCompare(String(b.time || '99')));
   if (!cards.length) { el.innerHTML = '<div class="empty">Nothing scheduled today.</div>'; return; }
   el.innerHTML = cards.map((c, i) => `<div class="event swipecard td-card" data-i="${i}">
       <div class="time">${c.time ? esc(c.time) + ' <span class="tiny muted">' + esc(TZ_ABBR) + '</span>' : 'all day'}</div>
@@ -2247,11 +2245,46 @@ function leadStrip() {
 // activity alerts, separated from the calendar. Same lead data, same swipe-to-clear.
 function renderActPreview() {
   const el = document.getElementById('actprev'); if (!el) return;
-  const strip = leadStrip();
-  el.innerHTML = (strip || '<div class="empty tiny">No upcoming activity alerts.</div>')
-    + `<div class="tiny" style="margin-top:3px"><a href="#" class="la-acts-link" style="color:var(--violet)">🎯 What events do you want on your radar?</a></div>`;
+  const iso = d => d.toISOString().slice(0, 10);
+  const t0 = iso(new Date()); const t7 = iso(new Date(Date.now() + 7 * 86400000));
+  // suggestions already ON the calendar never re-appear here (fuzzy title match)
+  const calToks = (calEvents || []).map(ev => new Set(String(ev.summary || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(w => w.length > 1)));
+  const onCal = title => { const T = new Set(String(title).toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(w => w.length > 1));
+    return calToks.some(D => { let n = 0; for (const x of T) if (D.has(x)) n++; return n / Math.max(1, Math.min(T.size, D.size)) >= 0.7; }); };
+  const sugg = (actData.events || []).filter(a => a.date >= t0 && a.date <= t7 && !onCal(a.title)).slice(0, 8);
+  const sCard = (a, i) => `<div class="event swipecard td-card ap-card" data-i="${i}">
+    <div class="time">${a.date === t0 ? (a.time ? esc(a.time) : 'today') : new Date(a.date + 'T12:00').toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric' }) + (a.time ? ' ' + esc(a.time) : '')}</div>
+    <div class="td-body"><span style="color:var(--violet)">[${esc(a.activity)}]</span> ${esc(a.title)}${a.venue ? ` <span class="tiny muted">@ ${esc(a.venue)}</span>` : ''}${a.url ? ` <a class="tiny" href="${esc(a.url)}" target="_blank" rel="noopener">↗</a>` : ''}${a.note ? `<div class="tiny muted">${esc(a.note)}</div>` : ''}</div>
+    <span class="td-btns"><button class="ib td-up" title="More like this (👍 then ← = good call, just not this time)">👍</button><button class="ib td-down" title="Less like this">👎</button></span></div>`;
+  el.innerHTML = leadStrip() + (sugg.length ? sugg.map(sCard).join('') : '')
+    + (!leadStrip() && !sugg.length ? '<div class="empty tiny">No upcoming activity suggestions.</div>' : '')
+    + `<div class="tiny" style="margin-top:3px"><a href="#" class="la-acts-link" style="color:var(--violet)">🎯 What events do you want on your radar?</a> · ← skip · → add to calendar</div>`;
   bindLeads(el);
   el.querySelectorAll('.la-acts-link').forEach(a => a.onclick = e => { e.preventDefault(); openIntEditor('ACTIVITIES'); });
+  el.querySelectorAll('.ap-card').forEach(card => {
+    const a = sugg[+card.dataset.i];
+    // dismissals must be CONFIRMED: a swallowed error here is how the toy festival came
+    // back five times — the card only leaves once the server says the row landed
+    const fb = async (kind, ctx) => {
+      const r = await api('/api/feedback', { method: 'POST', body: JSON.stringify({ kind, title: a.title, source: a.activity, context: ctx || '' }) }).catch(() => null);
+      if (!r || r.error) { toast && toast('could not save that — try again', true); return false; }
+      return true;
+    };
+    card.querySelector('.td-up').onclick = async e => { if (await fb('event_up')) pulse(e.target); };
+    card.querySelector('.td-down').onclick = async () => { if (await fb('event_down')) flyAway(card, -1, { label: 'less like this', reverse: () => renderActPreview() }); };
+    makeSwipeable(card, {
+      onLeft: async () => { if (!await fb('event_skipped')) return false; flyAway(card, -1, { label: 'skip', reverse: () => renderActPreview() }); return true; },
+      onRight: async () => {
+        const r = await api('/api/events/schedule', { method: 'POST',
+          body: JSON.stringify({ title: a.title, date: a.date, time: a.time, venue: a.venue, url: a.url, note: a.note, activity: a.activity }) });
+        if (!r || r.error) { showErr(r && r.error || 'schedule failed'); return false; }
+        await fb('event_scheduled');
+        flyAway(card, 1, { label: 'scheduled', reverse: () => api(`/api/events/schedule/${encodeURIComponent(r.eventId)}`, { method: 'DELETE' }).then(() => renderActPreview()) });
+        setTimeout(() => api('/api/calendar').then(r2 => { if (r2 && r2.events) { calEvents = r2.events; renderTodayCards(); renderLookahead(); } }), 1200);
+        return true;
+      },
+    });
+  });
 }
 function bindLeads(root) {
   root.querySelectorAll('.la-lead').forEach(row => {
@@ -2639,9 +2672,10 @@ function renderLookahead() {
     const boxes = chunk.map((x, j) => dayHtml(x, wi * cols + j)).join('');
     return `<div class="la-week"><div class="la-grid" data-week="${wi}" style="grid-template-columns:repeat(${chunk.length},1fr);position:relative">${boxes}</div><div class="cal-strip" data-week="${wi}"></div><div class="loc-strip" data-week="${wi}"></div></div>`;
   }).join('')
-    + `<div class="tiny" style="margin-top:3px"><a href="#" class="la-acts-link" style="color:var(--violet)">🎯 monitor events (rugby, local happenings, ticket sales…)</a></div>`;
-  el.innerHTML = laToolbar() + leadStrip() + el.innerHTML;
-  bindLeads(el); bindTravelInput(el);
+;
+  el.innerHTML = laToolbar() + el.innerHTML;
+  renderActPreview();
+  bindTravelInput(el);
   weekChunks.forEach((chunk, wi) => renderCalStrip(el.querySelector(`.cal-strip[data-week="${wi}"]`), chunk));
   const redrawStrips = () => weekChunks.forEach((chunk, wi) => renderLocationStrip(el.querySelector(`.loc-strip[data-week="${wi}"]`), chunk, false, days, redrawStrips));
   redrawStrips();
