@@ -855,6 +855,17 @@ function cfgToggle() {
       <button class="cfg-cdel">✕</button></div>`).join('')}</div>
     <div class="cfg-row"><button id="cfg-caladd">＋ calendar</button><span class="tiny muted">empty list = the default calendar</span>
       <a href="${url('/auth/calendar/connect')}" style="margin-left:auto"><button type="button">🔗 Connect Google Calendar</button></a></div>
+    <div class="cfg-head">Sharing &amp; friends</div>
+    <div class="cfg-row"><span class="tiny muted">my dashyng ID</span>
+      <input id="cfg-did" placeholder="e.g. david" style="width:110px">
+      <button type="button" id="cfg-did-save">register</button>
+      <span class="tiny muted" id="cfg-did-msg"></span></div>
+    <div class="cfg-row"><span class="tiny muted">share a widget</span>
+      <input id="cfg-sh-email" placeholder="friend's email" style="flex:1;min-width:120px">
+      <select id="cfg-sh-widget" style="max-width:150px"></select>
+      <button type="button" id="cfg-sh-send">send</button>
+      <span class="tiny muted" id="cfg-sh-msg"></span></div>
+    <div id="cfg-sh-inbox"></div>
     <div class="cfg-head">LLM access — who answers the smart features</div>
     <div class="cfg-row"><span class="tiny" id="cfg-llm-status">…</span>
       <input id="cfg-orkey" placeholder="OpenRouter API key (sk-or-…)" style="flex:1;display:none">
@@ -913,6 +924,63 @@ function cfgToggle() {
     if (qa) qa.onclick = () => quadAddList().then(() => { cfgToggle(); cfgToggle(); });
   };
   wire();
+  { // Sharing & friends
+    const dmsg = p.querySelector('#cfg-did-msg'), smsg = p.querySelector('#cfg-sh-msg');
+    if (dmsg) {
+      api('/api/widgets').then(r => {
+        const sel = p.querySelector('#cfg-sh-widget');
+        sel.innerHTML = ((r && r.widgets) || []).filter(w => !w.hidden).map(w => `<option value="${esc(w.id)}">${esc(w.title)}</option>`).join('');
+      });
+      p.querySelector('#cfg-did-save').onclick = async () => {
+        const r = await api('/api/directory/register', { method: 'POST', body: JSON.stringify({ dashyngId: p.querySelector('#cfg-did').value.trim(), displayName: userName || '' }) });
+        dmsg.textContent = r && r.ok ? '✓ registered as ' + r.dashyngId : (r && r.error) || 'failed';
+      };
+      p.querySelector('#cfg-sh-send').onclick = async () => {
+        smsg.textContent = '…';
+        const r = await api('/api/share/send', { method: 'POST', body: JSON.stringify({ email: p.querySelector('#cfg-sh-email').value.trim(), widgetId: p.querySelector('#cfg-sh-widget').value }) });
+        smsg.textContent = r && r.ok ? '✓ sent to ' + r.to : (r && r.error) || 'failed';
+      };
+      const renderInbox = async () => {
+        const box = p.querySelector('#cfg-sh-inbox');
+        const r = await api('/api/share/inbox');
+        const inv = (r && r.invites) || [];
+        box.innerHTML = inv.map(i => `<div class="cfg-row" style="flex-wrap:wrap;border:1px solid var(--border);border-radius:6px;padding:5px 7px;margin:3px 0" data-inv="${esc(i.id)}">
+          <span class="tiny">📬 <b>${esc(i.from && (i.from.dashyngId || i.from.email) || '?')}</b> shares <b>${esc(i.widgetId)}</b>${i.note ? ` — ${esc(i.note)}` : ''}</span>
+          <button type="button" class="inv-diff tiny">view</button>
+          <button type="button" class="inv-yes" style="color:var(--green)">accept</button>
+          <button type="button" class="inv-no" style="color:var(--red)">decline</button>
+          <pre class="tiny inv-pre" style="display:none;flex-basis:100%;white-space:pre-wrap;max-height:160px;overflow:auto;background:var(--bg2);border-radius:4px;padding:4px">${esc(JSON.stringify(i.config || {}, null, 1))}</pre>
+        </div>`).join('') || '';
+        box.querySelectorAll('[data-inv]').forEach(row => {
+          const id = row.dataset.inv;
+          row.querySelector('.inv-diff').onclick = () => { const pre = row.querySelector('.inv-pre'); pre.style.display = pre.style.display === 'none' ? '' : 'none'; };
+          row.querySelector('.inv-yes').onclick = async () => { await api('/api/share/resolve', { method: 'POST', body: JSON.stringify({ id, accept: true }) }); toast && toast('widget added — reloading'); setTimeout(() => location.reload(), 700); };
+          row.querySelector('.inv-no').onclick = async () => { await api('/api/share/resolve', { method: 'POST', body: JSON.stringify({ id, accept: false }) }); renderInbox(); };
+        });
+      };
+      renderInbox();
+    } }
+  { const st = p.querySelector('#cfg-llm-status');
+    if (st) api('/api/llm/status').then(r => {
+      st.textContent = 'engine: ' + ((r && r.engine) || '?');
+      if (r && r.needsKey) ['cfg-orkey', 'cfg-orkey-save', 'cfg-orkey-link'].forEach(id => { p.querySelector('#' + id).style.display = ''; });
+      const sv = p.querySelector('#cfg-orkey-save');
+      sv.onclick = async () => {
+        const k = p.querySelector('#cfg-orkey').value.trim(); if (!k) return;
+        const r2 = await api('/api/settings', { method: 'POST', body: JSON.stringify({ settings: { openrouterKey: k } }) });
+        st.textContent = r2 && r2.ok !== false ? 'engine: OpenRouter key (yours)' : 'save failed';
+      };
+    }); }
+  { const btn = p.querySelector('#cfg-loc-set'), dev = p.querySelector('#cfg-loc-dev'), inp = p.querySelector('#cfg-loc'), msg = p.querySelector('#cfg-loc-msg');
+    if (btn) {
+      const done = r => { msg.textContent = r && r.ok ? '✓ ' + r.name : (r && r.error) || 'failed'; };
+      btn.onclick = async () => done(await api('/api/location/set', { method: 'POST', body: JSON.stringify({ name: inp.value.trim() }) }));
+      dev.onclick = () => { msg.textContent = '…';
+        navigator.geolocation.getCurrentPosition(
+          async pos => done(await api('/api/location/set', { method: 'POST', body: JSON.stringify({ lat: pos.coords.latitude, lon: pos.coords.longitude }) })),
+          () => { msg.textContent = 'device location unavailable'; }, { timeout: 10000 }); };
+      api('/api/location/current').then(r => { if (r && r.location) inp.placeholder = r.location; });
+    } }
   $('cfg-caladd').onclick = () => {
     const d = document.createElement('div'); d.className = 'cfg-row cfg-cal';
     d.innerHTML = `<label><input type="checkbox" class="cfg-con" checked></label><input class="cfg-cid" placeholder="calendar id or .ics URL" style="flex:1"><button class="cfg-cdel">✕</button>`;
@@ -957,27 +1025,6 @@ function cfgToggle() {
   const calendarLookahead = p.querySelector('#cfg-lookahead') ? p.querySelector('#cfg-lookahead').value : (appSettings.calendarLookahead || '');
     const cycDate = ($('cfg-cyc-date') || {}).value || '';
     const cycle = cycDate ? { lastStart: cycDate, length: +($('cfg-cyc-len') || {}).value || 28 } : null;
-  { const st = p.querySelector('#cfg-llm-status');
-    if (st) api('/api/llm/status').then(r => {
-      st.textContent = 'engine: ' + ((r && r.engine) || '?');
-      if (r && r.needsKey) ['cfg-orkey', 'cfg-orkey-save', 'cfg-orkey-link'].forEach(id => { p.querySelector('#' + id).style.display = ''; });
-      const sv = p.querySelector('#cfg-orkey-save');
-      sv.onclick = async () => {
-        const k = p.querySelector('#cfg-orkey').value.trim(); if (!k) return;
-        const r2 = await api('/api/settings', { method: 'POST', body: JSON.stringify({ settings: { openrouterKey: k } }) });
-        st.textContent = r2 && r2.ok !== false ? 'engine: OpenRouter key (yours)' : 'save failed';
-      };
-    }); }
-  { const btn = p.querySelector('#cfg-loc-set'), dev = p.querySelector('#cfg-loc-dev'), inp = p.querySelector('#cfg-loc'), msg = p.querySelector('#cfg-loc-msg');
-    if (btn) {
-      const done = r => { msg.textContent = r && r.ok ? '✓ ' + r.name : (r && r.error) || 'failed'; };
-      btn.onclick = async () => done(await api('/api/location/set', { method: 'POST', body: JSON.stringify({ name: inp.value.trim() }) }));
-      dev.onclick = () => { msg.textContent = '…';
-        navigator.geolocation.getCurrentPosition(
-          async pos => done(await api('/api/location/set', { method: 'POST', body: JSON.stringify({ lat: pos.coords.latitude, lon: pos.coords.longitude }) })),
-          () => { msg.textContent = 'device location unavailable'; }, { timeout: 10000 }); };
-      api('/api/location/current').then(r => { if (r && r.location) inp.placeholder = r.location; });
-    } }
     api('/api/settings', { method: 'POST', body: JSON.stringify({ settings: { sections, quadrants, calendars, calendarLookahead, fontScale, cycle } }) })
       .then(r => { if (r && r.error) { toast(r.error); return; } location.reload(); })
       .catch(e => toast(e.message));
