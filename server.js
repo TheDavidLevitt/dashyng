@@ -442,6 +442,9 @@ app.use((req, res, next) => {
   // Inbound proxy trust: this instance sits behind a fronting dashboard and answers ONLY it.
   if (PROXY_AUTH_KEY) {
     if (req.headers['x-proxy-auth'] === PROXY_AUTH_KEY) return next();
+    // friend instances deliver invites directly (they don't hold the proxy key);
+    // receipts only PARK — the owner approves in ⚙ before anything applies
+    if (req.method === 'POST' && req.path === '/api/share/receive') return next();
     return res.status(403).send('proxy only');
   }
   // one canonical host: www → apex, so the session cookie has a single home
