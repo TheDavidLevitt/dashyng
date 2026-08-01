@@ -297,6 +297,35 @@ async function gmailConsentReturn(req, res) {
 }
 app.get('/auth/gmail/disconnect', (req, res) => { try { fs.unlinkSync(GMAIL_TOKEN_FILE); } catch (e) {} res.redirect('/'); });
 
+// ---------- native-app support: widget tokens + push registration (iOS/watch) ----------
+// WidgetKit timelines and watch complications fetch WITHOUT cookies: a scoped, revocable,
+// READ-ONLY token (minted by the signed-in owner, stored in settings) unlocks exactly the
+// endpoints a glance needs — nothing that writes, nothing personal beyond the glance.
+const WIDGET_TOKEN_PATHS = new Set(['/api/activities', '/api/calendar', '/api/surf', '/api/tasks', '/api/widgets']);
+app.post('/api/widget-token', asyncRoute(async (req, res) => {
+  const st = loadSettings();
+  const token = st.widgetToken || crypto.randomBytes(16).toString('hex');
+  if (!st.widgetToken) await saveSettings({ ...st, widgetToken: token });
+  res.json({ token, paths: [...WIDGET_TOKEN_PATHS] });
+}));
+app.post('/api/widget-token/revoke', asyncRoute(async (req, res) => {
+  const st = { ...loadSettings() }; delete st.widgetToken;
+  await saveSettings(st); res.json({ ok: true });
+}));
+// Push: devices register their APNs token; the sender (bin/push-send helper below the
+// urgent/lead paths) is a no-op until APNS_* env/config exists — registration still works
+// so devices are ready the moment the owner's Apple developer keys land.
+app.post('/api/push/register', asyncRoute(async (req, res) => {
+  const { token, platform } = req.body || {};
+  const t = String(token || '').trim().slice(0, 200);
+  if (!t) return res.status(400).json({ error: 'token required' });
+  const st = loadSettings();
+  const devices = (st.pushDevices || []).filter(d => d.token !== t);
+  devices.push({ token: t, platform: String(platform || 'ios').slice(0, 12), at: nowIso() });
+  await saveSettings({ ...st, pushDevices: devices.slice(-10) });
+  res.json({ ok: true, devices: devices.length });
+}));
+
 // ---------- dashyng IDs, invites & widget sharing (phases 3+4) ----------
 // Directory: a sheet tab mapping sha256(email) → {dashyngId, instanceUrl, displayName}.
 // Friends find each other by EMAIL (hashed at rest); the instance URL is only revealed to
@@ -464,6 +493,9 @@ app.use((req, res, next) => {
   // applied on receipt — invites park in ⚙ until the owner reviews the diff — so an
   // unauthenticated drop-box is acceptable; the resolve/apply routes stay behind the gate.
   if (req.method === 'POST' && req.path === '/api/share/receive') return next();
+  // native widgets/complications: scoped read-only token on an exact-path whitelist
+  if (req.method === 'GET' && WIDGET_TOKEN_PATHS.has(req.path)
+      && req.headers['x-widget-token'] && req.headers['x-widget-token'] === (loadSettings().widgetToken || undefined)) return next();
   if (OAUTH_ID && process.env.OAUTH_REDIRECT_BASE) {
     const sess = verifySession(cookieOf(req, 'dash_session'));
     if (sess) {

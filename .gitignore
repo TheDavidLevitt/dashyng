@@ -21,6 +21,8 @@ data/credits.json
 data/markets-local.json
 data/settings-local.json
 plugins/*.js
+# core plugins are PUBLIC code — extracted sections, committed and shipped
+!plugins/surf.js
 data/webhook-retry.json
 data/config-local.json
 data/location-bars-local.json
