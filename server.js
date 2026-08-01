@@ -3140,7 +3140,7 @@ function ciSanitizePatch(raw) {
     for (const [k, v] of Object.entries(p.sections)) {
       if (!v || typeof v !== 'object') continue;
       const e = {};
-      if (typeof v.hidden === 'boolean') e.hidden = v.hidden;
+      if (typeof v.hidden === 'boolean' && !(k === 'cinote' && v.hidden)) e.hidden = v.hidden; // never let it hide the suggestion box
       if (typeof v.title === 'string' && v.title.trim()) e.title = v.title.trim().slice(0, 60);
       if (Number.isFinite(+v.order)) e.order = +v.order;
       if (typeof v.collapsed === 'boolean') e.collapsed = v.collapsed;
@@ -3172,7 +3172,9 @@ async function ciTryApply(suggestion) {
   const s = loadSettings();
   const prompt = `You configure a personal dashboard. Turn the user's request into a JSON settings patch and output ONLY the JSON (no prose, no fences).
 Allowed shape: {"sections":{"<key>":{"hidden":bool,"title":"…","order":num,"collapsed":bool}},"quadrants":{"<key>":{"label":"…","sub":"…","order":num,"w":1-12,"collapsed":bool,"style":"bullets"|"ranked"}}}
-Section keys: links habits brief today todo jlists cinote jobsboard agents files completed media markets signals surf news week plugin:nature-weather plugin:cycle
+Section keys and what they are (match the user's words to the MEANING, in any language):
+ todo=persistent task lists (listes persistantes) · jlists=ephemeral notes (notes éphémères) · cinote=this suggestion box · links=links (liens) · habits=habits (habitudes) · brief=agent brief · today=today cards (aujourd'hui) · jobsboard=job openings · agents=agent stable · files=file manager · completed=completed tasks (terminées) · media=reading queue (à lire) · markets=markets (marchés) · signals=market signals · surf=wind & waves (vent & vagues) · news=news (actus) · week=week ahead (la semaine) · plugin:nature-weather=nature & weather (météo) · plugin:cycle=cycle tracking (cycle)
+NEVER set cinote.hidden=true — this box is how the user talks to you.
 Current sections config: ${JSON.stringify(s.sections || {}).slice(0, 1500)}
 Current lists config: ${JSON.stringify(s.quadrants || {}).slice(0, 1500)}
 If the request is not about layout/visibility/naming of sections or lists, output exactly {}.
