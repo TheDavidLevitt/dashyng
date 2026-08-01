@@ -5669,7 +5669,16 @@ function ranmaliItemView(i, t) {
     return { day: 0, status: mark === 'Y' ? 'confirmed' : 'reported', late: false };
   if (mark === 'Y' || mark === 'D') return null;
   const d = due ? Math.round((dnum(due) - dnum(t)) / 864e5) : 0;
-  if (d > 3) return null;
+  if (d > 3) {
+    // recurring rows never vanish between rounds: they rest — faded, green-checked, with
+    // the last performed date — until the next occurrence comes back inside the horizon
+    if (parseRecurTag(i.tags)) {
+      const log = String(i.doneLog || '').split(',').map(x => x.trim()).filter(Boolean);
+      const last = log[log.length - 1] || rep;
+      if (last) return { day: 0, status: 'rested', late: false, lastDone: last };
+    }
+    return null;
+  }
   // a recurring row whose Due is stale means David has not confirmed yet — his lag is
   // not her lateness, so the red chip is for one-off work only
   return { day: Math.max(0, d), status: 'open', late: d < 0 && !parseRecurTag(i.tags) };

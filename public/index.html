@@ -1129,7 +1129,7 @@ function reportedHtml(t) {
   if (!on) return '';
   const d = Math.round((Date.parse(todayIso() + 'T00:00:00Z') - Date.parse(on + 'T00:00:00Z')) / 864e5);
   const when = d <= 0 ? T('today') : d === 1 ? T('yesterday') : T('%d days ago').replace('%d', d);
-  return ` <span class="q-reported">${T('last reported completed')}: ${when}</span>`;
+  return ` <span class="q-reported">${T('last reported completed')}: ${when} (${on.split('-').reverse().join('-')})</span>`;
 }
 // grey until its next occurrence is actually due: a fresh report (reportedOn) settles the
 // row immediately; after the day rolls over, a recurring row stays settled off its last

@@ -74,10 +74,12 @@
   .task .txt { flex: 1; font-size: 16px; overflow-wrap: anywhere; }
   .task .lbl { display: block; font-size: 12.5px; margin-top: 2px; }
   .task.doneRow { border-color: #2ea043; }
+.task.restedRow { opacity: .55; pointer-events: auto; }
+.task.restedRow .box { pointer-events: none; }
   .task.doneRow .box { background: #2ea043; border-color: #2ea043; color: #fff; }
   /* strike ONLY the task text: text-decoration propagates to descendants and a child
      cannot undo it, so the "completed" label must sit outside the struck span */
-  .task.doneRow .body { text-decoration: line-through; opacity: .7; }
+  .task.doneRow .body { opacity: .6; }
   .task.doneRow .lbl { color: #2ea043; }
   .task .ask { flex: 0 0 auto; border: 0; background: #21262d; color: #9aa4b2; font-size: 17px;
                padding: 8px 11px; border-radius: 10px; font-family: inherit; }
@@ -160,6 +162,10 @@
     sendFail:   ['යවන්න බැරි වුණා — නැවත උත්සාහ කරන්න', 'Could not send — try again'],
     sent:       ['යැව්වා ✓', 'Sent to David'],
     completed:  ['සම්පූර්ණයි ✓', 'completed'],
+    lastDoneToday:     ['අවසන් වරට කළේ: අද', 'last performed: today'],
+    lastDoneYesterday: ['අවසන් වරට කළේ: ඊයේ', 'last performed: yesterday'],
+    lastDoneAgo:       ['අවසන් වරට කළේ:', 'last performed:'],
+    daysAgo:           ['දවසකට කලින්', 'days ago'],
     late:       ['පරක්කුයි', 'late'],
     already:    ['මේක දැනටමත් තහවුරු කරලා', 'Already confirmed by David'],
     nothing:    ['වැඩ නැහැ', 'nothing'],
@@ -294,6 +300,7 @@
   // his side it locks. Reported items stay visible, checked, until midnight — the server
   // decides that (it stamps the report date), so a page left open self-corrects.
   let taskBusy = false;
+  let serverToday = new Date().toISOString().slice(0, 10); // refreshed from data.today on every load
   function taskRow(list, it) {
     const isDone = it.status !== 'open';
     const row = document.createElement('div');
@@ -308,8 +315,19 @@
       const c = document.createElement('span'); c.className = 'chip late'; c.textContent = biText(T.late);
       txt.appendChild(c);
     }
-    const lbl = bi(T.completed); lbl.className = 'lbl';
-    if (!isDone) lbl.style.display = 'none';
+    let lbl;
+    if (it.status === 'rested') { // recurring, done last round — resting until next due
+      const dmy = d => { const [y, m, dd] = d.split('-'); return `${dd}-${m}-${y}`; };
+      const days = Math.round((Date.parse(serverToday + 'T00:00:00Z') - Date.parse(it.lastDone + 'T00:00:00Z')) / 864e5);
+      const words = days <= 0 ? biText(T.lastDoneToday) : days === 1 ? biText(T.lastDoneYesterday)
+        : `${biText(T.lastDoneAgo)} ${days} ${biText(T.daysAgo)}`;
+      lbl = document.createElement('span'); lbl.className = 'lbl';
+      lbl.textContent = `${words} (${dmy(it.lastDone)})`;
+      row.classList.add('restedRow');
+    } else {
+      lbl = bi(T.completed); lbl.className = 'lbl';
+      if (!isDone) lbl.style.display = 'none';
+    }
     txt.appendChild(lbl);
     const ask = document.createElement('button'); ask.className = 'ask'; ask.textContent = '💬';
     ask.setAttribute('aria-label', biText(T.askPlace));
@@ -403,6 +421,7 @@
       const r = await fetch('/api/ranmali/tasks');
       if (!r.ok) return;                       // tasks are optional — the clothes section stands alone
       const data = await r.json();
+      if (data.today) serverToday = data.today;
       const todayWrap = $('taskToday'), aheadWrap = $('taskAhead');
       todayWrap.innerHTML = ''; aheadWrap.innerHTML = '';
       let nToday = 0, nAhead = 0;
