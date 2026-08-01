@@ -125,7 +125,10 @@ input.sec-rename { display: inline-block; max-width: 200px; font-size: inherit; 
 .cyc { color: #ff5ca8; font-weight: 800; } /* unlabeled by design */
 /* ephemeral notes — visually distinct from task lists: violet accent, dashed border */
 .q-fold { background: none; border: none; color: var(--text2); cursor: pointer; font-size: 11px; padding: 0 4px; }
-.q-folded { min-height: 0 !important; }
+.q-folded { min-height: 0 !important; resize: none; overflow: hidden; }
+.q-folded .q-header { margin: 0; }
+.q-fold { font-size: 15px; padding: 0 6px; line-height: 1; }
+.q-folded .q-fold { color: var(--accent); font-weight: 700; }
 .sig-inline .q-body { font-size: 12px; }
 /* section collapse-by-default (⚙): only the heading shows; click it to expand this session */
 .sec-collapsed > *:not(h2):not(:first-child) { display: none !important; }
@@ -1296,7 +1299,7 @@ function renderMatrix() {
       return html;
     }).join('') || '<div class="empty">—</div>';
     const sub = qc.sub || qd.sub;
-    const foldBtn = qc.collapsed ? `<button class="q-fold" data-k="${qd.key}" title="${folded ? 'expand' : 'fold'}">${folded ? '▸' : '▾'}</button>` : '';
+    const foldBtn = qc.collapsed ? `<button class="q-fold" data-k="${qd.key}" title="${folded ? 'expand' : 'fold'}">${folded ? '▼' : '▴'}</button>` : '';
     if (folded) return `<div class="q ${qd.cls} q-folded" style="grid-column: span ${qCols(qd.key)}" data-target="${qd.key}">
       <div class="q-header" draggable="true" data-qdrag="${qd.key}"><span><span class="q-grip">≡</span>${esc(listTitle(qd, li))}</span>
         <span><span class="q-count">${count}</span>${foldBtn}</span></div>
@@ -1321,7 +1324,11 @@ function renderMatrix() {
   $('eisen').querySelectorAll('.q-fold').forEach(b => b.onclick = e => {
     e.stopPropagation();
     const k = b.dataset.k;
-    qExpanded.has(k) ? qExpanded.delete(k) : qExpanded.add(k);
+    const opening = !qExpanded.has(k);
+    opening ? qExpanded.add(k) : qExpanded.delete(k);
+    // expanding must show EVERYTHING: drop the stored drag-height for this session so the
+    // box sizes to its content; a manual resize afterwards re-saves a height as usual
+    if (opening && (appSettings.quadrants || {})[k]) delete appSettings.quadrants[k].h;
     renderMatrix();
   });
   layoutMatrix();
@@ -1342,8 +1349,11 @@ function layoutMatrix() {
   grid.querySelectorAll('.q[data-target]').forEach(q => {
     const qc = (appSettings.quadrants || {})[q.dataset.target] || {};
     q.style.height = ''; q.style.gridRowEnd = ''; q.style.width = ''; // width = the span; native resize's px is transient
-    const h = qc.h || (q.scrollHeight + 2);
-    const span = Math.max(4, Math.ceil((h + 6) / Q_UNIT));
+    // a folded list is ALWAYS one header-line high: its saved height belongs to the
+    // expanded state and must not stretch the placeholder
+    const folded = q.classList.contains('q-folded');
+    const h = folded ? q.scrollHeight + 2 : (qc.h || (q.scrollHeight + 2));
+    const span = folded ? Math.max(1, Math.ceil((h + 6) / Q_UNIT)) : Math.max(4, Math.ceil((h + 6) / Q_UNIT));
     q.style.gridRowEnd = 'span ' + span;
     q.style.height = (span * Q_UNIT - 6) + 'px';
     q.dataset.layoutH = span * Q_UNIT - 6; // native resize rewrites style.height — compare against THIS to detect a drag
