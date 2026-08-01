@@ -2022,9 +2022,33 @@ app.delete('/api/events/schedule/:eventId', asyncRoute(async (req, res) => {
   res.json({ ok: true });
 }));
 function locationOnDate(dateStr) {
+  // manual/device-set location wins for TODAY (fresh <48h) — the generic path for
+  // instances without the owner's evidence pipeline (email bars). Then the bars, then home.
+  const man = (loadSettings().manualLocation || {});
+  if (man.name && dateStr === today() && Date.now() - (man.at || 0) < 48 * 3600e3) return man.name;
   const b = loadLocationBars().find(b => b.start <= dateStr && dateStr <= b.end && b.location && b.location !== 'Location?');
-  return b ? b.location : (typeof HOME_LOCATION !== 'undefined' ? HOME_LOCATION : '');
+  return b ? b.location : (typeof HOME_LOCATION !== 'undefined' ? HOME_LOCATION : '') || man.name || '';
 }
+// manual or device location: {name} (typed) or {lat,lon} (browser geolocation → reverse
+// geocoded). Stored in settings so every tier of the instance agrees.
+app.post('/api/location/set', asyncRoute(async (req, res) => {
+  let name = String((req.body || {}).name || '').trim().slice(0, 80);
+  const { lat, lon } = req.body || {};
+  if (!name && typeof lat === 'number' && typeof lon === 'number') {
+    try {
+      const r = await fetch(`https://geocoding-api.open-meteo.com/v1/search?latitude=${lat}&longitude=${lon}&count=1`).then(x => x.json()).catch(() => null);
+      const g = await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lon}&format=json&zoom=10&accept-language=${(CFG.languages || [])[0] || 'en'}`,
+        { headers: { 'User-Agent': 'dashboard-location/1.0' } }).then(x => x.json()).catch(() => null);
+      name = (g && (g.address?.city || g.address?.town || g.address?.village || g.name)) || (r && r.results?.[0]?.name) || '';
+    } catch (e) {}
+    if (!name) return res.status(422).json({ error: 'could not resolve those coordinates to a place' });
+  }
+  if (!name) return res.status(400).json({ error: 'name or lat/lon required' });
+  const next = { ...loadSettings(), manualLocation: { name, at: Date.now() } };
+  await saveSettings(next);
+  res.json({ ok: true, name });
+}));
+app.get('/api/location/current', asyncRoute(async (req, res) => res.json({ location: locationOnDate(today()) })));
 async function barSearchForEvent({ title, date, venue }) {
   const loc = locationOnDate(date) || 'the owner\'s city';
   let text = '', servedBy = 'grok';

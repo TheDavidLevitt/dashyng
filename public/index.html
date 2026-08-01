@@ -850,6 +850,11 @@ function cfgToggle() {
       <button class="cfg-cdel">✕</button></div>`).join('')}</div>
     <div class="cfg-row"><button id="cfg-caladd">＋ calendar</button><span class="tiny muted">empty list = the default calendar</span>
       <a href="${url('/auth/calendar/connect')}" style="margin-left:auto"><button type="button">🔗 Connect Google Calendar</button></a></div>
+    <div class="cfg-head">Current location — drives weather, events and anything location-aware</div>
+    <div class="cfg-row"><input id="cfg-loc" placeholder="city, e.g. Paris" style="flex:1" value="">
+      <button type="button" id="cfg-loc-set">set</button>
+      <button type="button" id="cfg-loc-dev" title="use device location">📍 device</button>
+      <span class="tiny muted" id="cfg-loc-msg"></span></div>
     <div class="cfg-head">Location tracking — evidence sources for the headline &amp; look-ahead bars</div>
     <div class="tiny muted" style="margin-bottom:3px">Calendar (multi-day events) and Locations-of-interest always run. Gmail (flight/train/hotel confirmations) needs a one-time consent:
       ${caps.gmail ? '<b style="color:var(--green)">connected</b> · <a href="/auth/gmail/connect" target="_blank">reconnect</a> · <a href="/auth/gmail/disconnect">disconnect</a>' : '<a href="/auth/gmail/connect" target="_blank"><b>connect Gmail →</b></a>'}
@@ -942,6 +947,16 @@ function cfgToggle() {
   const calendarLookahead = p.querySelector('#cfg-lookahead') ? p.querySelector('#cfg-lookahead').value : (appSettings.calendarLookahead || '');
     const cycDate = ($('cfg-cyc-date') || {}).value || '';
     const cycle = cycDate ? { lastStart: cycDate, length: +($('cfg-cyc-len') || {}).value || 28 } : null;
+  { const btn = p.querySelector('#cfg-loc-set'), dev = p.querySelector('#cfg-loc-dev'), inp = p.querySelector('#cfg-loc'), msg = p.querySelector('#cfg-loc-msg');
+    if (btn) {
+      const done = r => { msg.textContent = r && r.ok ? '✓ ' + r.name : (r && r.error) || 'failed'; };
+      btn.onclick = async () => done(await api('/api/location/set', { method: 'POST', body: JSON.stringify({ name: inp.value.trim() }) }));
+      dev.onclick = () => { msg.textContent = '…';
+        navigator.geolocation.getCurrentPosition(
+          async pos => done(await api('/api/location/set', { method: 'POST', body: JSON.stringify({ lat: pos.coords.latitude, lon: pos.coords.longitude }) })),
+          () => { msg.textContent = 'device location unavailable'; }, { timeout: 10000 }); };
+      api('/api/location/current').then(r => { if (r && r.location) inp.placeholder = r.location; });
+    } }
     api('/api/settings', { method: 'POST', body: JSON.stringify({ settings: { sections, quadrants, calendars, calendarLookahead, fontScale, cycle } }) })
       .then(r => { if (r && r.error) { toast(r.error); return; } location.reload(); })
       .catch(e => toast(e.message));
