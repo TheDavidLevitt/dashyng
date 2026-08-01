@@ -297,6 +297,136 @@ async function gmailConsentReturn(req, res) {
 }
 app.get('/auth/gmail/disconnect', (req, res) => { try { fs.unlinkSync(GMAIL_TOKEN_FILE); } catch (e) {} res.redirect('/'); });
 
+// ---------- dashyng IDs, invites & widget sharing (phases 3+4) ----------
+// Directory: a sheet tab mapping sha256(email) → {dashyngId, instanceUrl, displayName}.
+// Friends find each other by EMAIL (hashed at rest); the instance URL is only revealed to
+// signed-in users of instances sharing this directory. Invites carry a SHARE BLOB —
+// {widgetId, config diff vs repo default, prompt rows} — NEVER code: modified widget code
+// travels through the public repo / GitHub, where the community resolves what works best.
+const DIR_SHEET = () => CFG.directorySheetId || TODO_SHEET_ID;
+const DIR_TAB = 'Directory';
+const DIR_HEADERS = ['EmailHash', 'DashyngId', 'InstanceUrl', 'DisplayName', 'At'];
+const emailHash = e => crypto.createHash('sha256').update(normEmail(e)).digest('hex').slice(0, 32);
+const myOwnerEmail = () => normEmail(CFG.ownerEmail || ALLOWED_EMAILS_N[0] || '');
+app.post('/api/directory/register', asyncRoute(async (req, res) => {
+  const email = myOwnerEmail();
+  if (!email) return res.status(400).json({ error: 'set DASHBOARD_OWNER_EMAIL (or ALLOWED_EMAIL) first' });
+  const dashyngId = String((req.body || {}).dashyngId || '').trim().toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 30);
+  const displayName = String((req.body || {}).displayName || '').trim().slice(0, 40);
+  const instanceUrl = String((req.body || {}).instanceUrl || process.env.OAUTH_REDIRECT_BASE || '').trim().slice(0, 200);
+  if (!dashyngId) return res.status(400).json({ error: 'dashyngId required (letters/digits/dashes)' });
+  const { rows } = await readTab(DIR_SHEET(), DIR_TAB, DIR_HEADERS).catch(async e => { await ensureTab(DIR_TAB, DIR_HEADERS, DIR_SHEET()); return { rows: [] }; });
+  const mine = rows.find(r => r.EmailHash === emailHash(email));
+  const taken = rows.find(r => r.DashyngId === dashyngId && r.EmailHash !== emailHash(email));
+  if (taken) return res.status(409).json({ error: 'that dashyng ID is taken' });
+  if (mine) await store.values.update({ spreadsheetId: DIR_SHEET(), range: `'${DIR_TAB}'!B${mine._row}:E${mine._row}`, valueInputOption: 'RAW',
+    requestBody: { values: [[dashyngId, instanceUrl, displayName, nowIso()]] } });
+  else await appendTabRow(DIR_TAB, DIR_HEADERS, [emailHash(email), dashyngId, instanceUrl, displayName, nowIso()], DIR_SHEET());
+  res.json({ ok: true, dashyngId });
+}));
+app.get('/api/directory/lookup', asyncRoute(async (req, res) => {
+  const email = String(req.query.email || '').trim();
+  if (!email) return res.status(400).json({ error: 'email required' });
+  const { rows } = await readTab(DIR_SHEET(), DIR_TAB, DIR_HEADERS).catch(() => ({ rows: [] }));
+  const hit = rows.find(r => r.EmailHash === emailHash(email));
+  if (!hit) return res.json({ found: false });
+  res.json({ found: true, dashyngId: hit.DashyngId, displayName: hit.DisplayName || '' });
+}));
+// SEND an invite: my widget config (diff vs shipped defaults) to a friend's instance.
+app.post('/api/share/send', asyncRoute(async (req, res) => {
+  const { email, widgetId, note } = req.body || {};
+  if (!email || !widgetId) return res.status(400).json({ error: 'email and widgetId required' });
+  const { rows } = await readTab(DIR_SHEET(), DIR_TAB, DIR_HEADERS).catch(() => ({ rows: [] }));
+  const hit = rows.find(r => r.EmailHash === emailHash(String(email)));
+  if (!hit || !hit.InstanceUrl) return res.status(404).json({ error: 'no dashyng instance found for that email' });
+  const st = loadSettings();
+  const blob = {
+    v: 1, widgetId: String(widgetId).slice(0, 40), note: String(note || '').slice(0, 300),
+    from: { dashyngId: (rows.find(r => r.EmailHash === emailHash(myOwnerEmail())) || {}).DashyngId || '', email: myOwnerEmail() },
+    at: nowIso(),
+    // config diff vs repo default: only the pieces that belong to this widget
+    config: {
+      section: (st.sections || {})[widgetId] || null,
+      ...(widgetId === 'acts' ? { activities: (await loadActivitiesConfig()).slice(0, 12) } : {}),
+      ...(widgetId === 'todo' ? { quadrants: st.quadrants || null } : {}),
+      ...(widgetId === 'surf' ? { surfSpots: CFG.surfSpots || null } : {}),
+    },
+  };
+  const body = JSON.stringify(blob);
+  const sig = crypto.createHmac('sha256', String(st.webhookSecret || 'unsigned')).update(body).digest('hex');
+  const r = await fetch(hit.InstanceUrl.replace(/\/$/, '') + '/api/share/receive', {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-share-sig': sig }, body,
+  }).catch(e => null);
+  if (!r || !r.ok) return res.status(502).json({ error: 'their instance did not accept the invite' + (r ? ` (HTTP ${r.status})` : '') });
+  res.json({ ok: true, to: hit.DashyngId });
+}));
+// RECEIVE: park it for the owner — showing the diff and requiring approval IS the security
+// boundary (the sender is untrusted; nothing applies until the owner accepts).
+app.post('/api/share/receive', asyncRoute(async (req, res) => {
+  const blob = req.body || {};
+  if (!blob.widgetId || !blob.from) return res.status(400).json({ error: 'malformed share' });
+  const st = loadSettings();
+  const inv = { ...blob, receivedAt: nowIso(), id: crypto.randomUUID().slice(0, 8) };
+  await saveSettings({ ...st, invites: [...(st.invites || []), inv].slice(-20) });
+  res.json({ ok: true });
+}));
+app.get('/api/share/inbox', asyncRoute(async (req, res) => res.json({ invites: loadSettings().invites || [] })));
+app.post('/api/share/resolve', asyncRoute(async (req, res) => {
+  const { id, accept } = req.body || {};
+  const st = loadSettings();
+  const inv = (st.invites || []).find(i => i.id === id);
+  if (!inv) return res.status(404).json({ error: 'invite not found' });
+  const next = { ...st, invites: (st.invites || []).filter(i => i.id !== id) };
+  if (accept && inv.config) {
+    if (inv.config.section) next.sections = { ...(next.sections || {}), [inv.widgetId]: { ...inv.config.section, hidden: false } };
+    else next.sections = { ...(next.sections || {}), [inv.widgetId]: { ...(next.sections || {})[inv.widgetId], hidden: false } };
+    if (inv.config.quadrants && inv.widgetId === 'todo') next.quadrants = { ...(next.quadrants || {}), ...inv.config.quadrants };
+    if (inv.config.activities && inv.widgetId === 'acts') {
+      // prompt rows append to the ACTIVITIES pref tab (skip dupes by activity name)
+      const cur = await loadActivitiesConfig();
+      const have = new Set(cur.map(a => a.activity.toLowerCase()));
+      for (const a of inv.config.activities) if (a.activity && !have.has(a.activity.toLowerCase()))
+        await appendTabRow('ACTIVITIES', EDITABLE_TAB_HEADERS.ACTIVITIES, [a.activity, a.instructions || '', String(a.leadDays || 0), a.show || 'all'], PREFS_SHEET_ID).catch(() => {});
+      actCfgMemo = { at: 0, val: null };
+    }
+  }
+  await saveSettings(next);
+  res.json({ ok: true, applied: !!accept });
+}));
+
+// ---------- widget registry (phase 1 of the widget platform) ----------
+// One manifest per section: what it is, what it needs, which settings shape it. This is
+// METADATA — rendering stays where it is. Sharing (share blobs), the add-widget gallery,
+// and the community flow (widgets as plugins via the public repo / GitHub PRs) all key off
+// these ids. Plugins self-register at load with the same shape (plugin:<id>).
+const WIDGETS = {
+  links:   { title: 'Links',            desc: 'Pinned links & bookmarks',                          needs: {} },
+  habits:  { title: 'Habits',           desc: 'Daily habit tracking with streaks',                 needs: { tabs: ['Habits'] } },
+  brief:   { title: 'Agent brief',      desc: 'Agent-written morning brief',                       needs: { llm: true } },
+  acts:    { title: 'Activity Preview', desc: 'Scanned event suggestions — swipe to calendar',     needs: { llm: true, location: true, tabs: ['Activity Events'] }, configKeys: ['ACTIVITIES prefs'] },
+  today:   { title: 'Today',            desc: 'Calendar cards + day look-ahead + travel strip',    needs: { calendar: true }, configKeys: ['calendars', 'calendarLookahead'] },
+  todo:    { title: 'Persistent lists', desc: 'Task lists incl. shared-tab lists & recurrence',    needs: { tabs: ['Todo'] }, configKeys: ['quadrants', 'listShares'] },
+  jlists:  { title: 'Ephemeral notes',  desc: 'Quick notes, photos, and LLM-built checklists',     needs: { tabs: ['Ephemeral Lists', 'Ephemeral Notes'] } },
+  cinote:  { title: 'Note to CI',       desc: 'Talk to the dashboard — requests apply themselves', needs: { llm: true } },
+  jobsboard: { title: 'Job openings',   desc: 'Agent-curated job board',                           needs: { llm: true, tabs: ['Jobs'] } },
+  agents:  { title: 'Agent stable',     desc: 'Model roster, usage, and procurement',              needs: { tabs: ['Usage', 'Decisions'] } },
+  files:   { title: 'File manager',     desc: 'Filesystem overview of configured roots',           needs: {} },
+  completed: { title: 'Completed',      desc: 'Recently completed tasks',                          needs: { tabs: ['Todo'] } },
+  media:   { title: 'Reading queue',    desc: 'Articles, books, podcasts to consume',              needs: { tabs: ['Media (Reading/Listening)'] } },
+  markets: { title: 'Markets',          desc: 'Quotes, futures, portfolio, market plots',          needs: {}, configKeys: ['markets layout'] },
+  signals: { title: 'Market signals',   desc: 'Agent-flagged market signals',                      needs: { tabs: ['Signals'] } },
+  surf:    { title: 'Wind & waves',     desc: 'Surf/kite forecast for configured spots',           needs: { location: true }, configKeys: ['surfSpots'] },
+  news:    { title: 'News',             desc: 'Preference-driven news with swipe feedback',        needs: { llm: true, tabs: ['prefs sheet'] }, configKeys: ['SOURCES/SUBJECTS/PEOPLE/LOCATIONS/TOPOFMIND'] },
+  week:    { title: 'Week ahead',       desc: 'Seven-day agenda list',                             needs: { calendar: true } },
+};
+app.get('/api/widgets', (req, res) => {
+  const sections = loadSettings().sections || {};
+  const reg = Object.entries(WIDGETS).map(([id, w]) => ({ id, ...w, hidden: !!(sections[id] || {}).hidden }));
+  for (const [key, p] of Object.entries(typeof PLUGINS === 'object' && PLUGINS ? PLUGINS : {}))
+    reg.push({ id: 'plugin:' + key, title: p.title || key, desc: p.desc || 'plugin', needs: p.needs || {}, plugin: true, hidden: !!(sections['plugin:' + key] || {}).hidden });
+  res.json({ widgets: reg });
+});
+
 // The ONLY unauthenticated paths: exact-match read-only GETs (no writes, no LLM in any
 // of their request paths). Additions here are a REVIEW event — never widen to a prefix.
 // The Form Guide (/agentstable + /api/public/formguide*) was public 07-12→07-14, then
@@ -326,6 +456,10 @@ app.use((req, res, next) => {
   // doer-complete, comment). The token IS the auth — checked inside the route; unknown
   // tokens 404 without touching anything else behind the gate.
   if (req.path.startsWith('/api/elists/ext/')) return next();
+  // Cross-instance share delivery: another dashboard POSTS an invite here. Nothing is
+  // applied on receipt — invites park in ⚙ until the owner reviews the diff — so an
+  // unauthenticated drop-box is acceptable; the resolve/apply routes stay behind the gate.
+  if (req.method === 'POST' && req.path === '/api/share/receive') return next();
   if (OAUTH_ID && process.env.OAUTH_REDIRECT_BASE) {
     const sess = verifySession(cookieOf(req, 'dash_session'));
     if (sess) {

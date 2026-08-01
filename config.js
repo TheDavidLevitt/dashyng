@@ -99,6 +99,11 @@ module.exports = {
   // proxyAuthKey (inbound): when set, EVERY request must carry X-Proxy-Auth: <key>
   // (identity arrives as X-Proxy-User) — the instance only answers its fronting proxy.
   proxyAuthKey: pick('proxyAuthKey', 'DASHBOARD_PROXY_AUTH_KEY', ''),
+  // Widget-platform directory: the spreadsheet holding the dashyngId ↔ emailHash registry
+  // ('' → the instance's own todo sheet gets a Directory tab). Owner email identifies this
+  // instance's operator in the directory (falls back to the first allowed email).
+  directorySheetId: pick('directorySheetId', 'DASHBOARD_DIRECTORY_SHEET_ID', ''),
+  ownerEmail: pick('ownerEmail', 'DASHBOARD_OWNER_EMAIL', ''),
   // Display languages in priority order (e.g. ['en','fr']). Incoming text in a language
   // NOT on the list is translated to the FIRST entry; on-list languages are never
   // translated between each other. '' = no translation anywhere.
