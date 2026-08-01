@@ -5212,8 +5212,11 @@ async function elistsEnsureTab() {
 const elistDDMMYY = () => { const d = new Date(); const p = n => String(n).padStart(2, '0'); return `${p(d.getDate())}-${p(d.getMonth() + 1)}-${String(d.getFullYear()).slice(2)}`; };
 async function elistsRead() { // → { grid, lists:[{slug,heading,col,persistent,completedAt,items:[{row,text,mark}]}] }
   await elistsEnsureTab();
-  const r = await store.values.get({ spreadsheetId: TODO_SHEET_ID, range: `'${ELISTS_TAB}'!A1:ZZ300` }).catch(() => null);
-  const grid = (r && r.data.values) || [];
+  // A failed read must THROW, never masquerade as an empty tab: a swallowed quota error
+  // here once made the intake scanner believe every list was missing and re-create the
+  // whole tab — four times over (2026-08-01). Callers skip a cycle on error; that's fine.
+  const r = await store.values.get({ spreadsheetId: TODO_SHEET_ID, range: `'${ELISTS_TAB}'!A1:ZZ300` });
+  const grid = r.data.values || [];
   const head = grid[0] || [];
   const lists = [];
   for (let c = 0; c < head.length; c += 2) {
@@ -5229,7 +5232,23 @@ async function elistsRead() { // → { grid, lists:[{slug,heading,col,persistent
     }
     lists.push({ slug: jlSlug(heading), heading, col: c, persistent: /persistent/i.test(h2), completedAt: cm ? cm[1] : null, items });
   }
-  return { grid, lists };
+  // Belt-and-braces: if past duplication left several column-pairs with one slug, expose a
+  // single merged list (earliest column wins; item marks merge, Y > D > ''). Write paths
+  // then act on one column and the UI never shows phantom copies.
+  const bySlug = new Map();
+  for (const l of lists) {
+    const prev = bySlug.get(l.slug);
+    if (!prev) { bySlug.set(l.slug, l); continue; }
+    const strength = m => m === 'Y' ? 2 : m === 'D' ? 1 : 0;
+    for (const it of l.items) {
+      const mine = prev.items.find(x => x.text === it.text);
+      if (!mine) prev.items.push({ ...it, row: 0, foreignCol: l.col });
+      else if (strength(it.mark) > strength(mine.mark)) mine.mark = it.mark;
+    }
+    if (!l.completedAt) prev.completedAt = null; // any active copy keeps the list active
+    prev.dupCols = [...(prev.dupCols || []), l.col];
+  }
+  return { grid, lists: [...bySlug.values()] };
 }
 async function elistsCreate(heading, texts, doneTexts = new Set(), { persistent = false } = {}) {
   const { grid, lists } = await elistsRead();
