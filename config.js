@@ -99,6 +99,10 @@ module.exports = {
   // proxyAuthKey (inbound): when set, EVERY request must carry X-Proxy-Auth: <key>
   // (identity arrives as X-Proxy-User) — the instance only answers its fronting proxy.
   proxyAuthKey: pick('proxyAuthKey', 'DASHBOARD_PROXY_AUTH_KEY', ''),
+  // LLM relay: a tier without the claude CLI forwards its LLM calls to a tier that has it
+  // (POST {prompt} + X-Relay-Key), keeping everything on the owner's subscription.
+  llmRelayUrl: pick('llmRelayUrl', 'DASHBOARD_LLM_RELAY_URL', ''),
+  llmRelayKey: pick('llmRelayKey', 'DASHBOARD_LLM_RELAY_KEY', ''),
   // Guest-CI auto-apply: '1' = a note in the CI box modifies THIS instance's settings
   // immediately (whitelisted layout ops only), logged as an idea; capped per day.
   ciAutoApply: pick('ciAutoApply', 'DASHBOARD_CI_AUTO_APPLY', ''),

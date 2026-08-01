@@ -3178,9 +3178,9 @@ Current lists config: ${JSON.stringify(s.quadrants || {}).slice(0, 1500)}
 If the request is not about layout/visibility/naming of sections or lists, output exactly {}.
 Request (may be in French): ${JSON.stringify(String(suggestion).slice(0, 400))}`;
   let raw = '';
-  // gemini free tier first (this is a layout request, nothing personal), then the chain
-  const pref = CFG.geminiFreeKey ? 'gemini-free' : (process.env.OPENAI_API_KEY ? 'openai' : undefined);
-  try { raw = (await require('./providers').generateText(prompt, pref)).text; } catch (e) { return { applied: false, reason: 'no LLM: ' + e.message.slice(0, 120) }; }
+  // runClaude = the owner's subscription everywhere: the CLI where it exists, the relay
+  // on tiers that lack it; API keys only as the stub's last resort.
+  try { raw = await runClaude(prompt, { module: 'ci-apply', timeoutMs: 45000 }); } catch (e) { return { applied: false, reason: 'no LLM: ' + String(e.message).slice(0, 120) }; }
   const m = String(raw || '').match(/\{[\s\S]*\}/);
   const patch = m && ciSanitizePatch(m[0]);
   if (!patch) return { applied: false, reason: 'not a layout change' };
@@ -5005,6 +5005,21 @@ async function runClaude(prompt, { tools, timeoutMs, module, model, served } = {
   }
   if (!HAS_CLAUDE) {
     if (tools) throw new Error('agent tools (web fetch/search) require the claude CLI');
+    // subscription first: a configured relay forwards to a tier that HAS the claude CLI,
+    // so cloud instances never touch metered API keys for routine LLM work
+    if (CFG.llmRelayUrl && CFG.llmRelayKey) {
+      const r = await fetch(CFG.llmRelayUrl.replace(/\/$/, ''), {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-relay-key': CFG.llmRelayKey },
+        body: JSON.stringify({ prompt, timeoutMs }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (r.ok && j.text !== undefined) {
+        mark('claude (relay)');
+        logUsage({ module: module || 'claude', model: 'claude-relay', input: 0, output: 0, costUsd: j.costUsd ?? '', note: 'via llm-relay' }).catch(() => {});
+        return String(j.text).trim();
+      }
+      throw new Error('llm-relay failed: ' + String(j.error || r.status).slice(0, 200));
+    }
     mark(model || 'anthropic-api');
     return await require('./providers').anthropicText(prompt, model, module); // API-key path (stub default)
   }
