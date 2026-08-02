@@ -373,9 +373,15 @@ app.post('/api/share/send', asyncRoute(async (req, res) => {
     v: 1, widgetId: String(widgetId).slice(0, 40), note: String(note || '').slice(0, 300),
     from: { dashyngId: (rows.find(r => r.EmailHash === emailHash(myOwnerEmail())) || {}).DashyngId || '', email: myOwnerEmail() },
     at: nowIso(),
-    // config diff vs repo default: only the pieces that belong to this widget
+    // config diff vs repo default: only the pieces that belong to this widget.
+    // A plugin can define share(ctx) → arbitrary blob (e.g. a joint-state sheet pointer)
+    // and acceptShare(ctx, blob) on the receiving side — sharing is any-widget, not lists.
     config: {
       section: (st.sections || {})[widgetId] || null,
+      ...(await (async () => { const pk = String(widgetId).replace(/^plugin:/, '');
+        const p = (typeof PLUGINS === 'object' && PLUGINS[pk]) || null;
+        if (p && typeof p.share === 'function') { try { return { plugin: await p.share(pluginCtx()) }; } catch (e) {} }
+        return {}; })()),
       ...(widgetId === 'acts' ? { activities: (await loadActivitiesConfig()).slice(0, 12) } : {}),
       ...(widgetId === 'todo' ? { quadrants: st.quadrants || null } : {}),
       ...(widgetId === 'surf' ? { surfSpots: CFG.surfSpots || null } : {}),
@@ -406,6 +412,11 @@ app.post('/api/share/resolve', asyncRoute(async (req, res) => {
   const inv = (st.invites || []).find(i => i.id === id);
   if (!inv) return res.status(404).json({ error: 'invite not found' });
   const next = { ...st, invites: (st.invites || []).filter(i => i.id !== id) };
+  if (accept && inv.config && inv.config.plugin) {
+    const pk = String(inv.widgetId).replace(/^plugin:/, '');
+    const p = (typeof PLUGINS === 'object' && PLUGINS[pk]) || null;
+    if (p && typeof p.acceptShare === 'function') await p.acceptShare(pluginCtx(), inv.config.plugin).catch(() => {});
+  }
   if (accept && inv.config) {
     if (inv.config.section) next.sections = { ...(next.sections || {}), [inv.widgetId]: { ...inv.config.section, hidden: false } };
     else next.sections = { ...(next.sections || {}), [inv.widgetId]: { ...(next.sections || {})[inv.widgetId], hidden: false } };
