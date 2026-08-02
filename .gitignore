@@ -48,3 +48,4 @@ data/cycle.json
 data/urgent-state.json
 data/ephemeral-notes.json
 data/enotes/
+plugins/data/

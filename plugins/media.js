@@ -56,7 +56,7 @@ module.exports = {
     // feeds resolve via the iTunes Search API and the mapping persists in
     // data/feeds.json (edit that file to correct a wrong resolution).
     
-    const FEEDS_FILE = path.join(__dirname, 'data', 'feeds.json');
+    const FEEDS_FILE = path.join(__dirname, '..', 'data', 'feeds.json');
     
     async function resolveFeed(name) {
       let feeds = {};
