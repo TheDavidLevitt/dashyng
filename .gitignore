@@ -25,6 +25,8 @@ plugins/*.js
 !plugins/surf.js
 !plugins/jobs.js
 !plugins/media.js
+!plugins/markets.js
+!plugins/markets.client.js
 data/webhook-retry.json
 data/config-local.json
 data/location-bars-local.json
