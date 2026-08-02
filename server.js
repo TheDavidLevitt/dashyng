@@ -437,7 +437,6 @@ const WIDGETS = {
   todo:    { title: 'Persistent lists', desc: 'Task lists incl. shared-tab lists & recurrence',    needs: { tabs: ['Todo'] }, configKeys: ['quadrants', 'listShares'] },
   jlists:  { title: 'Ephemeral notes',  desc: 'Quick notes, photos, and LLM-built checklists',     needs: { tabs: ['Ephemeral Lists', 'Ephemeral Notes'] } },
   cinote:  { title: 'Note to CI',       desc: 'Talk to the dashboard — requests apply themselves', needs: { llm: true } },
-  jobsboard: { title: 'Job openings',   desc: 'Agent-curated job board',                           needs: { llm: true, tabs: ['Jobs'] } },
   agents:  { title: 'Agent stable',     desc: 'Model roster, usage, and procurement',              needs: { tabs: ['Usage', 'Decisions'] } },
   files:   { title: 'File manager',     desc: 'Filesystem overview of configured roots',           needs: {} },
   completed: { title: 'Completed',      desc: 'Recently completed tasks',                          needs: { tabs: ['Todo'] } },
@@ -1934,7 +1933,51 @@ const PLUGIN_NEWS_SOURCES = [];
 const PLUGIN_HEALTH = [];
 const PLUGIN_LLM = []; // llm({prompt, module, model, tools}, ctx) → string (answered) | null (pass)
 const PLUGIN_BRIEF = []; // briefItems() → [{kind, text}] salient non-news items the Agent Brief may elevate
-const pluginCtx = () => ({ store, config: CFG, runLLM: (prompt, opts) => runClaude(prompt, opts) });
+// Feedback log — append-only JSONL the CI agent reads to hypothesize misses
+// (subject too broad? source low-signal? same-name collision?) and re-weight.
+const FEEDBACK_FILE = CFG.feedbackFile || path.join(__dirname, 'data', 'feedback.jsonl');
+// signal: numeric weight for the CI learner. left/discard = -1 (downweight),
+// right/agent-read = +1 (upweight), pin/read-myself = +2 (strong upweight),
+// stash = +2. subjects/why = the matched features so CI can credit-assign per
+// subject/source/person rather than just per-story.
+const SIGNAL_BY_KIND = {
+  not_interested: -1, summary_discarded: -1, brief_down: -1,
+  agent_read: 1, brief_up: 1,
+  pinned: 2, summary_stashed: 2,
+  clicked: 3, // actually opened the article to read it
+  followup_asked: 3, // asked the agent for more detail — strong engagement + reveals which detail he wanted
+  summary_to_reading: 4, // explicitly curated an AI summary into the reading list — strongest interest signal
+  event_up: 2, event_down: -1, // Today-card thumbs
+  event_scheduled: 4, // swiped an event onto the ACTUAL calendar — strongest event signal
+  event_skipped: -0.5, // swipe left = "just not scheduled" — barely negative by design
+  comment: 0, // freeform note the owner types for the CI to read — context, not a vote
+  // Jobs board (/jobs) — the same Tinder-style label stream, applied to job openings.
+  // subjects[] carries the job's Category so CI/searcher credit-assign per category.
+  job_not_interested: -1, // swipe left / ✕ — wrong kind of role, don't refill with similar
+  job_ranked_up: 1, // dragged higher in the list — mild "more like this"
+  job_more_like_this: 2, // explicit 👍 — strong "more like this"
+  job_applied: 3, // actually applied — the strongest job signal there is
+  job_comment: 0, // freeform note typed on the /jobs board — add-job requests, new categories,
+  // search steering; consumed by the daily search agent and the nightly CI, not a vote
+  job_maybe: 0.5, // parked in the Maybe section — deferred interest, mildly positive
+};
+// Shared writer: Mac appends to the CI's JSONL directly; stateless tiers queue on the
+// Feedback Queue tab for the heartbeat to drain (identical semantics to /api/feedback).
+async function writeFeedbackEntry(entry) {
+  const line = JSON.stringify(entry);
+  if (HAS_JOURNAL) fs.appendFileSync(FEEDBACK_FILE, line + '\n');
+  else await appendTabRow(FB_TAB, FB_HEADERS, [line, nowIso(), '']);
+}
+
+// The widget API: everything an extracted section legitimately needs. Grown deliberately —
+// each name here is a commitment to plugin authors (community widgets included).
+const pluginCtx = () => ({
+  store, config: CFG, sheetId: TODO_SHEET_ID,
+  runLLM: (prompt, opts) => runClaude(prompt, opts),
+  readTab, readTabCached, appendTabRow, ensureTab, colLetter,
+  writeFeedbackEntry, SIGNAL_BY_KIND, asyncRoute, track, nowIso, today,
+  loadSettings, saveSettings,
+});
 try {
   for (const f of fs.readdirSync(path.join(__dirname, 'plugins')).filter(f => f.endsWith('.js'))) {
     try {
@@ -3319,41 +3362,6 @@ app.post('/api/media/add', asyncRoute(async (req, res) => {
   res.json({ queued: true, id });
 }));
 
-// Feedback log — append-only JSONL the CI agent reads to hypothesize misses
-// (subject too broad? source low-signal? same-name collision?) and re-weight.
-const FEEDBACK_FILE = CFG.feedbackFile || path.join(__dirname, 'data', 'feedback.jsonl');
-// signal: numeric weight for the CI learner. left/discard = -1 (downweight),
-// right/agent-read = +1 (upweight), pin/read-myself = +2 (strong upweight),
-// stash = +2. subjects/why = the matched features so CI can credit-assign per
-// subject/source/person rather than just per-story.
-const SIGNAL_BY_KIND = {
-  not_interested: -1, summary_discarded: -1, brief_down: -1,
-  agent_read: 1, brief_up: 1,
-  pinned: 2, summary_stashed: 2,
-  clicked: 3, // actually opened the article to read it
-  followup_asked: 3, // asked the agent for more detail — strong engagement + reveals which detail he wanted
-  summary_to_reading: 4, // explicitly curated an AI summary into the reading list — strongest interest signal
-  event_up: 2, event_down: -1, // Today-card thumbs
-  event_scheduled: 4, // swiped an event onto the ACTUAL calendar — strongest event signal
-  event_skipped: -0.5, // swipe left = "just not scheduled" — barely negative by design
-  comment: 0, // freeform note the owner types for the CI to read — context, not a vote
-  // Jobs board (/jobs) — the same Tinder-style label stream, applied to job openings.
-  // subjects[] carries the job's Category so CI/searcher credit-assign per category.
-  job_not_interested: -1, // swipe left / ✕ — wrong kind of role, don't refill with similar
-  job_ranked_up: 1, // dragged higher in the list — mild "more like this"
-  job_more_like_this: 2, // explicit 👍 — strong "more like this"
-  job_applied: 3, // actually applied — the strongest job signal there is
-  job_comment: 0, // freeform note typed on the /jobs board — add-job requests, new categories,
-  // search steering; consumed by the daily search agent and the nightly CI, not a vote
-  job_maybe: 0.5, // parked in the Maybe section — deferred interest, mildly positive
-};
-// Shared writer: Mac appends to the CI's JSONL directly; stateless tiers queue on the
-// Feedback Queue tab for the heartbeat to drain (identical semantics to /api/feedback).
-async function writeFeedbackEntry(entry) {
-  const line = JSON.stringify(entry);
-  if (HAS_JOURNAL) fs.appendFileSync(FEEDBACK_FILE, line + '\n');
-  else await appendTabRow(FB_TAB, FB_HEADERS, [line, nowIso(), '']);
-}
 // ---- guest CI: "How would you like to change this dashboard?" ----
 // On an instance with CFG.ciAutoApply, a freeform suggestion is applied IMMEDIATELY as a
 // settings patch (sections shown/hidden/renamed/reordered, list labels/layout) — nothing
@@ -3465,180 +3473,6 @@ app.post('/api/feedback', asyncRoute(async (req, res) => {
     dismissedCache.at = 0;
   }
   res.json({ ok: true });
-}));
-
-// ---------- Jobs board (/jobs) ----------
-// Job openings tracked on their own Sheet tab (durable, cross-instance). A daily headless
-// agent (bin/jobsearch.sh, Sonnet-tier with web search) appends new openings via POST
-// /api/jobs; the owner curates on the /jobs page — drag to re-rank, swipe left to remove,
-// 👍 = more like this, checkbox = application done. Every curation action emits a CI
-// feedback signal (job_* kinds above) so the searcher's taste improves.
-// Est = comma-list of LLM-ESTIMATED field names (remote,salary,deadline,posted) — the UI
-// renders those values in purple to keep estimates visually distinct from stated facts.
-const JOBS_TAB = 'Jobs';
-const JOBS_HEADERS = ['Title', 'URL', 'Company', 'CompanyURL', 'Category', 'Location', 'Remote', 'Salary', 'Deadline', 'Posted', 'Est', 'Status', 'Rank', 'Notes', 'Source', 'Created', 'Updated', 'ID', 'Flags'];
-// hint a stable subset so optional new columns (Flags) never break reads of an older tab
-const JOBS_HINT = ['Title', 'Company', 'Status', 'ID'];
-const readJobsTab = () => readTab(TODO_SHEET_ID, JOBS_TAB, JOBS_HINT);
-const jobOut = r => ({
-  id: r.ID, title: r.Title, url: r.URL, company: r.Company, companyUrl: r.CompanyURL,
-  category: r.Category || 'Uncategorized', location: r.Location, remote: r.Remote,
-  salary: r.Salary, deadline: r.Deadline, posted: r.Posted,
-  est: String(r.Est || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean),
-  status: r.Status || 'open', rank: parseFloat(r.Rank) || 0,
-  notes: r.Notes, source: r.Source, created: r.Created, updated: r.Updated,
-  // flags: csv of UI markers; 'hot' = energy-team role AT an AI/compute company (labs,
-  // hyperscalers, GPU clouds, DC operators) — rendered prominently on the board
-  flags: String(r.Flags || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean),
-  // ★ tier from the fav token: 0 none / 1 ★ / 2 ★★, plus first-starred epoch for ordering
-  fav: (t => t ? (t.startsWith('fav2') ? 2 : 1) : 0)(String(r.Flags || '').toLowerCase().split(',').map(s => s.trim()).find(t => t.startsWith('fav'))),
-  favAt: (t => t && t.includes(':') ? Number(t.split(':')[1]) : 0)(String(r.Flags || '').toLowerCase().split(',').map(s => s.trim()).find(t => t.startsWith('fav'))),
-});
-const jobFeedback = (kind, r, context) => writeFeedbackEntry({
-  at: nowIso(), kind, signal: SIGNAL_BY_KIND[kind] ?? 0,
-  title: `${r.Title || ''} @ ${r.Company || ''}`, url: r.URL || '', source: 'jobs',
-  subjects: [r.Category || ''].filter(Boolean), context: context || '',
-}).catch(e => console.error('job feedback:', e.message));
-
-app.get('/api/jobs', asyncRoute(async (req, res) => {
-  let rows = [];
-  try { rows = (await readJobsTab()).rows; }
-  catch (e) { if (!/Header row not found|Unable to parse range/i.test(e.message)) throw e; } // tab not created yet = empty board
-  const all = String(req.query.all || '') === '1'; // agent dedup wants removed rows too
-  const jobs = rows.map(jobOut).filter(j => all || j.status !== 'removed')
-    .sort((a, b) => (a.rank || 1e9) - (b.rank || 1e9));
-  res.json({ jobs });
-}));
-
-// Add one opening (daily agent, or a manual paste from the page). Dedup: URL match, or
-// same Title+Company, against ALL rows including removed — a swiped-away job must never
-// be re-added by the next day's search.
-app.post('/api/jobs', asyncRoute(async (req, res) => {
-  const b = req.body || {};
-  if (!b.title || !b.company) return res.status(400).json({ error: 'title and company required' });
-  let existing = [];
-  try { existing = (await readJobsTab()).rows; } catch (e) {}
-  const norm = s => String(s || '').trim().toLowerCase().replace(/\/+$/, '');
-  const dup = existing.find(r => (b.url && norm(r.URL) === norm(b.url))
-    || (norm(r.Title) === norm(b.title) && norm(r.Company) === norm(b.company)));
-  if (dup) return res.json({ ok: true, deduped: true, id: dup.ID });
-  const id = crypto.randomUUID();
-  const est = Array.isArray(b.est) ? b.est.join(',') : String(b.est || '');
-  const flags = Array.isArray(b.flags) ? b.flags.join(',') : String(b.flags || '');
-  // default rank: after the current bottom of the job's category
-  const catRanks = existing.filter(r => (r.Category || '') === (b.category || '') && r.Status !== 'removed')
-    .map(r => parseFloat(r.Rank) || 0);
-  const rank = b.rank !== undefined ? Number(b.rank) : (catRanks.length ? Math.max(...catRanks) + 1 : 1);
-  await appendTabRow(JOBS_TAB, JOBS_HEADERS, [
-    b.title, b.url || '', b.company, b.companyUrl || '', b.category || '', b.location || '',
-    b.remote || '', b.salary || '', b.deadline || '', b.posted || '', est,
-    'open', String(rank), b.notes || '', b.source || WRITE_SOURCE, nowIso(), nowIso(), id, flags,
-  ]);
-  res.json({ ok: true, id });
-}));
-
-// Update named columns of one job row, located fresh by ID (same pattern as tasks).
-async function updateJobById(id, changes) {
-  const { headers, rows } = await readJobsTab();
-  const row = rows.find(r => r.ID === id);
-  if (!row) return null;
-  changes.Updated = nowIso();
-  const data = Object.entries(changes)
-    .filter(([f]) => headers.indexOf(f) !== -1)
-    .map(([f, v]) => ({ range: `'${JOBS_TAB}'!${colLetter(headers.indexOf(f))}${row._row}`, values: [[v]] }));
-  if (data.length) await store.values.batchUpdate({ spreadsheetId: TODO_SHEET_ID, requestBody: { valueInputOption: 'RAW', data } });
-  return { ...row, ...changes };
-}
-
-app.patch('/api/jobs/:id', asyncRoute(async (req, res) => {
-  const allowed = ['Title', 'URL', 'Company', 'CompanyURL', 'Category', 'Location', 'Remote', 'Salary', 'Deadline', 'Posted', 'Est', 'Status', 'Rank', 'Notes', 'Flags'];
-  const changes = {};
-  for (const [k, v] of Object.entries(req.body || {})) {
-    const f = allowed.find(a => a.toLowerCase() === k.toLowerCase());
-    if (f) changes[f] = String(v);
-  }
-  if (!Object.keys(changes).length) return res.status(400).json({ error: 'no updatable fields' });
-  const updated = await updateJobById(req.params.id, changes);
-  if (!updated) return res.status(404).json({ error: 'job not found: ' + req.params.id });
-  res.json({ ok: true, job: jobOut(updated) });
-}));
-
-// swipe left / ✕ — hide forever + negative CI signal
-app.post('/api/jobs/:id/remove', asyncRoute(async (req, res) => {
-  const updated = await updateJobById(req.params.id, { Status: 'removed' });
-  if (!updated) return res.status(404).json({ error: 'job not found' });
-  await jobFeedback('job_not_interested', updated, req.body?.context || '');
-  res.json({ ok: true });
-}));
-
-// checkbox — application completed (toggle; un-checking restores 'open', no signal)
-app.post('/api/jobs/:id/applied', asyncRoute(async (req, res) => {
-  const applied = req.body?.applied !== false;
-  const updated = await updateJobById(req.params.id, { Status: applied ? 'applied' : 'open' });
-  if (!updated) return res.status(404).json({ error: 'job not found' });
-  if (applied) await jobFeedback('job_applied', updated);
-  res.json({ ok: true });
-}));
-
-// 👍 — strong "more like this" (legacy button; the board now uses /star below)
-app.post('/api/jobs/:id/up', asyncRoute(async (req, res) => {
-  const { rows } = await readJobsTab();
-  const row = rows.find(r => r.ID === req.params.id);
-  if (!row) return res.status(404).json({ error: 'job not found' });
-  await jobFeedback('job_more_like_this', row);
-  res.json({ ok: true });
-}));
-
-// ★ tri-state — level 0 (none) / 1 (★ favorite) / 2 (★★ favorite-favorite). The flag
-// token carries the FIRST-starred epoch (fav:<ts> / fav2:<ts>) so the Favorites section
-// can keep click-chronological order across devices; upgrades preserve the timestamp.
-// Owner-set; the search agent never touches fav tokens. Any upward transition fires the
-// strong "more like this" signal; downgrades/unstars are silent (a de-pin, not a downvote).
-app.post('/api/jobs/:id/star', asyncRoute(async (req, res) => {
-  const { rows } = await readJobsTab();
-  const row = rows.find(r => r.ID === req.params.id);
-  if (!row) return res.status(404).json({ error: 'job not found' });
-  const level = Math.max(0, Math.min(2, Number(req.body?.level ?? (req.body?.starred === false ? 0 : 1))));
-  const tokens = String(row.Flags || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
-  const old = tokens.find(t => t === 'fav' || t.startsWith('fav:') || t === 'fav2' || t.startsWith('fav2:'));
-  const oldLevel = old ? (old.startsWith('fav2') ? 2 : 1) : 0;
-  const ts = old && old.includes(':') ? old.split(':')[1] : String(Date.now());
-  const rest = tokens.filter(t => t !== old);
-  if (level) rest.push(`${level === 2 ? 'fav2' : 'fav'}:${ts}`);
-  await updateJobById(req.params.id, { Flags: rest.join(',') });
-  if (level > oldLevel) await jobFeedback('job_more_like_this', row, level === 2 ? 'double-star' : 'star');
-  res.json({ ok: true, flags: rest });
-}));
-
-// 🤔 maybe — park the role in the board's collapsed Maybe section (deferred, mildly
-// positive signal when parking; un-parking is silent)
-app.post('/api/jobs/:id/maybe', asyncRoute(async (req, res) => {
-  const maybe = req.body?.maybe !== false;
-  const updated = await updateJobById(req.params.id, { Status: maybe ? 'maybe' : 'open' });
-  if (!updated) return res.status(404).json({ error: 'job not found' });
-  if (maybe) await jobFeedback('job_maybe', updated);
-  res.json({ ok: true });
-}));
-
-// Drag re-rank: updates[]={id,rank}; movedUp names the dragged job when it moved HIGHER,
-// which doubles as a mild "more like this" signal (owner rule: drag-higher ≈ thumbs up).
-app.post('/api/jobs/reorder', asyncRoute(async (req, res) => {
-  const updates = req.body?.updates;
-  if (!Array.isArray(updates) || !updates.length) return res.status(400).json({ error: 'updates[] required' });
-  const { headers, rows } = await readJobsTab();
-  const byId = new Map(rows.map(r => [r.ID, r]));
-  const ts = nowIso(); const data = []; const missing = [];
-  const rankCol = headers.indexOf('Rank'), updCol = headers.indexOf('Updated');
-  for (const u of updates) {
-    const row = u.id && byId.get(u.id);
-    if (!row) { missing.push(u.id || '(blank)'); continue; }
-    data.push({ range: `'${JOBS_TAB}'!${colLetter(rankCol)}${row._row}`, values: [[String(u.rank)]] });
-    if (updCol !== -1) data.push({ range: `'${JOBS_TAB}'!${colLetter(updCol)}${row._row}`, values: [[ts]] });
-  }
-  if (data.length) await store.values.batchUpdate({ spreadsheetId: TODO_SHEET_ID, requestBody: { valueInputOption: 'RAW', data } });
-  const moved = req.body?.movedUp && byId.get(req.body.movedUp);
-  if (moved) await jobFeedback('job_ranked_up', moved);
-  res.json({ ok: true, applied: updates.length - missing.length, missing });
 }));
 
 // ---------- habits / reminders ----------
@@ -4759,6 +4593,9 @@ async function scanActivities() {
         const raw = await runClaude(
           `Today is ${today()} (${new Date().toLocaleDateString('en-US', { weekday: 'long' })}); assume the user's local timezone for event times.\n` +
           (projLoc ? `The owner's PROJECTED LOCATION over the coming weeks: ${projLoc}. If the activity's instructions imply a specific city (e.g. "this weekend in town", a home city) but the owner will be somewhere ELSE on the target date per this projection, search for that date's ACTUAL location instead — the instructions describe the KIND of thing to look for, not necessarily a fixed city.\n` : '') +
+          (() => { const ep = loadSettings().eventPrefs || {};
+            return (ep.prefer || []).length || (ep.avoid || []).length
+              ? `LEARNED TASTE (from the owner's swipes — bias, don't hard-filter): prefer ${JSON.stringify(ep.prefer || [])}; avoid ${JSON.stringify(ep.avoid || [])}.\n` : ''; })() +
           `You scan the web for events matching a personal interest.\nINTEREST: "${a.activity}"\nINSTRUCTIONS: ${a.instructions
             .replace(/\[currentlocation\]/gi, locationOnDate(today()) || 'the user\'s current city')
             .replace(/\[projectedlocation\]/gi, projLoc || locationOnDate(today()) || 'the user\'s current city')}\n` +
@@ -4791,6 +4628,62 @@ if (HAS_CLAUDE || (CFG.llmRelayUrl && CFG.llmRelayKey)) {
   setTimeout(() => scanActivities().catch(() => {}), 90e3); // first pass shortly after boot
   setInterval(() => scanActivities().catch(() => {}), 4 * 3600e3);
 }
+// ---- CI event loop: swipes teach the scanner ----
+// Nightly (and on demand) the event verdicts (up/down/skip/scheduled) are distilled by an
+// LLM into settings.eventPrefs {prefer:[…], avoid:[…], note} — a LEARNED overlay that (a)
+// rides the scan prompt so future proposals shift, and (b) ranks what is already proposed.
+// The owner's ACTIVITIES spec is never rewritten: their words stay theirs.
+function collectEventFeedback(maxLines = 4000) {
+  const out = [];
+  try {
+    const lines = fs.readFileSync(FEEDBACK_FILE, 'utf8').trim().split('\n').slice(-maxLines);
+    for (const l of lines) { try { const j = JSON.parse(l); if (String(j.kind || '').startsWith('event_')) out.push(j); } catch (e) {} }
+  } catch (e) {}
+  return out;
+}
+function eventPrefScore(prefs, title) {
+  const T = String(title).toLowerCase();
+  let sc = 0;
+  for (const p of (prefs.prefer || [])) if (T.includes(String(p).toLowerCase())) sc += 1;
+  for (const a of (prefs.avoid || [])) if (T.includes(String(a).toLowerCase())) sc -= 1;
+  return sc;
+}
+async function tuneEventPrefs() {
+  const fb = collectEventFeedback();
+  if (fb.length < 3) return { skipped: 'not enough event feedback yet' };
+  const lines = fb.slice(-120).map(f => `${f.kind.replace('event_', '')}: [${f.source || ''}] ${f.title}`).join('\n');
+  const cur = loadSettings().eventPrefs || {};
+  const raw = await runClaude(
+    `You tune an event scanner from the owner's verdicts (scheduled=went on the calendar — strongest like; up=thumbs up; down=less like this; skipped=mildly negative).\n` +
+    `Current learned preferences: ${JSON.stringify({ prefer: cur.prefer || [], avoid: cur.avoid || [] })}\n` +
+    `Verdicts (newest last):\n${lines}\n` +
+    `Return ONLY JSON {"prefer":[…],"avoid":[…],"note":"one sentence for the owner"} — each list ≤8 SHORT lowercase keyword phrases (substring-matched against titles), evolving the current lists rather than restarting. Never put a specific one-off event title in either list; capture the KIND of thing.`,
+    { module: 'event-prefs-tune', timeoutMs: 45000 });
+  let j = null; try { j = JSON.parse((raw.match(/\{[\s\S]*\}/) || [''])[0]); } catch (e) {}
+  if (!j || !Array.isArray(j.prefer) || !Array.isArray(j.avoid)) return { error: 'tune parse failed' };
+  const prefs = { prefer: j.prefer.map(x => String(x).slice(0, 40)).slice(0, 8),
+    avoid: j.avoid.map(x => String(x).slice(0, 40)).slice(0, 8),
+    note: String(j.note || '').slice(0, 200), at: nowIso() };
+  await saveSettings({ ...loadSettings(), eventPrefs: prefs });
+  return { ok: true, prefs };
+}
+app.post('/api/events/tune', asyncRoute(async (req, res) => res.json(await tuneEventPrefs())));
+if (!process.env.DASHBOARD_NO_JOBS || process.env.DASHBOARD_SCAN_EVENTS) {
+  setTimeout(() => tuneEventPrefs().catch(() => {}), 5 * 60000);           // shortly after boot
+  setInterval(() => tuneEventPrefs().catch(() => {}), 24 * 3600e3);        // then daily
+}
+// batch dismissal for the Clear-all button: one call, N durable dismissal rows
+app.post('/api/events/clear-all', asyncRoute(async (req, res) => {
+  const items = (Array.isArray((req.body || {}).items) ? req.body.items : []).slice(0, 40);
+  for (const it of items) {
+    if (!it || !it.title) continue;
+    await appendTabRow(DISMISS_TAB, DISMISS_HEADERS, ['evt:' + normTitle(it.title) + '|' + (it.activity || ''), String(it.title).slice(0, 120), nowIso()]).catch(() => {});
+    await writeFeedbackEntry({ at: nowIso(), kind: 'event_skipped', signal: SIGNAL_BY_KIND.event_skipped,
+      title: String(it.title).slice(0, 120), source: String(it.activity || ''), url: '', subjects: [], person: '', author: '', context: 'clear-all' }).catch(() => {});
+  }
+  dismissedCache.at = 0;
+  res.json({ ok: true, cleared: items.length });
+}));
 app.get('/api/activities', asyncRoute(async (req, res) => {
   const acts = await loadActivitiesConfig();
   const leadOf = Object.fromEntries(acts.map(a => [a.activity, a.leadDays]));
@@ -4836,7 +4729,8 @@ app.get('/api/activities', asyncRoute(async (req, res) => {
     })
     .filter(r => !dismissedEvt.has('evt:' + normTitle(r.Title) + '|' + r.Activity)) // swiped away = gone, every tier
     .filter(r => !evtNearDismissed(dismissedToks, r.Activity, r.Title)) // …including the rescan's near-clone retitlings
-    .map(r => ({ activity: r.Activity, date: r.Date, title: r.Title, time: r.Time, venue: r.Venue, url: r.URL, note: r.Note, show: showOf[r.Activity] || 'all' }))
+    .map(r => ({ activity: r.Activity, date: r.Date, title: r.Title, time: r.Time, venue: r.Venue, url: r.URL, note: r.Note, show: showOf[r.Activity] || 'all',
+      score: eventPrefScore(loadSettings().eventPrefs || {}, r.Title) }))
     .sort((x, y) => x.date.localeCompare(y.date) || String(x.time).localeCompare(String(y.time)));
   const leads = events.filter(ev => {
     const lead = leadOf[ev.activity] || 0;
@@ -4844,7 +4738,7 @@ app.get('/api/activities', asyncRoute(async (req, res) => {
     const start = new Date(Date.parse(ev.date) - lead * 86400000).toISOString().slice(0, 10);
     return t0 >= start && t0 < ev.date;
   });
-  res.json({ events, leads });
+  res.json({ events, leads, eventPrefs: loadSettings().eventPrefs || null });
 }));
 // salient upcoming events (in their lead-alert window) for the Agent Brief — the "events of
 // interest, elevated if salient" side of the weather/events brief hook.

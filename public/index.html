@@ -545,11 +545,6 @@ details summary { cursor: pointer; color: var(--text2); font-size: 12.5px; paddi
 </div>
 </section>
 
-<section data-sec="jobsboard">
-<h2 data-sec-title>Job Openings <span class="muted">— <a href="/jobs">full board →</a></span></h2>
-<div id="jobs-summary" class="card"><div class="empty">Loading…</div></div>
-</section>
-
 <section data-sec="agents">
 <h2 data-sec-title style="margin-top:10px">Agent Stable <span class="muted">— <a href="/agents.html">stable · incoming · APA →</a></span></h2>
 <div id="agents-summary" class="card"><div class="empty">Loading…</div></div>
@@ -726,7 +721,7 @@ async function saveLinks() {
     box.querySelector('.lk-url').focus();
   };
 })();
-const SEC_DEFS = { links: 'Links', habits: 'Habits', brief: 'Agent brief', acts: 'Activity Preview', today: 'Today', todo: 'Persistent lists', jlists: 'Ephemeral notes', cinote: 'Note to CI', jobsboard: 'Job Openings', agents: 'Agent Stable', files: 'File manager', completed: 'Completed', media: 'Reading queue', markets: 'Markets', signals: 'Market signals', news: 'News', week: 'Week ahead' };
+const SEC_DEFS = { links: 'Links', habits: 'Habits', brief: 'Agent brief', acts: 'Activity Preview', today: 'Today', todo: 'Persistent lists', jlists: 'Ephemeral notes', cinote: 'Note to CI', agents: 'Agent Stable', files: 'File manager', completed: 'Completed', media: 'Reading queue', markets: 'Markets', signals: 'Market signals', news: 'News', week: 'Week ahead' };
 let appSettings = { sections: {}, quadrants: {}, calendars: [] };
 const secExpanded = new Set(); // session-local expansions of collapsed-by-default sections
 function setSecTitle(el, title) { // replace only the text node — keep the ＋/meta spans inside headings
@@ -2282,16 +2277,38 @@ function renderActPreview() {
   const calToks = (calEvents || []).map(ev => new Set(String(ev.summary || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(w => w.length > 1)));
   const onCal = title => { const T = new Set(String(title).toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(w => w.length > 1));
     return calToks.some(D => { let n = 0; for (const x of T) if (D.has(x)) n++; return n / Math.max(1, Math.min(T.size, D.size)) >= 0.7; }); };
-  const sugg = (actData.events || []).filter(a => a.date >= t0 && a.date <= t7 && !onCal(a.title)).slice(0, 8);
+  // CI-learned taste ranks the pool; top 5 render, the rest sit behind a dropdown
+  const pool = (actData.events || []).filter(a => a.date >= t0 && a.date <= t7 && !onCal(a.title))
+    .sort((a, b) => (b.score || 0) - (a.score || 0) || a.date.localeCompare(b.date));
+  const expandAll = renderActPreview._expanded;
+  const sugg = expandAll ? pool.slice(0, 40) : pool.slice(0, 5);
   const sCard = (a, i) => `<div class="event swipecard td-card ap-card" data-i="${i}">
     <div class="time">${a.date === t0 ? (a.time ? esc(a.time) : 'today') : new Date(a.date + 'T12:00').toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric' }) + (a.time ? ' ' + esc(a.time) : '')}</div>
     <div class="td-body"><span style="color:var(--violet)">[${esc(a.activity)}]</span> ${esc(a.title)}${a.venue ? ` <span class="tiny muted">@ ${esc(a.venue)}</span>` : ''}${a.url ? ` <a class="tiny" href="${esc(a.url)}" target="_blank" rel="noopener">↗</a>` : ''}${a.note ? `<div class="tiny muted">${esc(a.note)}</div>` : ''}</div>
     <span class="td-btns"><button class="ib td-up" title="More like this (👍 then ← = good call, just not this time)">👍</button><button class="ib td-down" title="Less like this">👎</button></span></div>`;
+  const hiddenN = pool.length - sugg.length;
   el.innerHTML = leadStrip() + (sugg.length ? sugg.map(sCard).join('') : '')
     + (!leadStrip() && !sugg.length ? '<div class="empty tiny">No upcoming activity suggestions.</div>' : '')
-    + `<div class="tiny" style="margin-top:3px"><a href="#" class="la-acts-link" style="color:var(--violet)">🎯 What events do you want on your radar?</a> · ← skip · → add to calendar</div>`;
+    + `<div class="tiny" style="margin-top:3px">`
+    + (hiddenN > 0 ? `<a href="#" id="ap-more" style="color:var(--accent)">▾ ${hiddenN} more</a> · ` : '')
+    + (expandAll && pool.length > 5 ? `<a href="#" id="ap-less" style="color:var(--accent)">▴ top 5</a> · ` : '')
+    + (pool.length ? `<a href="#" id="ap-clear" style="color:var(--red)">✕ clear all${expandAll ? '' : ' ' + pool.length}</a> · ` : '')
+    + `<a href="#" class="la-acts-link" style="color:var(--violet)">🎯 What events do you want on your radar?</a> · ← skip · → add to calendar`
+    + ((actData.eventPrefs && actData.eventPrefs.note) ? `<div class="tiny muted" title="learned from your swipes — tunes nightly">🧠 ${esc(actData.eventPrefs.note)}</div>` : '')
+    + `</div>`;
   bindLeads(el);
   el.querySelectorAll('.la-acts-link').forEach(a => a.onclick = e => { e.preventDefault(); openIntEditor('ACTIVITIES'); });
+  const more = el.querySelector('#ap-more'), less = el.querySelector('#ap-less'), clr = el.querySelector('#ap-clear');
+  if (more) more.onclick = e => { e.preventDefault(); renderActPreview._expanded = true; renderActPreview(); };
+  if (less) less.onclick = e => { e.preventDefault(); renderActPreview._expanded = false; renderActPreview(); };
+  if (clr) clr.onclick = async e => {
+    e.preventDefault();
+    // clears the WHOLE current pool (not just the visible 5) — thumb/schedule keepers first
+    if (!confirm(`Dismiss all ${pool.length} current suggestions? (schedule or 👍 the ones you want first)`)) return;
+    const r = await api('/api/events/clear-all', { method: 'POST', body: JSON.stringify({ items: pool.map(a => ({ title: a.title, activity: a.activity })) }) });
+    if (r && r.ok) { toast && toast(`cleared ${r.cleared}`); api('/api/activities').then(d => { if (d && d.events) { actData = d; renderActPreview(); } }); }
+    else toast && toast('clear failed — try again', true);
+  };
   el.querySelectorAll('.ap-card').forEach(card => {
     const a = sugg[+card.dataset.i];
     // dismissals must be CONFIRMED: a swallowed error here is how the toy festival came
@@ -3771,25 +3788,6 @@ api('/api/calendar').then(r => {
 api('/api/media').then(r => { mediaRows = r.media || []; renderMedia(); }).catch(() => { $('mediaq').innerHTML = '<div class="err">Media tab unreachable</div>'; });
 
 // Jobs board summary — NEW openings only (owner rule 2026-07-28): show what appeared
-// since the board was last opened on this device (fallback 48h); everything else is a
-// one-line count. Same jobs-last-visit stamp the /jobs page writes (shared origin).
-api('/api/jobs').then(r => {
-  const el = $('jobs-summary');
-  const open = (r.jobs || []).filter(j => j.status === 'open').sort((a, b) => (a.rank || 1e9) - (b.rank || 1e9));
-  const applied = (r.jobs || []).filter(j => j.status === 'applied').length;
-  if (!open.length) { el.innerHTML = `<div class="empty">No open roles${applied ? ` · ${applied} applied` : ''} — the search agent adds new ones daily. <a href="/jobs">board →</a></div>`; return; }
-  // same rule as the board: since last visit, and always the last 24h (glances can't consume the day)
-  const stamp = Date.parse(localStorage.getItem('jobs-last-visit') || '') || (Date.now() - 48 * 3600e3);
-  const cutoff = Math.min(stamp, Date.now() - 24 * 3600e3);
-  const fresh = open.filter(j => (Date.parse(j.created || '') || 0) > cutoff);
-  const counts = `${open.length} open${applied ? ` · ${applied} applied` : ''} · <a href="/jobs">full board →</a>`;
-  if (!fresh.length) { el.innerHTML = `<div class="tiny">no new openings since your last board visit · ${counts}</div>`; return; }
-  el.innerHTML = fresh.slice(0, 5).map(j =>
-    `<div style="margin:2px 0;border-left:2px solid var(--green);padding-left:6px">💼 ${j.url ? `<a href="${esc(j.url)}" target="_blank" rel="noopener"><b>${esc(j.title)}</b></a>` : `<b>${esc(j.title)}</b>`}
-     ${(j.flags || []).includes('hot') ? '<span style="font-size:9px;font-weight:700;color:#e9b949">⚡</span>' : ''}
-     <span class="muted">— ${esc(j.company)}${j.location ? ' · ' + esc(j.location) : ''}</span></div>`).join('')
-    + `<div class="tiny" style="margin-top:3px"><b style="color:var(--green)">${fresh.length} new</b>${fresh.length > 5 ? ` (top 5 shown)` : ''} since your last board visit · ${counts}</div>`;
-}).catch(() => { $('jobs-summary').innerHTML = '<div class="empty">Jobs board unreachable</div>'; });
 $('cfg-btn').onclick = cfgToggle;
 // plugin sections (plugins/*.js on the server — private, per-tier): each becomes a real
 // <section> in #secs, so ⚙ ordering/visibility/titles apply to them like anything else.
