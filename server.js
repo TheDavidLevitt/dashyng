@@ -219,6 +219,7 @@ if (location.hostname.startsWith('www.')) location.replace(location.href.replace
 app.get('/auth/callback', asyncRoute(async (req, res) => {
   if (req.query.state === 'gmail') return gmailConsentReturn(req, res);
   if (req.query.state === 'gcal') return gcalConsentReturn(req, res);
+  if (req.query.state === 'drive') return driveConsentReturn(req, res);
   const c = new OAuth2Client(OAUTH_ID, OAUTH_SECRET, redirectUri(req));
   const { tokens } = await c.getToken(req.query.code);
   const ticket = await c.verifyIdToken({ idToken: tokens.id_token, audience: OAUTH_ID });
@@ -253,6 +254,29 @@ app.get('/auth/logout', (req, res) => {
 // instance's own sheet cell — survives Cloud Run restarts). The owner-tier alternative
 // (share the calendar with the service account) keeps working; this is for instances
 // whose user has no service account to share with.
+// ---------- Drive connect (circle sheets / user-owned datastores) ----------
+// drive.file = the NARROWEST Drive scope: only files this app creates. Needed because the
+// robot service account cannot own My-Drive files — circle sheets must be created by a
+// real user, who then also becomes the circle's Google-side owner/admin.
+app.get('/auth/drive/connect', (req, res) => {
+  if (!OAUTH_ID) return res.status(501).send('Set GOOGLE_OAUTH_CLIENT_ID/SECRET first — see .env.example.');
+  const c = new OAuth2Client(OAUTH_ID, OAUTH_SECRET, redirectUri(req));
+  res.redirect(c.generateAuthUrl({ scope: ['https://www.googleapis.com/auth/drive.file', 'https://www.googleapis.com/auth/spreadsheets', 'email'], access_type: 'offline', prompt: 'consent', state: 'drive' }));
+});
+async function driveConsentReturn(req, res) {
+  const c = new OAuth2Client(OAUTH_ID, OAUTH_SECRET, redirectUri(req));
+  const { tokens } = await c.getToken(req.query.code);
+  if (!tokens.refresh_token) return res.status(400).send('Google did not return a refresh token — revoke prior access at https://myaccount.google.com/permissions and retry.');
+  await saveSettings({ ...loadSettings(), driveToken: { refresh_token: tokens.refresh_token, connectedAt: nowIso() } });
+  res.send('Drive connected — you can now create shared circles. <a href="/">← back</a>');
+}
+function userDriveAuth() {
+  const t = (loadSettings().driveToken || {}).refresh_token;
+  if (!t || !OAUTH_ID) return null;
+  const oc = new OAuth2Client(OAUTH_ID, OAUTH_SECRET);
+  oc.setCredentials({ refresh_token: t });
+  return oc;
+}
 app.get('/auth/calendar/connect', (req, res) => {
   if (!OAUTH_ID) return res.status(501).send('Set GOOGLE_OAUTH_CLIENT_ID/SECRET first — see .env.example.');
   const c = new OAuth2Client(OAUTH_ID, OAUTH_SECRET, redirectUri(req));
@@ -324,6 +348,85 @@ app.post('/api/push/register', asyncRoute(async (req, res) => {
   devices.push({ token: t, platform: String(platform || 'ios').slice(0, 12), at: nowIso() });
   await saveSettings({ ...st, pushDevices: devices.slice(-10) });
   res.json({ ok: true, devices: devices.length });
+}));
+
+// ---------- share circles: one sheet per shared widget ----------
+// Permission model = Google's own, deliberately: the circle CREATOR is the Drive owner and
+// sole admin (writersCanShare:false — members cannot re-share); members are writer (joint
+// state) or reader (view-only shares). The _members tab is the alert substrate: every
+// grant appends a row, every member's instance can diff it and surface "X was added".
+async function saEmail() {
+  try { return JSON.parse(fs.readFileSync(CFG.keyFile, 'utf8')).client_email || ''; } catch (e) {}
+  try { // Cloud Run: ask the metadata server which identity this service runs as
+    const r = await fetch('http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email',
+      { headers: { 'Metadata-Flavor': 'Google' } });
+    if (r.ok) return (await r.text()).trim();
+  } catch (e) {}
+  return '';
+}
+async function createCircleSheet(widgetId, members /* [{email, role:'writer'|'reader'}] */) {
+  const auth = userDriveAuth();
+  if (!auth) return { error: 'Connect Google Drive first (⚙ → sharing, or /auth/drive/connect) — circles are created and owned by YOU, not the robot.' };
+  const sheets = google.sheets({ version: 'v4', auth });
+  const drive = google.drive({ version: 'v3', auth });
+  const title = `dashyng · ${String(widgetId).replace(/^plugin:/, '')} · circle`;
+  const created = await sheets.spreadsheets.create({ requestBody: {
+    properties: { title },
+    sheets: [{ properties: { title: 'data' } }, { properties: { title: '_members' } }],
+  } });
+  const id = created.data.spreadsheetId;
+  await sheets.spreadsheets.values.update({ spreadsheetId: id, range: "'_members'!A1", valueInputOption: 'RAW',
+    requestBody: { values: [['At', 'Email', 'Role', 'AddedBy'], [nowIso(), myOwnerEmail(), 'owner', 'creator']] } });
+  // members cannot re-share: adding people stays an owner action, visibly
+  await drive.files.update({ fileId: id, requestBody: { writersCanShare: false } }).catch(() => {});
+  const granted = [];
+  for (const m of (members || [])) {
+    const role = m.role === 'reader' ? 'reader' : 'writer';
+    try {
+      await drive.permissions.create({ fileId: id, sendNotificationEmail: true,
+        requestBody: { type: 'user', role, emailAddress: m.email } });
+      await sheets.spreadsheets.values.append({ spreadsheetId: id, range: "'_members'!A1", valueInputOption: 'RAW',
+        requestBody: { values: [[nowIso(), m.email, role, myOwnerEmail()]] } });
+      granted.push({ email: m.email, role });
+    } catch (e) { granted.push({ email: m.email, error: String(e.message).slice(0, 120) }); }
+  }
+  // the deployment's robot also needs access — the instance serves the widget through it
+  const robot = await saEmail();
+  if (robot) {
+    await drive.permissions.create({ fileId: id, sendNotificationEmail: false,
+      requestBody: { type: 'user', role: 'writer', emailAddress: robot } }).catch(() => {});
+    await sheets.spreadsheets.values.append({ spreadsheetId: id, range: "'_members'!A1", valueInputOption: 'RAW',
+      requestBody: { values: [[nowIso(), robot, 'robot', 'auto']] } }).catch(() => {});
+  }
+  return { ok: true, sheetId: id, title, granted };
+}
+app.post('/api/circles/create', asyncRoute(async (req, res) => {
+  const { widgetId, email, role } = req.body || {};
+  if (!widgetId || !email) return res.status(400).json({ error: 'widgetId and email required' });
+  const r = await createCircleSheet(widgetId, [{ email: String(email), role }]);
+  if (r.error) return res.status(400).json(r);
+  // migrate current state when the widget knows how (copy, never move)
+  const pk = String(widgetId).replace(/^plugin:/, '');
+  const p = (typeof PLUGINS === 'object' && PLUGINS[pk]) || null;
+  if (p && typeof p.migrateTo === 'function') await p.migrateTo(pluginCtx(), r.sheetId).catch(() => {});
+  // remember the pointer locally so subsequent share() calls carry the circle
+  const st = loadSettings();
+  await saveSettings({ ...st, jointSheets: { ...(st.jointSheets || {}), [pk]: r.sheetId } });
+  res.json(r);
+}));
+// membership status for every circle this instance points at — the "who's in it, who's
+// new" feed. A member's instance calls this; additions since last look = the alert.
+app.get('/api/circles/status', asyncRoute(async (req, res) => {
+  const joint = loadSettings().jointSheets || {};
+  const out = [];
+  for (const [widget, sheetId] of Object.entries(joint)) {
+    try {
+      const r = await store.values.get({ spreadsheetId: sheetId, range: "'_members'!A1:D50" });
+      const rows = (r.data.values || []).slice(1).map(x => ({ at: x[0], email: x[1], role: x[2], addedBy: x[3] }));
+      out.push({ widget, sheetId, members: rows });
+    } catch (e) { out.push({ widget, sheetId, error: 'unreadable (removed from circle?)' }); }
+  }
+  res.json({ circles: out });
 }));
 
 // ---------- dashyng IDs, invites & widget sharing (phases 3+4) ----------
