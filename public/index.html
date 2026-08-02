@@ -399,69 +399,10 @@ input.loc-bar-input { font-size: 10.5px; width: 100%; padding: 0 3px; background
 .news-topic { margin-bottom: 8px; }
 .news-topic h3 { font-size: 12px; font-weight: 650; margin: 0 0 3px; border-bottom: 1px solid var(--border); padding-bottom: 2px; }
 .news-item { font-size: 12.5px; padding: 2px 0; }
-/* markets — 30-col grid so tile sizes divide cleanly: ticker=3 (10/row), small=5 (6/row), large=15 (2/row) */
-.market-grid { display: grid; grid-template-columns: repeat(30, 1fr); gap: 6px; }
-.m-tile { background: var(--card2); border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px;
-  position: relative; overflow: hidden; grid-column: span 5; }
-/* ticker = half a small card: half the grid width, tighter padding, smaller type */
-.m-tile.sz-ticker { grid-column: span 3; padding: 2px 5px; }
-.m-tile.sz-ticker .m-value { font-size: 11px; }
-.m-tile.sz-ticker .m-label { font-size: 8px; letter-spacing: 0.02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.m-tile.sz-ticker .m-change { font-size: 9px; }
-.m-tile.sz-small { grid-column: span 5; }
-.m-tile.sz-large { grid-column: span 15; min-height: 130px; }
-.m-tile.dragover { outline: 2px dashed var(--accent); outline-offset: -2px; }
-.m-tile .m-tools { position: absolute; top: 1px; right: 1px; display: none; gap: 1px; z-index: 3; } /* .m-tile .m-tools beats the `.m-tile > *` position:relative rule */
-.m-tile:hover .m-tools { display: flex; }
-@media (hover: none) { .m-tile .m-tools { display: flex; opacity: 0.85; } } /* touch: hover never fires — keep tile tools reachable */
-.m-tools button { background: var(--card); color: var(--text2); border: 1px solid var(--border); border-radius: 3px;
-  font-size: 9px; padding: 0 4px; cursor: pointer; line-height: 14px; }
-.m-tools button:hover { color: var(--accent); border-color: var(--accent); }
-.m-add-tile { display: flex; align-items: center; justify-content: center; color: var(--text3); cursor: pointer;
-  border-style: dashed; font-size: 18px; min-height: 44px; }
-.m-add-tile:hover { color: var(--accent); border-color: var(--accent); }
-#mkt-form { background: var(--card2); border: 1px solid var(--border); border-radius: 6px; padding: 9px 11px; margin: 6px 0; }
-#mkt-form input, #mkt-form select { background: var(--card); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 3px 6px; font-size: 12px; }
-#mkt-form label { font-size: 11.5px; color: var(--text2); margin-right: 10px; }
-/* the ＋ Add menu: one dropdown of categories, each opening a second-level list to the right */
-.mk-menu { position: relative; display: inline-block; }
-.mk-btn { background: var(--card); color: var(--text); border: 1px solid var(--border); border-radius: 4px;
-  padding: 3px 10px; font-size: 12px; cursor: pointer; }
-.mk-btn:hover { color: var(--accent); border-color: var(--accent); }
-.mk-mi { font-size: 12px; padding: 4px 10px; cursor: pointer; white-space: nowrap; }
-.mk-mi:hover { background: var(--card); color: var(--accent); }
-.mk-mi .mk-arrow { color: var(--text3); float: right; margin-left: 10px; }
-.mk-list { display: none; position: absolute; z-index: 30; background: var(--card2);
-  border: 1px solid var(--border); border-radius: 6px; min-width: 160px; max-height: 260px; overflow-y: auto;
-  box-shadow: 0 6px 18px rgba(0,0,0,0.4); }
-.mk-root { left: 0; top: 100%; overflow: visible; max-height: none; } /* categories never scroll; sub-lists do */
-.mk-menu:hover > .mk-root, .mk-menu.open > .mk-root { display: block; }
-.mk-mi.mk-sub { position: relative; }
-.mk-sub-list { left: 100%; top: -4px; }
-.mk-sub:hover > .mk-sub-list, .mk-sub.open > .mk-sub-list { display: block; }
-.mk-more-row { padding: 3px 0; display: flex; gap: 4px; }
-.mk-more-row input { width: 110px; }
-.mk-more-row button { font-size: 11px; cursor: pointer; }
-@media (max-width: 700px) { .mk-sub-list { left: 40px; top: 100%; } } /* narrow screens: open below, indented */
-@media (max-width: 700px) {
-  .m-tile.sz-ticker { grid-column: span 6; }
-  .m-tile.sz-small { grid-column: span 10; }
-  .m-tile.sz-large { grid-column: span 30; }
-}
-.m-tile > * { position: relative; }
-.m-label { font-size: 9.5px; color: var(--text2); text-transform: uppercase; letter-spacing: 0.04em; }
-.m-value { font-size: 14.5px; font-weight: 650; font-variant-numeric: tabular-nums; }
-.m-change { font-size: 11px; font-variant-numeric: tabular-nums; }
-.m-held { float: right; color: var(--text2); font-weight: 400; margin-top: 3px; } /* holdings $ value, right of the price */
 #cfg-panel .cfg-row { display: flex; gap: 6px; align-items: center; padding: 2px 0; font-size: 12px; }
 #cfg-panel input[type=text], #cfg-panel input:not([type]) { background: var(--card2); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; font-size: 12px; }
 #cfg-panel .cfg-head { font-size: 11px; text-transform: uppercase; font-weight: 700; color: var(--text3); margin: 8px 0 3px; }
 #cfg-panel button { cursor: pointer; }
-.m-change.up { color: var(--green); } .m-change.down { color: var(--red); } .m-change.flat { color: var(--text2); }
-.m-spark { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
-.m-axis { position: absolute; left: 2px; font-size: 7px; color: var(--text3); opacity: 0.7; pointer-events: none; font-variant-numeric: tabular-nums; }
-.m-axis-top { top: 2px; } .m-axis-bot { bottom: 2px; }
-.m-axis-x { bottom: 2px; right: 4px; left: auto; }
 details summary { cursor: pointer; color: var(--text2); font-size: 12.5px; padding: 3px 0; }
 .footer { margin-top: 22px; padding-top: 10px; border-top: 1px solid var(--border); font-size: 10.5px; color: var(--text3); }
 @media (max-width: 700px) {
@@ -3798,6 +3739,9 @@ loadDiag(); loadUsage();
 // silently no-ops (this had been quietly killing the news-link click tracking [+3 signal] and
 // was why the new markets buttons appeared dead; the lone window._openF export was the tell).
 Object.assign(window, { clickStory, markClicked, openIntEditor, openNewsDescribe }); // mkt* entry points now assigned by the markets plugin
+// The page-side widget API: the main script is one big closure, so nothing here is global
+// by accident. Plugin clients get exactly these, deliberately, via window.dashyng.
+window.dashyng = { api, esc, toast, makeSwipeable, flyAway, rpcPoll, newsAgent, openIntEditor };
 })();
 </script>
 <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});</script>
