@@ -2279,8 +2279,17 @@ function renderLocationStrip(container, days, narrow, fullDays, redraw) {
   const winStart = isoOf2(days[0].d), winEnd = isoOf2(days[days.length - 1].d);
   const full = fullDays || days;
   const fullWinStart = isoOf2(full[0].d), fullWinEnd = isoOf2(full[full.length - 1].d);
+  // Tone-down (owner rule 2026-08-02): staying put is not news. The baseline = wherever
+  // today's bar (or home) says; bars matching it render NOTHING — only CHANGES of place
+  // get a mark. Comparison is loose ("Paris" == "Paris, France"). If the whole visible window
+  // is baseline, the strip is simply empty.
+  const locKey = x => String(x || '').toLowerCase().split(',')[0].trim();
+  const todayIso2 = isoOf2(new Date());
+  const baseBar = locBars.find(b => b.start <= todayIso2 && todayIso2 <= b.end && b.location !== 'Location?');
+  const baseline = locKey(baseBar ? baseBar.location : (homeLocation || ''));
   const segs = locBars.map(b => ({ ...b, segStart: b.start < winStart ? winStart : b.start, segEnd: b.end > winEnd ? winEnd : b.end }))
-    .filter(b => b.segStart <= b.segEnd);
+    .filter(b => b.segStart <= b.segEnd)
+    .filter(b => b.location === 'Location?' || !baseline || locKey(b.location) !== baseline);
   const barHtml = b => {
     const startIdx = days.findIndex(x => isoOf2(x.d) === b.segStart);
     const count = Math.round((Date.parse(b.segEnd) - Date.parse(b.segStart)) / 86400000) + 1;

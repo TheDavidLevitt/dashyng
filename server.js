@@ -4573,6 +4573,11 @@ async function harvestCalendarSignals() {
     const s = ev.start?.dateTime || ev.start?.date, e = ev.end?.dateTime || ev.end?.date;
     if (!s) return false;
     const days = e ? Math.ceil((Date.parse(e) - Date.parse(s)) / 86400000) : 0;
+    // WATCH-events are not travel: a short match/show scheduled at a distant venue means
+    // the owner watches it (the rugby-in-Argentina incident, 2026-08-02) — a real trip
+    // shows up as flights/hotels/multi-day spans, which other evidence already carries.
+    const hours = e && ev.start?.dateTime ? (Date.parse(e) - Date.parse(s)) / 36e5 : 24;
+    if (hours <= 8 && /\bv\.?s?\b| v |match|championship|cup\b|final\b|concert|festival|grand prix|screening/i.test(String(ev.summary || ''))) return false;
     return days >= 1 || !!ev.location; // multi-day span, or any event carrying a location field
   });
   if (!candidates.length) return;
@@ -4582,7 +4587,7 @@ async function harvestCalendarSignals() {
       const lines = candidates.slice(0, 40).map((ev, i) => `${i}. ${ev.start?.dateTime || ev.start?.date} → ${ev.end?.dateTime || ev.end?.date || ''} | "${ev.summary || ''}"${ev.location ? ' @ ' + ev.location : ''}`);
       const raw = await runClaude(
         `Calendar events. For each one that clearly indicates the OWNER WILL PHYSICALLY BE in a specific real-world PLACE (a real city/region/country — "France", "Pau", "London office"), extract it. ` +
-        `Skip anything that ISN'T evidence of the owner's own location: generic meetings/reminders/birthdays, school-holiday zone labels ("Zone A/B/C"), academic-calendar terms, public-holiday names, or any event whose "place" is really a category/classification rather than somewhere a person travels to.\n` +
+        `Skip anything that ISN'T evidence of the owner's own location: generic meetings/reminders/birthdays, school-holiday zone labels ("Zone A/B/C"), academic-calendar terms, public-holiday names, any event whose "place" is really a category/classification, and SPECTATOR events — a sports match, concert or show at a venue (especially in another country, or timed in the owner's home timezone) means the owner WATCHES it, not that they travel there. Only extract a place when the event itself implies the owner physically goes (flight, hotel, "trip to", multi-day stay).\n` +
         `Events:\n${lines.join('\n')}\n\n` +
         `Return STRICT JSON only, no prose: {"locations":[{"i":<index>,"place":"short place name"}]}`,
         { timeoutMs: 60000, module: 'location', model: 'claude-haiku-4-5' });
