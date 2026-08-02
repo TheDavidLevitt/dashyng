@@ -2201,7 +2201,7 @@ const trialDaysLeft = () => { if (!/^\d{4}-\d{2}-\d{2}$/.test(CFG.trialEnd || ''
   return Math.ceil((Date.parse(CFG.trialEnd) - Date.now()) / 864e5); };
 const trialActive = () => { const d = trialDaysLeft(); return d !== null && d > 0; };
 app.get('/api/llm/status', (req, res) => {
-  const engine = (trialActive() && !HAS_CLAUDE && CFG.gcpProject) ? 'vertex (GCP trial credits)'
+  const engine = (trialActive() && CFG.gcpProject) ? 'vertex (GCP trial credits) + claude-cli for tools'
     : HAS_CLAUDE ? 'claude-cli (subscription)'
     : (CFG.llmRelayUrl && CFG.llmRelayKey) ? 'relay (shared subscription)'
     : process.env.ANTHROPIC_API_KEY ? 'anthropic API key'
@@ -4719,16 +4719,17 @@ async function runClaude(prompt, { tools, timeoutMs, module, model, served } = {
       } catch (e) { track('agent', true, 'gemini-free unavailable, falling through: ' + String(e.message).slice(0, 80)); }
     }
   }
+  // GCP-trial window: Vertex is effectively free while credits last, so it outranks
+  // EVERYTHING for plain-text work — including the claw's own claude CLI (subscription
+  // capacity is better spent where tools are needed). Tools still go CLI/relay. Expires
+  // automatically at DASHBOARD_TRIAL_END — no surprise bills when credits run out.
+  if (!tools && trialActive() && CFG.gcpProject) {
+    try {
+      const r = await require('./providers').generateText(prompt, 'vertex-gemini');
+      if (r && r.text) { mark('vertex-gemini (trial credits)'); return r.text; }
+    } catch (e) { /* fall through the normal ladder */ }
+  }
   if (!HAS_CLAUDE) {
-    // GCP-trial window: Vertex is effectively free while credits last, so it outranks the
-    // relay/API rungs for plain text work (tools still need the CLI/relay). Expires
-    // automatically at DASHBOARD_TRIAL_END — no surprise bills when credits run out.
-    if (!tools && trialActive() && CFG.gcpProject) {
-      try {
-        const r = await require('./providers').generateText(prompt, 'vertex-gemini');
-        if (r && r.text) { mark('vertex-gemini (trial credits)'); return r.text; }
-      } catch (e) { /* fall through the normal ladder */ }
-    }
     // subscription first: a configured relay forwards to a tier that HAS the claude CLI,
     // so cloud instances never touch metered API keys for routine LLM work. Web tools
     // (fetch/search) ride the relay too — the CLI on the far end runs them.
