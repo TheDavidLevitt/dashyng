@@ -24,6 +24,7 @@ plugins/*.js
 # core plugins are PUBLIC code — extracted sections, committed and shipped
 !plugins/surf.js
 !plugins/jobs.js
+!plugins/media.js
 data/webhook-retry.json
 data/config-local.json
 data/location-bars-local.json

@@ -559,27 +559,6 @@ details summary { cursor: pointer; color: var(--text2); font-size: 12.5px; paddi
 <div id="completed"></div>
 </section>
 
-<section data-sec="media">
-<details id="mediaq-d"><summary style="font-size:11px;text-transform:uppercase;letter-spacing:.06em;font-weight:650;color:var(--text2);padding:3px 0"><span data-sec-title>Reading / Listening queue</span></summary>
-<div id="media-add" style="display:flex;gap:5px;margin:4px 0">
-  <input id="media-add-input" placeholder="Paste a link, or type what to find…" style="flex:1;min-width:0;padding:4px 7px;font-size:12px;background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:5px">
-  <button id="media-add-btn" style="cursor:pointer">＋ Add</button>
-</div>
-<div id="media-add-msg" class="tiny" style="margin:0 0 4px"></div>
-<div id="media-filters">
-  <span class="fl">Type</span>
-  <button data-ftype="all" class="active">All</button>
-  <button data-ftype="audio">🎧</button>
-  <button data-ftype="video">📺</button>
-  <button data-ftype="read">📖</button>
-  <span class="fl">Time</span>
-  <button data-fmin="0" class="active">Any</button>
-  <button data-fmin="15">≤15m</button>
-  <button data-fmin="45">≤45m</button>
-</div>
-<div class="card" id="mediaq"><div class="empty">Loading…</div></div></details>
-</section>
-
 <section data-sec="markets">
 <h2><span data-sec-title>Markets</span> <button id="mkt-add-btn" onclick="mktFormToggle()" title="add a tile" style="background:var(--card);color:var(--accent);border:1px solid var(--border);border-radius:4px;font-size:11px;line-height:15px;padding:0 6px;cursor:pointer;vertical-align:1px">＋</button> <span class="muted" id="mkt-ts"></span> <span class="tiny" style="font-weight:400">— drag to reorder · ⤢ resize</span></h2>
 <div class="card">
@@ -721,7 +700,7 @@ async function saveLinks() {
     box.querySelector('.lk-url').focus();
   };
 })();
-const SEC_DEFS = { links: 'Links', habits: 'Habits', brief: 'Agent brief', acts: 'Activity Preview', today: 'Today', todo: 'Persistent lists', jlists: 'Ephemeral notes', cinote: 'Note to CI', agents: 'Agent Stable', files: 'File manager', completed: 'Completed', media: 'Reading queue', markets: 'Markets', signals: 'Market signals', news: 'News', week: 'Week ahead' };
+const SEC_DEFS = { links: 'Links', habits: 'Habits', brief: 'Agent brief', acts: 'Activity Preview', today: 'Today', todo: 'Persistent lists', jlists: 'Ephemeral notes', cinote: 'Note to CI', agents: 'Agent Stable', files: 'File manager', completed: 'Completed', markets: 'Markets', signals: 'Market signals', news: 'News', week: 'Week ahead' };
 let appSettings = { sections: {}, quadrants: {}, calendars: [] };
 const secExpanded = new Set(); // session-local expansions of collapsed-by-default sections
 function setSecTitle(el, title) { // replace only the text node — keep the ＋/meta spans inside headings
@@ -2693,76 +2672,6 @@ function renderLookahead() {
 }
 
 // ---------- media ----------
-let mediaRows = [];
-const ICONS = { audio: '🎧', video: '📺', read: '📖' };
-const mediaFilter = { type: 'all', maxMin: 0 };
-function renderMedia() {
-  let items = mediaRows.filter(r => {
-    const st = String(r.Status || 'queued').toLowerCase();
-    if (st === 'done' || st === 'archived') return false;
-    if (mediaFilter.type !== 'all' && String(r.Type || '').toLowerCase() !== mediaFilter.type) return false;
-    if (mediaFilter.maxMin > 0) { const m = parseInt(r.Length_min || '0', 10); if (m && m > mediaFilter.maxMin) return false; }
-    return true;
-  });
-  const prank = p => ({ high: 0, med: 1, medium: 1, low: 2 }[String(p || '').toLowerCase()] ?? 1);
-  items.sort((a, b) => prank(a.Priority) - prank(b.Priority) || String(b.Added || '').localeCompare(String(a.Added || '')));
-  $('mediaq').innerHTML = items.length ? items.map(r => {
-    const icon = ICONS[String(r.Type || '').toLowerCase()] || '•';
-    const title = r.URL ? `<a class="nsrc" href="${esc(r.URL)}" target="_blank" rel="noopener">${esc(r.Title)}↗</a>` : esc(r.Title);
-    return `<div class="mq-item swipecard" data-id="${esc(r.ID || '')}" data-title="${esc(r.Title)}" data-url="${esc(r.URL || '')}" data-source="${esc(r.Source || '')}"><span>${icon}</span><span class="mq-title">${title}</span>
-      <span class="mq-meta">${esc(r.Source || '')}${r.Length_min ? ' · ' + esc(r.Length_min) + 'm' : ''}</span>
-      <button class="ib mq-agent" title="Agent: read &amp; stash in journal">🤖</button>
-      <button class="q-btn done" title="Mark consumed (swipe →)">✓</button></div>`;
-  }).join('') : '<div class="empty">Queue empty for this filter.</div>';
-  $('mediaq').querySelectorAll('.mq-item').forEach(item => {
-    const done = () => mediaDone(item, false);
-    item.querySelector('.q-btn.done').onclick = done;
-    item.querySelector('.mq-agent').onclick = () => newsAgent(item);
-    makeSwipeable(item, { onRight: done, onLeft: () => mediaDone(item, true) });
-  });
-}
-async function mediaDone(item, dismiss) {
-  const id = item.dataset.id;
-  if (id) await api(`/api/media/${encodeURIComponent(id)}/done`, { method: 'POST', body: '{}' });
-  if (dismiss) api('/api/feedback', { method: 'POST', body: JSON.stringify({ kind: 'not_interested', title: item.dataset.title, url: item.dataset.url, source: item.dataset.source }) });
-  const r = mediaRows.find(r => r.ID === id); if (r) r.Status = 'done';
-  flyAway(item, dismiss ? -1 : 1, { label: dismiss ? 'remove' : 'consumed',
-    reverse: () => (id ? api(`/api/media/${encodeURIComponent(id)}/restore`, { method: 'POST', body: '{}' }) : Promise.resolve()).then(() => { if (r) r.Status = 'queued'; }) });
-  return true;
-}
-$('media-filters').querySelectorAll('[data-ftype]').forEach(b => b.onclick = () => {
-  mediaFilter.type = b.dataset.ftype;
-  $('media-filters').querySelectorAll('[data-ftype]').forEach(x => x.classList.toggle('active', x === b));
-  renderMedia();
-});
-$('media-filters').querySelectorAll('[data-fmin]').forEach(b => b.onclick = () => {
-  mediaFilter.maxMin = +b.dataset.fmin;
-  $('media-filters').querySelectorAll('[data-fmin]').forEach(x => x.classList.toggle('active', x === b));
-  renderMedia();
-});
-function mediaAdd() {
-  const inp = $('media-add-input'), msg = $('media-add-msg'), btn = $('media-add-btn');
-  const input = inp.value.trim();
-  if (!input) return;
-  const isUrl = /https?:\/\//.test(input);
-  msg.style.color = 'var(--text2)'; msg.textContent = isUrl ? 'Adding…' : 'Finding a link…';
-  btn.disabled = true;
-  const done = r => {
-    btn.disabled = false;
-    if (!r || r.error) { msg.style.color = 'var(--red)'; msg.textContent = (r && r.error) || 'add failed'; return; }
-    inp.value = ''; msg.textContent = '';
-    const it = r.item || {};
-    toast(`Added: ${it.title || 'item'}`);
-    api('/api/media').then(x => { mediaRows = x.media || []; renderMedia(); });
-  };
-  api('/api/media/add', { method: 'POST', body: JSON.stringify({ input }) }).then(r => {
-    if (r && r.queued) { msg.textContent = 'Finding a link (via Mac agent)…'; return rpcPoll(r.id, done); }
-    done(r);
-  }).catch(e => { btn.disabled = false; msg.style.color = 'var(--red)'; msg.textContent = e.message; });
-}
-$('media-add-btn').onclick = mediaAdd;
-$('media-add-input').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); mediaAdd(); } });
-
 // ---------- markets ----------
 function sparkSvg(values, up, rangeLabel) {
   if (!values || values.length < 2) return '';
@@ -3547,11 +3456,11 @@ function newsPin(row) { // pin — I'll read it myself; move to media, strong up
   const s = storyData(row);
   let pinId = null; // per-pin, not global: undo of pin A must not target a later pin B
   dismissedNews.add(s.url);
-  flyAway(row, 1, { label: 'pin', reverse: () => { dismissedNews.delete(s.url); return (pinId ? api(`/api/media/${encodeURIComponent(pinId)}/done`, { method: 'POST', body: '{}' }) : Promise.resolve()).then(() => api('/api/media').then(x => { mediaRows = x.media || []; renderMedia(); })); } });
+  flyAway(row, 1, { label: 'pin', reverse: () => { dismissedNews.delete(s.url); return (pinId ? api(`/api/media/${encodeURIComponent(pinId)}/done`, { method: 'POST', body: '{}' }) : Promise.resolve()).then(() => { window.refreshMediaWidget && window.refreshMediaWidget(); }); } });
   api('/api/queue-story', { method: 'POST', body: JSON.stringify(s) }).then(r => {
     if (r && r.error) { showErr(r.error); return; }
     pinId = r.id;
-    api('/api/media').then(x => { mediaRows = x.media || []; renderMedia(); });
+    window.refreshMediaWidget && window.refreshMediaWidget();
   });
   api('/api/feedback', { method: 'POST', body: JSON.stringify({ kind: 'pinned', ...s }) });
   maybeMarkCleared();
@@ -3680,7 +3589,7 @@ function summaryToReading(card) { // 📌 → reading list + save the summary to
   api('/api/agent/summaries/stash', { method: 'POST', body: JSON.stringify({ url: s.url, kind: 'summary_to_reading' }) })
     .then(r => { if (r && r.error) showErr(r.error); });
   // also add the article itself to the reading list (Media queue)
-  api('/api/queue-story', { method: 'POST', body: JSON.stringify(s) }).then(() => api('/api/media').then(x => { mediaRows = x.media || []; renderMedia(); }));
+  api('/api/queue-story', { method: 'POST', body: JSON.stringify(s) }).then(() => { window.refreshMediaWidget && window.refreshMediaWidget(); });
   flyAway(card, 1, { label: 'reading list' });
   return true;
 }
@@ -3693,7 +3602,7 @@ function summaryReadd(card) { // unfetchable → put the article in the reading 
   const s = { title: card.dataset.title, url: card.dataset.url, source: card.dataset.source };
   toast('Added to reading list');
   api('/api/agent/summaries/dismiss', { method: 'POST', body: JSON.stringify({ url: s.url }) });
-  api('/api/queue-story', { method: 'POST', body: JSON.stringify(s) }).then(() => api('/api/media').then(x => { mediaRows = x.media || []; renderMedia(); }));
+  api('/api/queue-story', { method: 'POST', body: JSON.stringify(s) }).then(() => { window.refreshMediaWidget && window.refreshMediaWidget(); });
   flyAway(card, 1, { label: 'reading list' });
   return true;
 }
@@ -3785,7 +3694,7 @@ api('/api/calendar').then(r => {
   calEvents = r.events; renderTodayCards(); renderLookahead();
 }).catch(() => { $('today').innerHTML = '<div class="err">Calendar unreachable</div>'; });
 
-api('/api/media').then(r => { mediaRows = r.media || []; renderMedia(); }).catch(() => { $('mediaq').innerHTML = '<div class="err">Media tab unreachable</div>'; });
+
 
 // Jobs board summary — NEW openings only (owner rule 2026-07-28): show what appeared
 $('cfg-btn').onclick = cfgToggle;
