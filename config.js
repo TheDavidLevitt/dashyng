@@ -113,6 +113,10 @@ module.exports = {
   newsTiers: (() => { const v = pick('newsTiers', 'DASHBOARD_NEWS_TIERS', null);
     if (Array.isArray(v)) return v;
     try { const a = JSON.parse(v); return Array.isArray(a) ? a : []; } catch (e) { return []; } })(),
+  // GCP free-trial window (set by the one-tap bootstrap: DASHBOARD_TRIAL_END=YYYY-MM-DD).
+  // While active, Vertex (covered by trial credits) slots ABOVE the relay/API rungs and the
+  // dashboard shows a countdown from ~14 days out so the credit cliff is never a surprise.
+  trialEnd: pick('trialEnd', 'DASHBOARD_TRIAL_END', ''),
   // LLM relay: a tier without the claude CLI forwards its LLM calls to a tier that has it
   // (POST {prompt} + X-Relay-Key), keeping everything on the owner's subscription.
   llmRelayUrl: pick('llmRelayUrl', 'DASHBOARD_LLM_RELAY_URL', ''),

@@ -2197,13 +2197,18 @@ app.post('/api/location/set', asyncRoute(async (req, res) => {
 }));
 app.get('/api/location/current', asyncRoute(async (req, res) => res.json({ location: locationOnDate(today()) })));
 // which engine answers LLM work here — drives the ⚙ "LLM access" row
+const trialDaysLeft = () => { if (!/^\d{4}-\d{2}-\d{2}$/.test(CFG.trialEnd || '')) return null;
+  return Math.ceil((Date.parse(CFG.trialEnd) - Date.now()) / 864e5); };
+const trialActive = () => { const d = trialDaysLeft(); return d !== null && d > 0; };
 app.get('/api/llm/status', (req, res) => {
-  const engine = HAS_CLAUDE ? 'claude-cli (subscription)'
+  const engine = (trialActive() && !HAS_CLAUDE && CFG.gcpProject) ? 'vertex (GCP trial credits)'
+    : HAS_CLAUDE ? 'claude-cli (subscription)'
     : (CFG.llmRelayUrl && CFG.llmRelayKey) ? 'relay (shared subscription)'
     : process.env.ANTHROPIC_API_KEY ? 'anthropic API key'
     : require('./providers').hasUserKey('openrouter') ? 'OpenRouter key (yours)'
     : 'none';
-  res.json({ engine, needsKey: engine === 'none' });
+  res.json({ engine, needsKey: engine === 'none', trialDaysLeft: trialDaysLeft(),
+    sponsorDaysLeft: runClaude._sponsorDaysLeft ?? null });
 });
 async function barSearchForEvent({ title, date, venue }) {
   const loc = locationOnDate(date) || 'the owner\'s city';
@@ -4715,6 +4720,15 @@ async function runClaude(prompt, { tools, timeoutMs, module, model, served } = {
     }
   }
   if (!HAS_CLAUDE) {
+    // GCP-trial window: Vertex is effectively free while credits last, so it outranks the
+    // relay/API rungs for plain text work (tools still need the CLI/relay). Expires
+    // automatically at DASHBOARD_TRIAL_END — no surprise bills when credits run out.
+    if (!tools && trialActive() && CFG.gcpProject) {
+      try {
+        const r = await require('./providers').generateText(prompt, 'vertex-gemini');
+        if (r && r.text) { mark('vertex-gemini (trial credits)'); return r.text; }
+      } catch (e) { /* fall through the normal ladder */ }
+    }
     // subscription first: a configured relay forwards to a tier that HAS the claude CLI,
     // so cloud instances never touch metered API keys for routine LLM work. Web tools
     // (fetch/search) ride the relay too — the CLI on the far end runs them.
@@ -4726,6 +4740,7 @@ async function runClaude(prompt, { tools, timeoutMs, module, model, served } = {
       });
       const j = await r.json().catch(() => ({}));
       if (r.ok && j.text !== undefined) {
+        if (j.sponsorDaysLeft !== undefined) runClaude._sponsorDaysLeft = j.sponsorDaysLeft;
         mark('claude (relay)');
         logUsage({ module: module || 'claude', model: 'claude-relay', input: 0, output: 0, costUsd: j.costUsd ?? '', note: 'via llm-relay' }).catch(() => {});
         return String(j.text).trim();

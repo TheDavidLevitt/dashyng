@@ -3269,6 +3269,22 @@ api('/api/plugins').then(({ plugins }) => {
   }
   applySettings(); // settings may already be in — re-apply so plugin order/visibility land
 }).catch(() => {});
+// Credit-cliff warnings: GCP-trial countdown (own stack) and sponsorship countdown (a
+// friend's stack carrying this instance). Quiet until ~2 weeks out, loud at ≤7 days.
+fetch('/api/llm/status').then(r => r.json()).then(s => {
+  const warn = [];
+  if (s.trialDaysLeft !== null && s.trialDaysLeft <= 14) warn.push(s.trialDaysLeft <= 0
+    ? '⚠️ GCP trial credits have ENDED — Vertex now bills your card; check the budget alerts set at install'
+    : `⏳ GCP trial: ${s.trialDaysLeft} day${s.trialDaysLeft === 1 ? '' : 's'} of credits left${s.trialDaysLeft <= 7 ? ' — plan the switch (⚙ → LLM access)' : ''}`);
+  if (s.sponsorDaysLeft !== null && s.sponsorDaysLeft <= 14) warn.push(s.sponsorDaysLeft <= 0
+    ? '⚠️ Your sponsored access has ended — set up your own stack (setup guide in the repo)'
+    : `🤝 Sponsored access: ${s.sponsorDaysLeft} day${s.sponsorDaysLeft === 1 ? '' : 's'} left${s.sponsorDaysLeft <= 7 ? ' — time to set up your own stack' : ''}`);
+  if (!warn.length) return;
+  const bar = document.createElement('div');
+  bar.style.cssText = 'background:rgba(255,170,0,.12);border:1px solid rgba(255,170,0,.5);border-radius:7px;padding:6px 10px;font-size:12px;margin:4px 0';
+  bar.innerHTML = warn.join('<br>');
+  document.body.insertBefore(bar, document.body.firstChild.nextSibling);
+}).catch(() => {});
 const applyFontScale = () => { const v = parseFloat(appSettings.fontScale); document.documentElement.style.setProperty('--fontscale', (v >= 0.8 && v <= 1.4) ? v : 1); };
 api('/api/settings').then(s => {
   appSettings = (s && s.settings) || appSettings;

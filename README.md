@@ -16,6 +16,15 @@ feedback tunes salience over time. **Agent Stable** — live model-fleet usage, 
 and procurement events from agent-stable. **Plugins** — drop a JS file in `plugins/` to add
 sections, API routes, jobs, news sources, health rows, or LLM routing — no fork needed.
 
+
+## 🚀 One-tap self-host (no laptop needed)
+
+[![Open in Cloud Shell](https://gstatic.com/cloudssh/images/open-btn.svg)](https://shell.cloud.google.com/cloudshell/editor?cloudshell_git_repo=https://github.com/TheDavidLevitt/dashyng&cloudshell_tutorial=setup/tutorial.md)
+
+Tap the button (works on a phone), then run `bash setup/bootstrap.sh`. Five minutes later
+you have your own dashboard on your own Google Cloud — free-trial credits cover the first
+90 days, budget alarms guard your card, and the app itself counts down the credit window.
+
 ## Quickstart (5 minutes, zero accounts)
 
 ```bash
