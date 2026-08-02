@@ -3269,6 +3269,30 @@ api('/api/plugins').then(({ plugins }) => {
   }
   applySettings(); // settings may already be in — re-apply so plugin order/visibility land
 }).catch(() => {});
+// Circle membership feed: new members since last look → notice; unreadable circle →
+// "you were removed" with a one-click detach (your pre-circle data is untouched).
+fetch('/api/circles/status').then(r => r.json()).then(({ circles }) => {
+  if (!circles || !circles.length) return;
+  const seen = JSON.parse(localStorage.getItem('circle-members') || '{}');
+  const notes = [];
+  for (const c of circles) {
+    if (c.error) { notes.push(`⚠️ You no longer have access to the <b>${c.widget}</b> circle. <button data-detach="${c.widget}" style="cursor:pointer">detach & keep my copy</button>`); continue; }
+    const known = new Set(seen[c.widget] || []);
+    const fresh = (c.members || []).filter(m => m.email && !known.has(m.email) && m.role !== 'robot');
+    if (known.size && fresh.length) notes.push(`👥 ${fresh.map(m => `<b>${m.email}</b> (${m.role})`).join(', ')} joined the <b>${c.widget}</b> circle`);
+    seen[c.widget] = (c.members || []).map(m => m.email).filter(Boolean);
+  }
+  localStorage.setItem('circle-members', JSON.stringify(seen));
+  if (!notes.length) return;
+  const bar = document.createElement('div');
+  bar.style.cssText = 'background:rgba(120,160,255,.10);border:1px solid rgba(120,160,255,.45);border-radius:7px;padding:6px 10px;font-size:12px;margin:4px 0';
+  bar.innerHTML = notes.join('<br>');
+  document.body.insertBefore(bar, document.body.firstChild.nextSibling);
+  bar.querySelectorAll('[data-detach]').forEach(b => b.onclick = async () => {
+    await fetch((window.__BASE__ || '') + '/api/circles/detach', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ widget: b.dataset.detach }) });
+    bar.remove(); location.reload();
+  });
+}).catch(() => {});
 // Credit-cliff warnings: GCP-trial countdown (own stack) and sponsorship countdown (a
 // friend's stack carrying this instance). Quiet until ~2 weeks out, loud at ≤7 days.
 fetch('/api/llm/status').then(r => r.json()).then(s => {

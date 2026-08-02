@@ -416,6 +416,17 @@ app.post('/api/circles/create', asyncRoute(async (req, res) => {
 }));
 // membership status for every circle this instance points at — the "who's in it, who's
 // new" feed. A member's instance calls this; additions since last look = the alert.
+// self-service exit: drop this instance's pointer to a circle (after being removed, or
+// by choice). Data safety: the local/own-sheet copy from before joining is still there;
+// for joint-state widgets the last-synced local cache remains until next write.
+app.post('/api/circles/detach', asyncRoute(async (req, res) => {
+  const w = String((req.body || {}).widget || '');
+  const st = loadSettings();
+  if (!(st.jointSheets || {})[w]) return res.status(404).json({ error: 'no such circle pointer' });
+  const joint = { ...st.jointSheets }; delete joint[w];
+  await saveSettings({ ...st, jointSheets: joint });
+  res.json({ ok: true, detached: w });
+}));
 app.get('/api/circles/status', asyncRoute(async (req, res) => {
   const joint = loadSettings().jointSheets || {};
   const out = [];
