@@ -321,6 +321,76 @@ async function gmailConsentReturn(req, res) {
 }
 app.get('/auth/gmail/disconnect', (req, res) => { try { fs.unlinkSync(GMAIL_TOKEN_FILE); } catch (e) {} res.redirect('/'); });
 
+// ---------- Gmail for the heartbeat (Stage C draft / Stage D triage) ----------
+// The headless `claude -p` has NO Gmail/Calendar MCP (only google-sheets is configured), so
+// Stages C and D were skipped every run for weeks. They never needed MCP: this instance's
+// own OAuth grant already carries gmail.readonly AND gmail.compose. These three endpoints
+// expose exactly that much and nothing more.
+// ⚠ NEVER-SEND IS STRUCTURAL: the only write path below is drafts.create. There is no call
+// to messages.send or drafts.send anywhere in this block, so no prompt, jailbreak, or agent
+// mistake can send mail — the capability simply is not wired. Keep it that way.
+const gmailApi = async () => { const auth = await gmailAuthClient(); return auth ? google.gmail({ version: 'v1', auth }) : null; };
+const hdr = (payload, name) => ((payload && payload.headers) || []).find(h => h.name.toLowerCase() === name.toLowerCase())?.value || '';
+function gmailPlainText(payload) { // flatten MIME, prefer text/plain, fall back to stripped HTML
+  const flat = []; (function walk(p) { if (!p) return; flat.push(p); (p.parts || []).forEach(walk); })(payload);
+  const dec = b => b ? Buffer.from(b, 'base64').toString('utf8') : '';
+  const plain = flat.filter(x => x.mimeType === 'text/plain').map(x => dec(x.body?.data)).join('\n');
+  if (plain.trim().length > 40) return plain;
+  return flat.filter(x => x.mimeType === 'text/html').map(x => dec(x.body?.data)).join('\n')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ');
+}
+app.get('/api/gmail/threads', asyncRoute(async (req, res) => {
+  const gmail = await gmailApi();
+  if (!gmail) return res.status(400).json({ error: 'Gmail not connected — /auth/gmail/connect' });
+  const q = String(req.query.q || '(is:starred OR is:important) in:inbox newer_than:21d').slice(0, 300);
+  const maxResults = Math.min(50, Math.max(1, parseInt(req.query.max, 10) || 20));
+  const list = await gmail.users.threads.list({ userId: 'me', q, maxResults });
+  const out = [];
+  for (const t of (list.data.threads || [])) {
+    try {
+      const full = await gmail.users.threads.get({ userId: 'me', id: t.id, format: 'metadata',
+        metadataHeaders: ['Subject', 'From', 'To', 'Date'] });
+      const msgs = full.data.messages || [];
+      const last = msgs[msgs.length - 1] || {};
+      out.push({ id: t.id, messages: msgs.length, snippet: t.snippet || last.snippet || '',
+        subject: hdr(last.payload, 'Subject'), from: hdr(last.payload, 'From'),
+        to: hdr(last.payload, 'To'), date: hdr(last.payload, 'Date'),
+        unread: (last.labelIds || []).includes('UNREAD') });
+    } catch (e) { /* one bad thread never sinks the list */ }
+  }
+  res.json({ query: q, threads: out });
+}));
+app.get('/api/gmail/thread/:id', asyncRoute(async (req, res) => {
+  const gmail = await gmailApi();
+  if (!gmail) return res.status(400).json({ error: 'Gmail not connected' });
+  const full = await gmail.users.threads.get({ userId: 'me', id: req.params.id, format: 'full' }).catch(() => null);
+  if (!full) return res.status(404).json({ error: 'thread not found' });
+  res.json({ id: req.params.id, messages: (full.data.messages || []).map(m => ({
+    id: m.id, from: hdr(m.payload, 'From'), to: hdr(m.payload, 'To'), cc: hdr(m.payload, 'Cc'),
+    subject: hdr(m.payload, 'Subject'), date: hdr(m.payload, 'Date'),
+    body: gmailPlainText(m.payload).slice(0, 6000),
+  })) });
+}));
+app.post('/api/gmail/draft', asyncRoute(async (req, res) => {
+  const gmail = await gmailApi();
+  if (!gmail) return res.status(400).json({ error: 'Gmail not connected' });
+  const { to, subject, body, threadId, cc } = req.body || {};
+  if (!subject && !body) return res.status(400).json({ error: 'subject or body required' });
+  const enc = t => `=?UTF-8?B?${Buffer.from(String(t || ''), 'utf8').toString('base64')}?=`; // RFC2047 for non-ASCII
+  const lines = [
+    `To: ${String(to || '').slice(0, 300)}`,
+    ...(cc ? [`Cc: ${String(cc).slice(0, 300)}`] : []),
+    `Subject: ${enc(subject || '')}`,
+    'MIME-Version: 1.0', 'Content-Type: text/plain; charset="UTF-8"', '',
+    String(body || ''),
+  ];
+  const raw = Buffer.from(lines.join('\r\n'), 'utf8').toString('base64url');
+  // drafts.create ONLY — see the never-send note above
+  const d = await gmail.users.drafts.create({ userId: 'me', requestBody: { message: { raw, ...(threadId ? { threadId } : {}) } } });
+  track('gmail-draft', true, `draft for ${String(to || '(blank)').slice(0, 40)}`);
+  res.json({ ok: true, draftId: d.data.id, note: 'draft created — never sent' });
+}));
+
 // ---------- native-app support: widget tokens + push registration (iOS/watch) ----------
 // WidgetKit timelines and watch complications fetch WITHOUT cookies: a scoped, revocable,
 // READ-ONLY token (minted by the signed-in owner, stored in settings) unlocks exactly the
@@ -2049,6 +2119,8 @@ const SIGNAL_BY_KIND = {
   job_comment: 0, // freeform note typed on the /jobs board — add-job requests, new categories,
   // search steering; consumed by the daily search agent and the nightly CI, not a vote
   job_maybe: 0.5, // parked in the Maybe section — deferred interest, mildly positive
+  job_rejected: 0, // application outcome, not a preference — CI learns which applications convert
+  job_closed: 0, // posting died / link dead — housekeeping, carries NO taste information
 };
 // Shared writer: Mac appends to the CI's JSONL directly; stateless tiers queue on the
 // Feedback Queue tab for the heartbeat to drain (identical semantics to /api/feedback).

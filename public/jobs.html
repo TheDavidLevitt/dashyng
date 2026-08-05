@@ -39,11 +39,12 @@ a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
 .meta b{font-weight:600;color:var(--text)}
 .meta .est,.meta .est b{color:var(--est)} /* purple = LLM-estimated, not stated in the listing */
 .meta .soon b{color:var(--red)}
-.acts{display:flex;flex-direction:column;gap:4px;flex:none}
+.acts{display:grid;grid-template-columns:1fr 1fr;gap:4px;flex:none;align-content:start}
 .ib{background:var(--card2);color:var(--text2);border:1px solid var(--border);border-radius:5px;font-size:12px;line-height:1;padding:4px 6px;cursor:pointer}
 .ib:hover{color:var(--text)}
 .ib.star{font-size:13px}
-.ib.star.on{color:#e9b949;border-color:#e9b949}
+.ib.star2{font-size:10px;letter-spacing:-1px}
+.ib.star.on,.ib.star2.on{color:#e9b949;border-color:#e9b949}
 .empty{color:var(--text3);padding:18px 4px}
 .err{color:var(--red);padding:8px 0}
 #toast{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);background:var(--card2);border:1px solid var(--border);color:var(--text);
@@ -55,6 +56,7 @@ a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
 <p style="margin:0"><a href="/">← dashboard</a> <button id="theme-btn"></button></p>
 <h1>Job Openings</h1>
 <div class="tiny" id="updated">Loading…</div>
+<div id="catnav" style="display:flex;gap:6px;flex-wrap:wrap;margin:6px 0 8px"></div>
 <div id="fav-wrap" style="display:none" class="cat"><h2 style="cursor:default;color:#e9b949">★ Favorites <span class="n" id="fav-n"></span></h2><div id="fav-list"></div></div>
 <div id="board"><div class="empty">Loading openings…</div></div>
 <div id="applied-wrap" style="display:none" class="cat"><h2 style="cursor:default">Applications submitted <span class="n" id="applied-n"></span></h2><div id="applied-list"></div></div>
@@ -69,8 +71,8 @@ a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
 <div class="tiny" id="ci-status" style="margin-top:3px">read by the daily search agent (09:00) and the nightly CI — job links get added, categories get searched, feedback reshapes the ranking</div>
 </div>
 <div class="legend tiny">
-  drag ≡ to re-rank (higher = more like this) · swipe ← or ✕ = remove (not interested) · ☆→★→★★ = favorite / favorite-favorite (★★ top of Favorites; ★ in click order) · 🤔 = park in Maybe below · ☑ = application completed → moves to the log below<br>
-  <span style="color:var(--est)">purple values are LLM estimates</span> — not stated in the listing · <span class="hotchip" style="vertical-align:0">⚡ AI-CO ENERGY</span> = energy-team role at an AI/compute company · <span class="newchip" style="vertical-align:0">NEW</span> = since your last visit, and always for 24h · refreshed daily by the search agent (Sonnet)
+  drag ≡ to re-rank (higher = more like this) · swipe ← or ✕ = remove (not interested, −1 signal) · ★ / ★★ = favorite / favorite-favorite (★★ top; ★ in click order) · 🤔 = park in Maybe · ∅ = job closed / link dead (retires with NO signal) · ☑ = application completed → moves to the log below<br>
+  <span style="color:var(--est)">purple values are LLM estimates</span> — not stated in the listing · 🎯 <span style="color:var(--green)">green fit</span> = vs the posting's stated requirements, <span style="color:var(--accent)">blue fit</span> = vs inferred requirements (required-weighted; fit ≠ odds — hot roles draw hot fields) · <span class="hotchip" style="vertical-align:0">⚡ AI-CO ENERGY</span> = energy-team role at an AI/compute company · <span class="newchip" style="vertical-align:0">NEW</span> = since your last visit, and always for 24h · refreshed daily by the search agent (Sonnet)
   · <a id="show-removed" style="cursor:pointer"></a>
 </div>
 <div id="toast"></div>
@@ -93,7 +95,7 @@ const NEW_CUTOFF = Math.min(_stamp, Date.now() - 24 * 3600e3);
 const isNew = j => (Date.parse(j.created || '') || 0) > NEW_CUTOFF;
 // stable category order — derived-from-data ordering made sections swap places on every
 // star/remove (owner bug report 2026-07-28); unknown categories append alphabetically
-const CAT_ORDER = ['Data center power development', 'AI application', 'AI-first energy & mining',
+const CAT_ORDER = ['Chemistry + ML', 'Data center power development', 'AI application', 'AI-first energy & mining',
   'Energy software & AI-for-energy', 'Data-center BD at energy companies',
   'TotalEnergies internal', 'France / Pau', 'International institutions'];
 const catRank = c => { const i = CAT_ORDER.indexOf(c); return i === -1 ? 99 : i; };
@@ -115,6 +117,11 @@ const agoStr = d => { const t = Date.parse(d); if (isNaN(t)) return d; const day
 function metaHtml(j) {
   const isEst = f => j.est.includes(f);
   const parts = [];
+  // fit% — green = scored vs the posting's STATED requirements; blue = requirements
+  // INFERRED from training knowledge (posting didn't state them). Owner convention 2026-08-03.
+  if (j.fit) parts.push(j.fitInferred
+    ? `<span style="color:var(--accent)" title="CV fit vs INFERRED requirements — the posting didn't state them">🎯 <b style="color:var(--accent)">${esc(String(j.fit))}% fit</b></span>`
+    : `<span style="color:var(--green)" title="CV fit vs the posting's stated required + desirable skills (required-weighted)">🎯 <b style="color:var(--green)">${esc(String(j.fit))}% fit</b></span>`);
   if (j.location) parts.push(`<span>📍 <b>${esc(j.location)}</b></span>`);
   if (j.remote !== '') parts.push(`<span class="${isEst('remote') ? 'est' : ''}" title="${isEst('remote') ? 'LLM estimate' : 'stated'}">🏠 <b>${esc(String(j.remote).replace(/%?$/, '%'))} remote</b></span>`);
   if (j.salary) parts.push(`<span class="${isEst('salary') ? 'est' : ''}" title="${isEst('salary') ? 'LLM estimate' : 'stated'}">💰 <b>${esc(j.salary)}</b></span>`);
@@ -128,13 +135,13 @@ function metaHtml(j) {
 
 let showRemoved = false;
 function renderRemoved() {
-  const removed = jobs.filter(j => j.status === 'removed');
+  const removed = jobs.filter(j => j.status === 'removed' || j.status === 'closed');
   const link = $('show-removed');
-  link.textContent = removed.length ? (showRemoved ? 'hide removed' : `show removed (${removed.length})`) : '';
+  link.textContent = removed.length ? (showRemoved ? 'hide removed' : `show removed/closed (${removed.length})`) : '';
   link.onclick = () => { showRemoved = !showRemoved; renderRemoved(); };
   $('removed-wrap').style.display = showRemoved && removed.length ? '' : 'none';
   $('removed-list').innerHTML = removed.map(j => `<div class="job" style="opacity:.7" data-id="${esc(j.id)}">
-    <div class="body"><div class="title">${esc(j.title)}</div>
+    <div class="body"><div class="title">${esc(j.title)}${j.status === 'closed' ? ' <span class="tiny">∅ closed</span>' : ''}</div>
     <div class="co">${esc(j.company)}<span class="tiny"> · ${esc(j.category)}</span></div></div>
     <div class="acts"><button class="ib restore" title="restore to the board">↩︎</button></div></div>`).join('');
   $('removed-list').querySelectorAll('.restore').forEach(b => b.onclick = () => {
@@ -145,20 +152,32 @@ function renderRemoved() {
   });
 }
 function renderApplied() {
-  const applied = jobs.filter(j => j.status === 'applied')
-    .sort((a, b) => String(b.updated || '').localeCompare(String(a.updated || '')));
+  const applied = jobs.filter(j => j.status === 'applied' || j.status === 'rejected')
+    .sort((a, b) => (a.status === 'rejected') - (b.status === 'rejected') // rejected sink to the bottom of the log
+      || String(b.updated || '').localeCompare(String(a.updated || '')));
+  const live = applied.filter(j => j.status === 'applied').length;
+  const rej = applied.length - live;
   $('applied-wrap').style.display = applied.length ? '' : 'none';
-  $('applied-n').textContent = applied.length ? `· ${applied.length}` : '';
-  $('applied-list').innerHTML = applied.map(j => `<div class="job ${j.flags.includes('hot') ? 'hot' : ''}" data-id="${esc(j.id)}" style="touch-action:auto">
-    <input type="checkbox" class="chk unapply" title="un-mark — return to the board" checked>
+  $('applied-n').textContent = applied.length ? `· ${live}${rej ? ` · ${rej} rejected` : ''}` : '';
+  $('applied-list').innerHTML = applied.map(j => { const R = j.status === 'rejected'; return `<div class="job ${j.flags.includes('hot') ? 'hot' : ''}" data-id="${esc(j.id)}" style="touch-action:auto${R ? ';opacity:.55' : ''}">
+    <input type="checkbox" class="chk unapply" title="un-mark — return to the board" ${R ? 'disabled' : 'checked'}>
     <div class="body">
-      <div class="title">${j.url ? `<a href="${esc(j.url)}" target="_blank" rel="noopener">${esc(j.title)}</a>` : esc(j.title)}${j.flags.includes('hot') ? '<span class="hotchip">⚡ AI-CO ENERGY</span>' : ''}</div>
-      <div class="co">${esc(j.company)}<span class="tiny"> · ${esc(j.category)} · applied ${esc((j.updated || '').slice(0, 10))}</span></div>
-    </div></div>`).join('');
+      <div class="title">${j.url ? `<a href="${esc(j.url)}" target="_blank" rel="noopener">${esc(j.title)}</a>` : esc(j.title)}${R ? '<span class="newchip" style="color:var(--red);border-color:color-mix(in srgb,var(--red) 55%,transparent)">REJECTED</span>' : ''}${j.flags.includes('hot') ? '<span class="hotchip">⚡ AI-CO ENERGY</span>' : ''}</div>
+      <div class="co">${esc(j.company)}<span class="tiny"> · ${esc(j.category)} · ${R ? 'rejected' : 'applied'} ${esc((j.updated || '').slice(0, 10))}</span></div>
+    </div>
+    <div class="acts"><button class="ib rej" title="${R ? 'un-mark rejection (back to applied)' : 'mark application rejected'}">${R ? '↩︎' : '⊘'}</button></div></div>`; }).join('');
   $('applied-list').querySelectorAll('.unapply').forEach(c => c.onchange = () => {
     const j = jobs.find(x => x.id === c.closest('.job').dataset.id);
     j.status = 'open'; render();
     api(`/api/jobs/${encodeURIComponent(j.id)}/applied`, { body: { applied: false } });
+  });
+  $('applied-list').querySelectorAll('.rej').forEach(b => b.onclick = () => {
+    const j = jobs.find(x => x.id === b.closest('.job').dataset.id);
+    const rejecting = j.status !== 'rejected';
+    j.status = rejecting ? 'rejected' : 'applied';
+    render();
+    api(`/api/jobs/${encodeURIComponent(j.id)}/rejected`, { body: { rejected: rejecting } });
+    if (rejecting) toast(`⊘ marked rejected: ${j.title}`);
   });
 }
 const isFav = j => (j.fav || 0) > 0;
@@ -191,10 +210,25 @@ function renderInner() {
   board.innerHTML = cats.map(cat => {
     const list = rest.filter(j => j.category === cat).sort((a, b) => (a.rank || 1e9) - (b.rank || 1e9));
     const closed = closedCats.has(cat);
-    return `<div class="cat ${closed ? 'closed' : ''}" data-cat="${esc(cat)}">
-      <h2>${closed ? '▸' : '▾'} ${esc(cat)} <span class="n">· ${list.length}</span></h2>
+    const nNew = list.filter(isNew).length;
+    return `<div class="cat ${closed ? 'closed' : ''}" data-cat="${esc(cat)}" id="cat-${encodeURIComponent(cat).replace(/%/g, '')}">
+      <h2>${closed ? '▸' : '▾'} ${esc(cat)} <span class="n">· ${list.length}${nNew ? ` <b style="color:var(--green)">+${nNew} new</b>` : ''}</span></h2>
       <div class="jobs">${list.map(j => cardHtml(j, false)).join('')}</div></div>`;
   }).join('');
+  // top nav: one chip per section — "X new / Y total", click scrolls there
+  $('catnav').innerHTML = cats.map(cat => {
+    const list = rest.filter(j => j.category === cat);
+    const nNew = list.filter(isNew).length;
+    return `<a href="#" data-nav="${esc(cat)}" style="text-decoration:none;background:var(--card);border:1px solid var(--border);border-radius:12px;padding:2px 9px;font-size:11px;color:var(--text)">${esc(cat)} <b style="color:${nNew ? 'var(--green)' : 'var(--text3)'}">${nNew} new</b> <span style="color:var(--text3)">/ ${list.length}</span></a>`;
+  }).join('');
+  $('catnav').querySelectorAll('[data-nav]').forEach(a => a.onclick = e => {
+    e.preventDefault();
+    const sec = board.querySelector(`.cat[data-cat="${CSS.escape(a.dataset.nav)}"]`);
+    if (!sec) return;
+    sec.classList.remove('closed'); const h2 = sec.querySelector('h2');
+    if (h2 && h2.textContent.startsWith('▸')) h2.firstChild.textContent = h2.firstChild.textContent.replace('▸', '▾');
+    sec.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
   bind();
 }
 function renderMaybe() {
@@ -227,8 +261,6 @@ function renderMaybe() {
 
 function cardHtml(j, fav) {
   const hot = j.flags.includes('hot');
-  const starGlyph = j.fav === 2 ? '★★' : j.fav === 1 ? '★' : '☆';
-  const starTitle = j.fav === 2 ? 'un-star' : j.fav === 1 ? 'again = ★★ favorite-favorite (top of favorites)' : 'favorite — pins to top + more like this';
   return `<div class="job ${hot ? 'hot' : ''} ${isNew(j) ? 'new' : ''}" data-id="${esc(j.id)}">
     ${fav ? '' : '<span class="handle" title="drag to re-rank">≡</span>'}
     <input type="checkbox" class="chk" title="application completed">
@@ -238,9 +270,11 @@ function cardHtml(j, fav) {
       <div class="meta">${metaHtml(j)}</div>
     </div>
     <div class="acts">
-      <button class="ib star ${j.fav ? 'on' : ''}" title="${starTitle}">${starGlyph}</button>
+      <button class="ib star ${j.fav === 1 ? 'on' : ''}" title="${j.fav === 1 ? 'un-favorite' : 'favorite — pins to top + more like this'}">★</button>
+      <button class="ib star2 ${j.fav === 2 ? 'on' : ''}" title="${j.fav === 2 ? 'demote to ★' : 'favorite-favorite — very top'}">★★</button>
       <button class="ib mb" title="maybe — park in the Maybe section below">🤔</button>
-      <button class="ib rm" title="remove — not interested">✕</button>
+      <button class="ib cl" title="job closed / link dead — retire with NO taste signal">∅</button>
+      <button class="ib rm" title="remove — not interested (downweights similar roles)">✕</button>
     </div></div>`;
 }
 
@@ -266,15 +300,22 @@ function bind() {
   document.querySelectorAll('#board .job, #fav-list .job').forEach(card => {
     const j = jobOf(card);
     card.querySelector('.rm').onclick = () => removeJob(card, false);
-    card.querySelector('.star').onclick = () => {
-      const level = ((j.fav || 0) + 1) % 3; // ☆ → ★ → ★★ → ☆
+    const setStar = level => {
       j.fav = level;
-      if (level === 1 && !j.favAt) j.favAt = Date.now(); // chronology = first star click
-      if (level === 0) j.favAt = 0;
+      if (level && !j.favAt) j.favAt = Date.now(); // chronology = first star click
+      if (!level) j.favAt = 0;
       render();
       api(`/api/jobs/${encodeURIComponent(j.id)}/star`, { body: { level } });
       if (level === 1) toast(`★ favorited — noted as more like "${j.title}"`);
       if (level === 2) toast(`★★ favorite-favorite — pinned to the very top`);
+    };
+    card.querySelector('.star').onclick = () => setStar(j.fav === 1 ? 0 : 1);
+    card.querySelector('.star2').onclick = () => setStar(j.fav === 2 ? 1 : 2);
+    card.querySelector('.cl').onclick = () => {
+      j.status = 'closed';
+      render();
+      api(`/api/jobs/${encodeURIComponent(j.id)}/closed`, { body: { closed: true } });
+      toast(`∅ retired (no taste signal): ${j.title}`, () => { j.status = 'open'; render(); api(`/api/jobs/${encodeURIComponent(j.id)}/closed`, { body: { closed: false } }); });
     };
     card.querySelector('.mb').onclick = () => {
       j.status = 'maybe';

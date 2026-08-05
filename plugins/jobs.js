@@ -23,7 +23,7 @@ module.exports = {
     // Est = comma-list of LLM-ESTIMATED field names (remote,salary,deadline,posted) — the UI
     // renders those values in purple to keep estimates visually distinct from stated facts.
     const JOBS_TAB = 'Jobs';
-    const JOBS_HEADERS = ['Title', 'URL', 'Company', 'CompanyURL', 'Category', 'Location', 'Remote', 'Salary', 'Deadline', 'Posted', 'Est', 'Status', 'Rank', 'Notes', 'Source', 'Created', 'Updated', 'ID', 'Flags'];
+    const JOBS_HEADERS = ['Title', 'URL', 'Company', 'CompanyURL', 'Category', 'Location', 'Remote', 'Salary', 'Deadline', 'Posted', 'Est', 'Status', 'Rank', 'Notes', 'Source', 'Created', 'Updated', 'ID', 'Flags', 'Fit'];
     // hint a stable subset so optional new columns (Flags) never break reads of an older tab
     const JOBS_HINT = ['Title', 'Company', 'Status', 'ID'];
     const readJobsTab = () => readTab(SHEET_ID, JOBS_TAB, JOBS_HINT);
@@ -34,6 +34,12 @@ module.exports = {
       est: String(r.Est || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean),
       status: r.Status || 'open', rank: parseFloat(r.Rank) || 0,
       notes: r.Notes, source: r.Source, created: r.Created, updated: r.Updated,
+      // Fit: LLM-estimated %-match of the owner's CV vs the posting (required-weighted).
+      // A trailing 'i' (e.g. '64i') means the requirements were INFERRED from training
+      // knowledge because the posting didn't state them — the UI renders green (stated)
+      // vs blue (inferred).
+      fit: parseInt(r.Fit) || 0,
+      fitInferred: /i\s*$/i.test(String(r.Fit || '')),
       // flags: csv of UI markers; 'hot' = energy-team role AT an AI/compute company (labs,
       // hyperscalers, GPU clouds, DC operators) — rendered prominently on the board
       flags: String(r.Flags || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean),
@@ -52,7 +58,7 @@ module.exports = {
       try { rows = (await readJobsTab()).rows; }
       catch (e) { if (!/Header row not found|Unable to parse range/i.test(e.message)) throw e; } // tab not created yet = empty board
       const all = String(req.query.all || '') === '1'; // agent dedup wants removed rows too
-      const jobs = rows.map(jobOut).filter(j => all || j.status !== 'removed')
+      const jobs = rows.map(jobOut).filter(j => all || (j.status !== 'removed' && j.status !== 'closed'))
         .sort((a, b) => (a.rank || 1e9) - (b.rank || 1e9));
       res.json({ jobs });
     }));
@@ -68,7 +74,19 @@ module.exports = {
       const norm = s => String(s || '').trim().toLowerCase().replace(/\/+$/, '');
       const dup = existing.find(r => (b.url && norm(r.URL) === norm(b.url))
         || (norm(r.Title) === norm(b.title) && norm(r.Company) === norm(b.company)));
-      if (dup) return res.json({ ok: true, deduped: true, id: dup.ID });
+      if (dup) {
+        // a role the owner marked CLOSED reposting under a fresh URL is good news, not a
+        // duplicate — revive the row in place (NRG-repost pattern). Removed rows stay dead.
+        if (dup.Status === 'closed' && b.url && norm(dup.URL) !== norm(b.url)) {
+          await updateJobById(dup.ID, {
+            URL: b.url, Status: 'open',
+            Notes: `reposted ${nowIso().slice(0, 10)} — ` + String(dup.Notes || '').replace(/^⚠[^—]*— */, ''),
+            ...(b.fit !== undefined ? { Fit: String(b.fit) } : {}),
+          });
+          return res.json({ ok: true, revived: true, id: dup.ID });
+        }
+        return res.json({ ok: true, deduped: true, id: dup.ID });
+      }
       const id = crypto.randomUUID();
       const est = Array.isArray(b.est) ? b.est.join(',') : String(b.est || '');
       const flags = Array.isArray(b.flags) ? b.flags.join(',') : String(b.flags || '');
@@ -80,6 +98,7 @@ module.exports = {
         b.title, b.url || '', b.company, b.companyUrl || '', b.category || '', b.location || '',
         b.remote || '', b.salary || '', b.deadline || '', b.posted || '', est,
         'open', String(rank), b.notes || '', b.source || WRITE_SOURCE, nowIso(), nowIso(), id, flags,
+        b.fit !== undefined ? String(b.fit) : '',
       ]);
       res.json({ ok: true, id });
     }));
@@ -98,7 +117,7 @@ module.exports = {
     }
     
     app.patch('/api/jobs/:id', asyncRoute(async (req, res) => {
-      const allowed = ['Title', 'URL', 'Company', 'CompanyURL', 'Category', 'Location', 'Remote', 'Salary', 'Deadline', 'Posted', 'Est', 'Status', 'Rank', 'Notes', 'Flags'];
+      const allowed = ['Title', 'URL', 'Company', 'CompanyURL', 'Category', 'Location', 'Remote', 'Salary', 'Deadline', 'Posted', 'Est', 'Status', 'Rank', 'Notes', 'Flags', 'Fit'];
       const changes = {};
       for (const [k, v] of Object.entries(req.body || {})) {
         const f = allowed.find(a => a.toLowerCase() === k.toLowerCase());
@@ -127,6 +146,17 @@ module.exports = {
       res.json({ ok: true });
     }));
     
+    // ⊘ rejected — application OUTCOME on an applied role (stays in the applications log,
+    // dimmed). Toggling back to applied is silent; rejecting emits a zero-weight outcome
+    // signal so the CI can track which application lanes convert.
+    app.post('/api/jobs/:id/rejected', asyncRoute(async (req, res) => {
+      const rejected = req.body?.rejected !== false;
+      const updated = await updateJobById(req.params.id, { Status: rejected ? 'rejected' : 'applied' });
+      if (!updated) return res.status(404).json({ error: 'job not found' });
+      if (rejected) await jobFeedback('job_rejected', updated, 'application rejected');
+      res.json({ ok: true });
+    }));
+
     // 👍 — strong "more like this" (legacy button; the board now uses /star below)
     app.post('/api/jobs/:id/up', asyncRoute(async (req, res) => {
       const { rows } = await readJobsTab();
@@ -157,6 +187,17 @@ module.exports = {
       res.json({ ok: true, flags: rest });
     }));
     
+    // ∅ closed — the POSTING died (link dead / req filled): retire the row with ZERO
+    // taste signal (job_closed is bookkeeping, not preference — unlike swipe-remove's -1).
+    // Kept as its own status so a fresh posting of the same role can auto-revive the row.
+    app.post('/api/jobs/:id/closed', asyncRoute(async (req, res) => {
+      const closed = req.body?.closed !== false;
+      const updated = await updateJobById(req.params.id, { Status: closed ? 'closed' : 'open' });
+      if (!updated) return res.status(404).json({ error: 'job not found' });
+      if (closed) await jobFeedback('job_closed', updated, 'link dead / job closed');
+      res.json({ ok: true });
+    }));
+
     // 🤔 maybe — park the role in the board's collapsed Maybe section (deferred, mildly
     // positive signal when parking; un-parking is silent)
     app.post('/api/jobs/:id/maybe', asyncRoute(async (req, res) => {
