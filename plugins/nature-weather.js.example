@@ -116,6 +116,158 @@ async function surfFor(locName, store, ctx) {
   }
   return out;
 }
+// —— Louet escalation watch (owner spec 2026-08-05) ——
+// Hourly (Mac tier only): fetch the live gauge + latest quality panel, append to a local
+// history file (14 days kept), and escalate:
+//   medium (agent brief ⚠️): |flow Δ24h| > 50%, or a NEW quality reading > 2σ from its
+//     recent trend (>30% absolute change when <4 samples exist for σ);
+//   high (Signal via the Urgent Queue tab — your messenger agent delivers): flow Δ24h ≥ +100%.
+// The moulin has a canal and a cours d'eau: a doubling of flow is a flood indicator.
+// Every escalation appends to data/louet-escalations.jsonl; cooldowns stop re-fires
+// (medium 12h per measurement, high 12h) while a condition persists.
+const LHIST = path.join(__dirname, '..', 'data', 'louet-history.json');
+const LESC = path.join(__dirname, '..', 'data', 'louet-escalations.jsonl');
+const lread = () => { try { return JSON.parse(fs.readFileSync(LHIST, 'utf8')); } catch (e) { return { readings: [], lastAlert: {} }; } };
+const lwrite = h => { try { fs.writeFileSync(LHIST, JSON.stringify(h)); } catch (e) {} };
+const lesc = e => { try { fs.appendFileSync(LESC, JSON.stringify({ at: new Date().toISOString(), ...e }) + '\n'); } catch (e2) {} };
+let louetBriefAlerts = []; // consumed by briefItems(); refreshed each check
+
+// —— flow-series cache: 13+ months of daily means, incremental refresh ——
+// Page loads NEVER hit Hub'Eau: /api/louet/series serves this cache instantly and kicks a
+// background refresh when it is >6h old. Refresh fetches only from the last cached date
+// (minus 2 days — the elaborated series revises recent values), merges, trims to 420 days.
+const LFLOW = path.join(__dirname, '..', 'data', 'louet-flow-cache.json');
+const lfRead = () => { try { return JSON.parse(fs.readFileSync(LFLOW, 'utf8')); } catch (e) { return { updatedAt: 0, daily: [] }; } };
+let lfRefreshing = false;
+async function louetFlowRefresh() {
+  if (lfRefreshing) return; lfRefreshing = true;
+  try {
+    const c = lfRead();
+    const last = c.daily.length ? c.daily[c.daily.length - 1].date : null;
+    const from = last ? new Date(Date.parse(last) - 2 * 864e5) : new Date(Date.now() - 400 * 864e5);
+    const since = from.toISOString().slice(0, 10);
+    // ~400 daily rows max — one page (API caps size at 20000; sort param is IGNORED, series arrives date-ASC)
+    const dj = await getJson(`${HUBEAU}/v2/hydrometrie/obs_elab?code_entite=${FLOW_STATION}&grandeur_hydro_elab=QmnJ&date_debut_obs_elab=${since}&size=500`);
+    const fresh = ((dj && dj.data) || []).filter(o => o.resultat_obs_elab != null)
+      .map(o => ({ date: o.date_obs_elab.slice(0, 10), m3s: o.resultat_obs_elab / 1000 }));
+    if (fresh.length) {
+      const map = new Map(c.daily.map(d => [d.date, d.m3s]));
+      for (const f of fresh) map.set(f.date, f.m3s); // fresh wins (revisions)
+      const merged = [...map.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([date, m3s]) => ({ date, m3s }));
+      const cutoff = new Date(Date.now() - 420 * 864e5).toISOString().slice(0, 10);
+      fs.writeFileSync(LFLOW, JSON.stringify({ updatedAt: Date.now(), daily: merged.filter(d => d.date >= cutoff) }));
+    } else if (c.daily.length) { // source empty/unreachable — stamp the attempt, keep data
+      fs.writeFileSync(LFLOW, JSON.stringify({ ...c, updatedAt: Date.now() }));
+    }
+  } catch (e) {} finally { lfRefreshing = false; }
+}
+
+async function louetCheck(ctx) {
+  if (process.env.DASHBOARD_NO_JOBS) return; // one watcher (the Mac), not one per tier
+  const h = lread();
+  const now = Date.now();
+  // live flow + last-30d daily means (baseline + day-one 24h comparison)
+  const tr = await getJson(`${HUBEAU}/v2/hydrometrie/observations_tr?code_entite=${FLOW_STATION}&grandeur_hydro=Q&size=1&sort=desc`);
+  const cur = tr && tr.data && tr.data[0] ? tr.data[0].resultat_obs / 1000 : null;
+  const since = new Date(now - 30 * 864e5).toISOString().slice(0, 10);
+  const dj = await getJson(`${HUBEAU}/v2/hydrometrie/obs_elab?code_entite=${FLOW_STATION}&grandeur_hydro_elab=QmnJ&date_debut_obs_elab=${since}&size=40&sort=desc`);
+  const daily = ((dj && dj.data) || []).filter(o => o.resultat_obs_elab != null)
+    .map(o => ({ date: o.date_obs_elab, m3s: o.resultat_obs_elab / 1000 }));
+  const qj = await getJson(`${HUBEAU}/v2/qualite_rivieres/analyse_pc?code_station=${Q_STATION}&size=200&sort=desc&fields=date_prelevement,libelle_parametre,resultat,symbole_unite`);
+  const qlatest = {};
+  for (const a of ((qj && qj.data) || [])) {
+    const p = a.libelle_parametre, dd = a.date_prelevement;
+    if (a.resultat != null && (!qlatest[p] || dd > qlatest[p].date)) qlatest[p] = { date: dd, value: +a.resultat, unit: a.symbole_unite || '' };
+  }
+  // append + trim history
+  h.readings.push({ at: now, m3s: cur, q: qlatest });
+  h.readings = h.readings.filter(r => now - r.at < 14 * 864e5);
+  const alerts = [];
+  const fire = (key, level, text, detail) => {
+    const last = h.lastAlert[key] || 0;
+    if (now - last < 12 * 3600e3) return; // cooldown
+    h.lastAlert[key] = now;
+    alerts.push({ key, level, text });
+    lesc({ key, level, text, ...detail });
+  };
+  // ---- flow Δ24h: the reference is Hub'Eau's OWN realtime observation ~24h ago —
+  // instantaneous vs instantaneous, from the same gauge series (the station keeps weeks
+  // of points, so this works from day one). First implementation compared the live value
+  // against a daily MEAN, which both mislabels the window and over-triggers on spiky
+  // small-river data (2026-08-09). Own-history and fresh-daily remain as fallbacks only.
+  if (cur != null) {
+    const target = now - 24 * 3600e3;
+    let ref = null, refSrc = '';
+    try {
+      const sinceIso = new Date(now - 26 * 3600e3).toISOString().slice(0, 19) + 'Z';
+      const rt = await getJson(`${HUBEAU}/v2/hydrometrie/observations_tr?code_entite=${FLOW_STATION}&grandeur_hydro=Q&date_debut_obs=${sinceIso}&size=300&sort=asc`);
+      const pts = ((rt && rt.data) || []).filter(o => o.resultat_obs != null)
+        .map(o => ({ at: Date.parse(o.date_obs), m3s: o.resultat_obs / 1000 }));
+      const near = pts.filter(p2 => Math.abs(p2.at - target) < 3 * 3600e3)
+        .sort((a, b) => Math.abs(a.at - target) - Math.abs(b.at - target))[0];
+      if (near) { ref = near.m3s; refSrc = `gauge ${new Date(near.at).toISOString().slice(0, 16)}Z`; }
+    } catch (e) {}
+    if (ref == null) {
+      const cands = h.readings.filter(r => r.m3s != null && Math.abs(r.at - target) < 4 * 3600e3);
+      if (cands.length) { ref = cands.sort((a, b) => Math.abs(a.at - target) - Math.abs(b.at - target))[0].m3s; refSrc = 'own sample 24h ago'; }
+    }
+    if (ref == null && daily.length) { // latest FRESH daily (series is date-ASC; lags at times)
+      const fresh = daily.filter(d => Date.parse(d.date) > now - 3 * 864e5).pop();
+      if (fresh) { ref = fresh.m3s; refSrc = `daily mean ${fresh.date}`; }
+    }
+    const avg7 = daily.slice(0, 7).length ? daily.slice(0, 7).reduce((a, b) => a + b.m3s, 0) / daily.slice(0, 7).length : null;
+    if (ref != null && ref > 0) {
+      const pct = ((cur - ref) / ref) * 100;
+      const ctxTxt = `${ref.toFixed(2)}→${cur.toFixed(2)} m³/s` + (avg7 ? ` (moy 7j ${avg7.toFixed(2)})` : '');
+      // Neutral, factual labels only (owner rule 2026-08-09): data + % change, no alarm words.
+      if (pct >= 100)
+        fire('flow-high', 'high', `Louet: flow ${pct >= 150 ? 'x' + (1 + pct / 100).toFixed(1) : 'doubled'} in 24h (${ctxTxt}) — check conditions`, { pct, cur, ref, refSrc, avg7 });
+      else if (Math.abs(pct) > 50)
+        fire(pct > 0 ? 'flow-up' : 'flow-down', 'medium', `Louet: flow ${pct > 0 ? '+' : ''}${Math.round(pct)}% (24h) — ${ctxTxt}`, { pct, cur, ref, refSrc, avg7 });
+    }
+  }
+  // ---- quality: only when a measurement's DATE is new vs what history has seen ----
+  for (const [param, cur2] of Object.entries(qlatest)) {
+    const prevSeen = h.readings.slice(0, -1).map(r => (r.q || {})[param]).filter(Boolean);
+    if (!prevSeen.length || prevSeen[prevSeen.length - 1].date === cur2.date) continue; // not a new sample
+    const vals = [...new Map(prevSeen.map(x => [x.date, x.value])).values()]; // one per sample date
+    const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+    const sd = Math.sqrt(vals.reduce((a, b) => a + (b - mean) ** 2, 0) / vals.length);
+    const sig = vals.length >= 4 && sd > 0
+      ? Math.abs(cur2.value - mean) / sd > 2
+      : mean !== 0 && Math.abs((cur2.value - mean) / mean) > 0.30;
+    if (sig) fire(`q-${param}`, 'medium',
+      `Louet: ${param} changed significantly — ${cur2.value}${cur2.unit} on ${cur2.date.slice(0, 10)} (recent mean ${mean.toFixed(2)}${cur2.unit})`,
+      { param, value: cur2.value, mean, sd, n: vals.length });
+  }
+  lwrite(h);
+  // medium alerts ride the next agent brief; high goes to Signal NOW via the Urgent Queue
+  louetBriefAlerts = h.readings.length ? alerts.filter(a => a.level === 'medium').concat(
+    // keep any alert from the last 24h visible in the brief (including highs)
+    []) : alerts;
+  const recent = Object.entries(h.lastAlert).filter(([, at]) => now - at < 24 * 3600e3);
+  louetBriefAlerts = alerts; // current pass; brief also re-reads the log for 24h context
+  for (const a of alerts.filter(x => x.level === 'high')) {
+    try {
+      const sid = ctx.config.todoSheetId;
+      const id = Math.random().toString(36).slice(2, 10);
+      await ctx.store.values.append({ spreadsheetId: sid, range: "'Urgent Queue'!A1", valueInputOption: 'RAW',
+        requestBody: { values: [[new Date().toISOString(), 'Louet flood watch', a.text, 'high', 'nature-weather', '', id]] } });
+    } catch (e) { lesc({ key: a.key, level: 'error', text: 'Urgent Queue append failed: ' + e.message }); }
+  }
+  return { alerts };
+}
+// last-24h escalations (from the log) — what the brief shows even between checks
+function louetRecentAlerts() {
+  try {
+    const lines = fs.readFileSync(LESC, 'utf8').trim().split('\n').slice(-30);
+    const cut = Date.now() - 24 * 3600e3;
+    return lines.map(l => { try { return JSON.parse(l); } catch (e) { return null; } })
+      .filter(e => e && e.level !== 'error' && Date.parse(e.at) > cut)
+      .map(e => ({ kind: 'warn', text: e.text }));
+  } catch (e) { return []; }
+}
+
 // —— the Louet moulin river gauge (unchanged from the water box) ——
 const HUBEAU = 'https://hubeau.eaufrance.fr/api', VIGIEAU = 'https://api.vigieau.beta.gouv.fr/api';
 const Q_STATION = '05234023', FLOW_STATION = 'Q041401001', MLAT = 43.400326, MLON = -0.049121;
@@ -192,6 +344,29 @@ module.exports = {
   // capture ctx for data() (the loader calls data() without ctx); routes give us ctx once
   routes(app, ctx) {
     this._ctx = ctx;
+    // Louet watch: hourly + shortly after boot (Mac tier only — NO_JOBS tiers skip inside)
+    setTimeout(() => louetCheck(ctx).catch(e => lesc({ level: 'error', text: 'check failed: ' + e.message })), 2 * 60e3);
+    setInterval(() => louetCheck(ctx).catch(e => lesc({ level: 'error', text: 'check failed: ' + e.message })), 3600e3);
+    app.get('/api/louet/series', async (req, res) => { // cache-first; background refresh >6h
+      const days = Math.min(185, Math.max(7, parseInt(req.query.days, 10) || 30));
+      let c = lfRead();
+      if (!c.daily.length) { await louetFlowRefresh(); c = lfRead(); } // first ever call: block once
+      else if (Date.now() - c.updatedAt > 6 * 3600e3) louetFlowRefresh(); // stale: serve now, refresh behind
+      const today = new Date().toISOString().slice(0, 10);
+      const from = new Date(Date.now() - days * 864e5).toISOString().slice(0, 10);
+      const series = c.daily.filter(d => d.date >= from && d.date <= today);
+      const lyFrom = new Date(Date.parse(from) - 365 * 864e5).toISOString().slice(0, 10);
+      const lyTo = new Date(Date.parse(today) - 365 * 864e5).toISOString().slice(0, 10);
+      // last year's points re-dated +365d so both lines share one x-axis
+      const lastYear = c.daily.filter(d => d.date >= lyFrom && d.date <= lyTo)
+        .map(d => ({ date: new Date(Date.parse(d.date) + 365 * 864e5).toISOString().slice(0, 10), m3s: d.m3s }));
+      res.json({ unit: 'm³/s', days, updatedAt: c.updatedAt, series, lastYear });
+    });
+    app.get('/api/louet/status', async (req, res) => { // inspect history + run a check on demand
+      const r = String(req.query.run || '') === '1' ? await louetCheck(ctx).catch(e => ({ error: e.message })) : null;
+      const h = lread();
+      res.json({ readings: h.readings.length, lastAlert: h.lastAlert, latest: h.readings[h.readings.length - 1] || null, runResult: r });
+    });
     const bust = () => { cache = { at: 0, data: null }; };
     app.post('/api/weather/pin', async (req, res) => { // { name } — make an auto location permanent
       const s = await syncStore(ctx); const name = String((req.body || {}).name || '').trim(); if (!name) return res.status(400).json({ error: 'name' });
@@ -222,92 +397,12 @@ module.exports = {
     });
   },
   // salient weather → Agent Brief (core folds this in and lets the LLM include it only if it outweighs the news)
-  async briefItems() { try { return salientWeather((await getData(this._ctx || {})).weather).map(text => ({ kind: 'weather', text })); } catch (e) { return []; } },
-  client: `(el, d) => {
-    const esc = s => String(s == null ? '' : s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
-    const post = (u, b) => fetch(u, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b || {}) }).then(() => location.reload());
-    const wmo = c => c >= 95 ? '⛈️' : c >= 85 ? '🌨️' : c >= 80 ? '🌦️' : c >= 71 ? '❄️' : c >= 61 ? '🌧️' : c >= 51 ? '🌦️' : c >= 45 ? '🌫️' : c >= 3 ? '☁️' : c >= 1 ? '⛅' : '☀️';
-    const dow = s => new Date(s + 'T12:00').toLocaleDateString('en-GB', { weekday: 'short' });
-    const active = (d.weather || []).filter(w => !w.off), hidden = (d.weather || []).filter(w => w.off);
-    // —— moon: SVG disc with the lit fraction, % overlaid, waxing/waning + next new moon ——
-    let moonHtml = '';
-    if (d.moon) {
-      const m = d.moon, r = 20, cx = 22, cy = 22;
-      const rx = r * Math.abs(1 - 2 * m.illum / 100);
-      const outerSweep = m.waxing ? 1 : 0;                    // lit limb: right when waxing, left when waning
-      const termSweep = (m.illum >= 50) ? outerSweep : (1 - outerSweep); // gibbous bulges across the middle
-      const path = 'M ' + cx + ' ' + (cy - r) + ' A ' + r + ' ' + r + ' 0 0 ' + outerSweep + ' ' + cx + ' ' + (cy + r) +
-                   ' A ' + rx.toFixed(2) + ' ' + r + ' 0 0 ' + termSweep + ' ' + cx + ' ' + (cy - r) + ' Z';
-      moonHtml = '<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">' +
-        '<svg width="44" height="44" viewBox="0 0 44 44" style="flex:none">' +
-          '<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="#2a2f3a" stroke="var(--border)"/>' +
-          '<path d="' + path + '" fill="#e8e4d8"/>' +
-          '<text x="' + cx + '" y="' + (cy + 4) + '" text-anchor="middle" font-size="11" font-weight="700" fill="' + (m.illum >= 35 ? '#222' : '#ddd') + '">' + m.illum + '%</text>' +
-        '</svg>' +
-        '<div class="tiny muted" style="line-height:1.5"><b style="color:var(--text)">' + (m.waxing ? 'Waxing' : 'Waning') + '</b> · ' + m.illum + '% lit<br>new moon ' + new Date(m.nextNew + 'T12:00').toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }) + ' · full ' + new Date(m.nextFull + 'T12:00').toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }) + '</div>' +
-      '</div>';
-    }
-    const dayCell = (day, i) => '<div style="flex:1;min-width:38px;text-align:center;padding:2px 1px;border-radius:5px;' + (i === 0 ? 'background:color-mix(in srgb,var(--accent) 12%,transparent);' : '') + '">' +
-      '<div class="tiny muted">' + (i === 0 ? 'today' : dow(day.date)) + '</div>' +
-      '<div style="font-size:16px;line-height:1.3">' + wmo(day.code) + '</div>' +
-      '<div style="font-size:11px"><b>' + Math.round(day.max) + '°</b> <span class="muted">' + Math.round(day.min) + '°</span></div>' +
-      (day.pprob >= 30 ? '<div class="tiny" style="color:var(--accent)">' + day.pprob + '%</div>' : '<div class="tiny">&nbsp;</div>') + '</div>';
-    const row = w => {
-      if (!w.fc) return '<div class="tiny muted" style="padding:3px 0">' + esc(w.name) + ' — no forecast (place not found)</div>';
-      const when = w.when ? ' <span class="tiny muted">' + w.when.start.slice(5) + '→' + w.when.end.slice(5) + '</span>' : '';
-      const ctrl = (w.pinned
-        ? '<button class="ib" title="Unpin" data-act="unpin" data-name="' + esc(w.name) + '">📌</button>'
-        : '<button class="ib" title="Pin as a permanent location" data-act="pin" data-name="' + esc(w.name) + '" style="opacity:.5">📍</button>') +
-        '<button class="ib" title="Hide this forecast" data-act="off" data-name="' + esc(w.name) + '">✕</button>';
-      const hm = t => t ? t.slice(11, 16) : '—';
-      const surfHtml = (w.surf && w.surf.length)
-        ? '<div class="tiny muted" style="margin-top:3px;line-height:1.6">🌊 ' + w.surf.map(sp =>
-            '<b style="color:var(--text2)">' + esc(sp.name) + '</b> ' + (sp.wave != null
-              ? sp.wave.toFixed(1) + 'm@' + Math.round(sp.period) + 's · ▲' + hm(sp.high && sp.high.t) + ' ▽' + hm(sp.low && sp.low.t)
-              : 'n/a')).join(' &nbsp; ') +
-          ' <button class="ib" data-act="surf" data-name="' + esc(w.name) + '" data-cur="' + esc((w.surf || []).map(x => x.name).join(', ')) + '" title="Edit surf spots (max 3)" style="opacity:.4">✎</button></div>'
-        : '<div class="tiny" style="margin-top:2px"><button class="ib" data-act="surf" data-name="' + esc(w.name) + '" data-cur="" title="Add surf spots" style="opacity:.35">＋ surf spots</button></div>';
-      return '<div style="margin-top:8px">' +
-        '<div style="display:flex;align-items:baseline;gap:6px"><b style="font-size:13px">' + esc(w.name) + '</b>' +
-          (w.auto && !w.pinned ? '<span class="tiny" style="color:var(--violet)">going</span>' : '') + when +
-          '<span style="margin-left:auto">' + ctrl + '</span></div>' +
-        '<div style="display:flex;gap:3px;margin-top:2px">' + w.fc.days.map(dayCell).join('') + '</div>' +
-        surfHtml +
-      '</div>';
-    };
-    // —— water box (moulin) ——
-    const wat = d.water;
-    let waterHtml = '';
-    if (wat) {
-      const fmtDate = s => s ? new Date(s).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : '';
-      const ago = s => { if (!s) return ''; const days = Math.floor((Date.now() - new Date(s)) / 864e5); return days < 45 ? '' : days < 400 ? ' · ' + Math.round(days / 30) + ' mo ago' : ' · ' + (days / 365).toFixed(1) + ' yr ago'; };
-      const short = { 'Potentiel en Hydrogène (pH)':'pH','Oxygène dissous':'O₂','Taux de saturation en oxygène':'O₂ sat','Nitrates':'NO₃','Nitrites':'NO₂','Orthophosphates (PO4)':'PO₄','Ammonium':'NH₄','Conductivité à 25°C':'cond.','Matières en suspension':'MES' };
-      const q = wat.latestQ, t = wat.temp; let trend = '';
-      if (q && wat.mean30) { const pct = Math.round((q.m3s / wat.mean30 - 1) * 100); trend = pct === 0 ? '≈ 30-day mean' : (pct > 0 ? '▲ ' : '▼ ') + Math.abs(pct) + '% vs 30-day mean (' + wat.mean30.toFixed(2) + ' m³/s)'; }
-      const sd = t ? t.date : (wat.params[0] && wat.params[0].date);
-      const dr = (wat.drought || []).map(z => '<span style="display:inline-block;margin:5px 5px 0 0;padding:1px 7px;border-radius:10px;font-size:11px;background:color-mix(in srgb,var(--red) 20%,var(--card2));border:1px solid var(--red)">⚠ ' + esc(z.gravite).replace(/_/g,' ') + ' — ' + esc(z.type) + (z.fin ? ' · to ' + fmtDate(z.fin) : '') + '</span>').join('');
-      waterHtml = '<div style="margin-top:10px;border-top:1px solid var(--border);padding-top:7px">' +
-        '<div class="tiny muted" style="margin-bottom:2px">💧 Le Louet — moulin</div>' +
-        '<div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap"><div style="font-size:22px;font-weight:700;line-height:1">' + (q ? q.m3s.toFixed(3) + ' <span style="font-size:13px;font-weight:400">m³/s</span>' : '—') + '</div><div class="tiny muted">flow' + (q ? ' · inst. ' + new Date(q.at).toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}) : '') + (trend ? '<br>' + trend : '') + '</div></div>' +
-        (sd ? '<div class="tiny muted" style="margin-top:6px;line-height:1.6">Last water sample · ' + fmtDate(sd) + ago(sd) + (t ? ' — <b style="color:var(--text)">' + Number(t.value).toFixed(1) + ' °C</b>' : '') + (wat.params.length ? '<br>' + wat.params.filter(p => p.name !== \"Température de l'Eau\").map(p => '<b style="color:var(--text2)">' + esc(short[p.name] || p.name) + '</b> ' + esc(p.value) + (p.unit && !/unit|sans/i.test(p.unit) ? ' ' + esc(p.unit) : '')).join(' · ') : '') + '</div>' : '') +
-        (dr ? '<div>' + dr + '</div>' : '') + '</div>';
-    }
-    el.innerHTML = '<div class="card">' + moonHtml +
-      (active.length ? active.map(row).join('') : '<div class="tiny muted">No active locations. Add one below or pin a place you\\'re heading to.</div>') +
-      (hidden.length ? '<div class="tiny muted" style="margin-top:8px">Hidden: ' + hidden.map(w => '<a href="#" data-act="on" data-name="' + esc(w.name) + '" style="color:var(--accent)">' + esc(w.name) + ' ↺</a>').join(' · ') + '</div>' : '') +
-      '<div class="tiny" style="margin-top:8px"><input id="wx-add" placeholder="add a location…" class="q-input" style="width:150px;display:inline-block"> <button class="ib" id="wx-add-btn">＋ pin</button></div>' +
-      waterHtml + '</div>';
-    el.querySelectorAll('[data-act]').forEach(b => b.onclick = e => {
-      e.preventDefault(); const n = b.dataset.name, a = b.dataset.act;
-      if (a === 'surf') { const v = prompt('Surf spots for ' + n + ' (comma-separated, max 3):', b.dataset.cur || ''); if (v !== null) post('/api/weather/surf', { location: n, spots: v }); return; }
-      if (a === 'pin') post('/api/weather/pin', { name: n });
-      else if (a === 'unpin') post('/api/weather/unpin', { name: n });
-      else if (a === 'off') post('/api/weather/toggle', { name: n, on: false });
-      else if (a === 'on') post('/api/weather/toggle', { name: n, on: true });
-    });
-    const addBtn = el.querySelector('#wx-add-btn'), addIn = el.querySelector('#wx-add');
-    const doAdd = () => { const v = addIn.value.trim(); if (v) post('/api/weather/add', { name: v }); };
-    if (addBtn) addBtn.onclick = doAdd;
-    if (addIn) addIn.onkeydown = e => { if (e.key === 'Enter') doAdd(); };
-  }`,
+  async briefItems() {
+    let items = [];
+    try { items = salientWeather((await getData(this._ctx || {})).weather).map(text => ({ kind: 'weather', text })); } catch (e) {}
+    // Louet escalations from the last 24h always ride the brief (⚠️/🌊 lines)
+    try { items = items.concat(louetRecentAlerts()); } catch (e) {}
+    return items;
+  },
+  client: fs.readFileSync(path.join(__dirname, 'nature-weather.client.js'), 'utf8'),
 };

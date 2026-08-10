@@ -437,6 +437,10 @@ details summary { cursor: pointer; color: var(--text2); font-size: 12.5px; paddi
 <div id="habits" class="card habits" style="margin-top:6px"></div>
 </section>
 
+<section data-sec="journal">
+<div id="journal" class="card" style="margin-top:6px"></div>
+</section>
+
 <section data-sec="brief">
 <h2><span data-sec-title>Agent brief</span> <button id="brief-cfg-btn" class="ib" title="Webhook — push each new brief to a URL (signed, retried)">✎</button> <span class="muted" id="brief-meta"></span></h2>
 <div id="brief-cfg" class="card" style="display:none"></div>
@@ -632,7 +636,7 @@ async function saveLinks() {
     box.querySelector('.lk-url').focus();
   };
 })();
-const SEC_DEFS = { links: 'Links', habits: 'Habits', brief: 'Agent brief', acts: 'Activity Preview', today: 'Today', todo: 'Persistent lists', jlists: 'Ephemeral notes', cinote: 'Note to CI', agents: 'Agent Stable', files: 'File manager', completed: 'Completed', signals: 'Market signals', news: 'News', week: 'Week ahead' };
+const SEC_DEFS = { links: 'Links', habits: 'Habits', brief: 'Agent brief', acts: 'Activity Preview', today: 'Today', todo: 'Persistent lists', jlists: 'Ephemeral notes', journal: 'Journal', cinote: 'Note to CI', agents: 'Agent Stable', files: 'File manager', completed: 'Completed', signals: 'Market signals', news: 'News', week: 'Week ahead' };
 let appSettings = { sections: {}, quadrants: {}, calendars: [] };
 const secExpanded = new Set(); // session-local expansions of collapsed-by-default sections
 function setSecTitle(el, title) { // replace only the text node — keep the ＋/meta spans inside headings
@@ -2193,10 +2197,11 @@ function renderActPreview() {
     .sort((a, b) => (b.score || 0) - (a.score || 0) || a.date.localeCompare(b.date));
   const expandAll = renderActPreview._expanded;
   const sugg = expandAll ? pool.slice(0, 40) : pool.slice(0, 5);
+  const fmtRunsTo = d => new Date(d + 'T12:00').toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
   const sCard = (a, i) => `<div class="event swipecard td-card ap-card" data-i="${i}">
     <div class="time">${a.date === t0 ? (a.time ? esc(a.time) : 'today') : new Date(a.date + 'T12:00').toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric' }) + (a.time ? ' ' + esc(a.time) : '')}</div>
-    <div class="td-body"><span style="color:var(--violet)">[${esc(a.activity)}]</span> ${esc(a.title)}${a.venue ? ` <span class="tiny muted">@ ${esc(a.venue)}</span>` : ''}${a.url ? ` <a class="tiny" href="${esc(a.url)}" target="_blank" rel="noopener">↗</a>` : ''}${a.note ? `<div class="tiny muted">${esc(a.note)}</div>` : ''}</div>
-    <span class="td-btns"><button class="ib td-up" title="More like this (👍 then ← = good call, just not this time)">👍</button><button class="ib td-down" title="Less like this">👎</button></span></div>`;
+    <div class="td-body"><span style="color:var(--violet)">[${esc(a.activity)}${a.loc ? ' (' + esc(a.loc) + ')' : ''}]</span> ${esc(a.title)}${a.runsTo ? `<span class="tiny muted">, runs to ${esc(fmtRunsTo(a.runsTo))}</span>` : ''}${a.venue ? ` <span class="tiny muted">@ ${esc(a.venue)}</span>` : ''}${a.url ? ` <a class="tiny" href="${esc(a.url)}" target="_blank" rel="noopener">↗</a>` : ''}${a.note ? `<div class="tiny muted">${esc(a.note)}</div>` : ''}</div>
+    <span class="td-btns">${a.multi ? '<button class="ib ap-x" title="Remove (this day or all days)">✕</button>' : ''}<button class="ib td-up" title="More like this (👍 then ← = good call, just not this time)">👍</button><button class="ib td-down" title="Less like this">👎</button></span></div>`;
   const hiddenN = pool.length - sugg.length;
   el.innerHTML = leadStrip() + (sugg.length ? sugg.map(sCard).join('') : '')
     + (!leadStrip() && !sugg.length ? '<div class="empty tiny">No upcoming activity suggestions.</div>' : '')
@@ -2222,6 +2227,24 @@ function renderActPreview() {
   };
   el.querySelectorAll('.ap-card').forEach(card => {
     const a = sugg[+card.dataset.i];
+    const apx = card.querySelector('.ap-x');
+    if (apx) apx.onclick = e => { // multi-day runs: remove one instance or the whole run
+      e.preventDefault(); e.stopPropagation();
+      const btns = card.querySelector('.td-btns');
+      btns.innerHTML = `<button class="ib apx-day">this day</button><button class="ib apx-all">all days</button>`;
+      btns.querySelector('.apx-day').onclick = async ev2 => {
+        ev2.stopPropagation();
+        const r = await api('/api/events/dismiss-day', { method: 'POST', body: JSON.stringify({ title: a.title, activity: a.activity, date: a.date }) }).catch(() => null);
+        if (!r || r.error) { toast && toast('could not save that — try again', true); return; }
+        api('/api/activities').then(d => { if (d && d.events) { actData = d; renderActPreview(); } });
+      };
+      btns.querySelector('.apx-all').onclick = async ev2 => {
+        ev2.stopPropagation();
+        const r = await api('/api/feedback', { method: 'POST', body: JSON.stringify({ kind: 'event_skipped', title: a.title, source: a.activity, context: 'x-all-days' }) }).catch(() => null);
+        if (!r || r.error) { toast && toast('could not save that — try again', true); return; }
+        api('/api/activities').then(d => { if (d && d.events) { actData = d; renderActPreview(); } });
+      };
+    };
     // dismissals must be CONFIRMED: a swallowed error here is how the toy festival came
     // back five times — the card only leaves once the server says the row landed
     const fb = async (kind, ctx) => {
@@ -3380,6 +3403,78 @@ $('brief-cfg-btn').onclick = () => {
 };
 window.refreshMarketsWidget && window.refreshMarketsWidget(); // markets is a plugin now
 api('/api/prefs').then(renderPrefs).catch(() => {});
+// ---------- Journal widget (core, 2026-08-10) ----------
+// Enabled per deployment via settings.journal.enabled — deployments without it never see
+// the section (the node is removed, so the gear panel stays honest too).
+let jrDay = null; // {date, cfg, fields, sections}
+let jrDirty = false;
+async function loadJournal(date) {
+  const sec = document.querySelector('section[data-sec="journal"]'); if (!sec) return;
+  if (!(appSettings.journal && appSettings.journal.enabled)) { sec.remove(); return; }
+  const d = await api('/api/journal/day' + (date ? '?date=' + date : '')).catch(() => null);
+  if (!d || d.error) { $('journal').innerHTML = '<div class="empty tiny">journal unavailable</div>'; return; }
+  jrDay = d; jrDirty = false;
+  renderJournal();
+}
+function jrShift(days) {
+  const t = new Date(Date.parse(jrDay.date) + days * 864e5).toISOString().slice(0, 10);
+  const save = jrDirty ? saveJournal() : Promise.resolve();
+  save.then(() => loadJournal(t));
+}
+async function saveJournal() {
+  if (!jrDay) return;
+  const fields = {}; jrDay.cfg.fields.forEach(f => { const el = $('jrf-' + f.key); if (el) fields[f.key] = el.value; });
+  const sections = {}; jrDay.cfg.sections.forEach(x => { const el = $('jrs-' + x.key); if (el) sections[x.key] = el.value; });
+  const st = $('jr-status'); if (st) st.textContent = 'saving…';
+  const r = await api('/api/journal/day', { method: 'POST', body: JSON.stringify({ date: jrDay.date, fields, sections }) }).catch(() => null);
+  if (!r || r.error) { if (st) st.textContent = '⚠ not saved — try again'; return; }
+  jrDirty = false; if (st) st.textContent = 'saved ' + new Date().toLocaleTimeString().slice(0, 5);
+}
+function renderJournal() {
+  const title = (appSettings.sections || {}).journal?.title || SEC_DEFS.journal;
+  const d = jrDay;
+  const fieldRow = d.cfg.fields.map(f =>
+    `<label class="tiny" style="margin-right:8px">${esc(f.label)}${f.track ? ' <span title="tracked — writes a Journal Tracking row" style="color:var(--violet)">◦</span>' : ''}
+     <input id="jrf-${esc(f.key)}" class="q-input" style="width:70px" value="${esc(String(d.fields[f.key] ?? ''))}"></label>`).join('');
+  const secBoxes = d.cfg.sections.map(x =>
+    `<div style="margin-top:6px"><div class="tiny" style="color:var(--violet)">${esc(x.title)}${x.stash !== 'column' ? ` <span class="muted" title="stashes to ${x.stash === 'folder' ? 'a per-day md file' : 'the agglomerated md'}">↳ ${esc(x.stash)}</span>` : ''}${x.familyLog ? ' <span class="muted" title="family entries flow to the shared Family Log">👨‍👩‍👦</span>' : ''}</div>
+     <textarea id="jrs-${esc(x.key)}" class="q-input" style="width:100%;min-height:56px;resize:vertical">${esc(String(d.sections[x.key] ?? ''))}</textarea></div>`).join('');
+  $('journal').innerHTML = `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+      <span class="sec-title" data-sec-title style="font-weight:600">${esc(title)}</span>
+      <button class="ib" id="jr-prev" title="Previous day">◀</button>
+      <b>${new Date(d.date + 'T12:00').toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })}</b>
+      <button class="ib" id="jr-next" title="Next day">▶</button>
+      <span class="tiny muted" id="jr-status"></span>
+      <span style="flex:1"></span>
+      <button class="ib" id="jr-cfg" title="Configure fields & sections">⚙</button></div>
+    <div style="margin-top:6px">${fieldRow}</div>${secBoxes}
+    <div class="tiny muted" style="margin-top:4px">Cmd/Ctrl+Enter or click away to save · agents read this daily (todos, Agent Feedback)</div>
+    <div id="jr-cfg-box" style="display:none"></div>`;
+  wireTitleEdits();
+  $('jr-prev').onclick = () => jrShift(-1);
+  $('jr-next').onclick = () => jrShift(1);
+  $('journal').querySelectorAll('input.q-input, textarea.q-input').forEach(el => {
+    el.oninput = () => { jrDirty = true; const st = $('jr-status'); if (st) st.textContent = '·'; };
+    el.onblur = () => { if (jrDirty) saveJournal(); };
+    el.onkeydown = e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); saveJournal(); } };
+  });
+  $('jr-cfg').onclick = () => {
+    const box = $('jr-cfg-box');
+    if (box.style.display !== 'none') { box.style.display = 'none'; return; }
+    box.style.display = '';
+    const cur = JSON.stringify({ enabled: true, fields: d.cfg.fields, sections: d.cfg.sections }, null, 1);
+    box.innerHTML = `<div class="tiny muted" style="margin-top:6px">fields: {key,label,track} — track ◦ writes date+value rows to Journal Tracking · sections: {key,title,stash: column|folder|file, familyLog}</div>
+      <textarea id="jr-cfg-ta" class="q-input" style="width:100%;min-height:120px;font-family:monospace">${esc(cur)}</textarea>
+      <button class="ib" id="jr-cfg-save">Save config</button>`;
+    $('jr-cfg-save').onclick = async () => {
+      let j; try { j = JSON.parse($('jr-cfg-ta').value); } catch (e) { showErr('config is not valid JSON'); return; }
+      const r = await api('/api/settings', { method: 'POST', body: JSON.stringify({ settings: { journal: j } }) }).catch(() => null);
+      if (!r || r.error) { showErr((r && r.error) || 'save failed'); return; }
+      appSettings.journal = j; loadJournal(d.date);
+    };
+  };
+}
+loadJournal();
 loadHabits();
 $('undo-btn').onclick = doUndo;
 $('redo-btn').onclick = doRedo;

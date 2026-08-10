@@ -625,6 +625,7 @@ app.post('/api/share/resolve', asyncRoute(async (req, res) => {
 // these ids. Plugins self-register at load with the same shape (plugin:<id>).
 const WIDGETS = {
   links:   { title: 'Links',            desc: 'Pinned links & bookmarks',                          needs: {} },
+  journal: { title: 'Journal',          desc: 'Daily journal — tracked header fields, agent-readable sections, per-section stash routing', needs: { tabs: ['Journal', 'Journal Tracking'] }, configKeys: ['journal'] },
   habits:  { title: 'Habits',           desc: 'Daily habit tracking with streaks',                 needs: { tabs: ['Habits'] } },
   brief:   { title: 'Agent brief',      desc: 'Agent-written morning brief',                       needs: { llm: true } },
   acts:    { title: 'Activity Preview', desc: 'Scanned event suggestions — swipe to calendar',     needs: { llm: true, location: true, tabs: ['Activity Events'] }, configKeys: ['ACTIVITIES prefs'] },
@@ -1568,7 +1569,11 @@ function obsidianDailyLink(dateStr) {
 }
 async function nextAgentTaskId() {
   let rows = [];
-  try { rows = (await readTab(TODO_SHEET_ID, AGENT_TASKS_TAB, AGENT_TASKS_HEADERS)).rows; } catch (e) {}
+  // Only a missing/empty tab may bootstrap numbering at AT001. Any OTHER read failure
+  // (429, network) must throw: minting AT001 over an existing sheet creates duplicate IDs,
+  // and closeAgentTask(id) then closes whichever row matches first (2026-08-08 audit).
+  try { rows = (await readTab(TODO_SHEET_ID, AGENT_TASKS_TAB, AGENT_TASKS_HEADERS)).rows; }
+  catch (e) { if (!/Unable to parse range|not found/i.test(String(e.message))) throw e; }
   const max = rows.reduce((n, r) => Math.max(n, parseInt((String(r.ID || '').match(/^AT(\d+)$/) || [])[1] || '0', 10)), 0);
   return 'AT' + String(max + 1).padStart(3, '0');
 }
@@ -1616,9 +1621,14 @@ async function relinkAgentTask(id, noteDate) {
   return { ...row, NoteDate: noteDate };
 }
 app.get('/api/agent-tasks', asyncRoute(async (req, res) => {
-  let rows = []; try { rows = (await readTab(TODO_SHEET_ID, AGENT_TASKS_TAB, AGENT_TASKS_HEADERS)).rows; } catch (e) {}
-  const status = String(req.query.status || '').toLowerCase();
-  const out = (status ? rows.filter(r => String(r.Status || '').toLowerCase() === status) : rows)
+  // A Sheets read failure must NEVER masquerade as "zero open threads": the heartbeat's
+  // Stage E carry-forward trusts this endpoint, and 200 {tasks:[]} on a transient 429 is
+  // exactly how open AT threads silently vanished from a day's Agent Feedback.
+  let rows;
+  try { rows = (await readTab(TODO_SHEET_ID, AGENT_TASKS_TAB, AGENT_TASKS_HEADERS)).rows; }
+  catch (e) { return res.status(503).json({ error: 'agent-tasks read failed: ' + e.message }); }
+  const status = String(req.query.status || '').trim().toLowerCase();
+  const out = (status ? rows.filter(r => String(r.Status || '').trim().toLowerCase() === status) : rows)
     .map(r => ({ ...r, link: r.NoteDate ? obsidianDailyLink(r.NoteDate) : null }));
   res.json({ tasks: out });
 }));
@@ -2188,6 +2198,14 @@ app.post('/api/settings', asyncRoute(async (req, res) => {
   if (!s || typeof s !== 'object') return res.status(400).json({ error: 'settings object required' });
   const next = { ...cur };
   if (s.sections && typeof s.sections === 'object') next.sections = s.sections;
+  if (s.journal && typeof s.journal === 'object') { // journal widget config — validated shape, full replace
+    next.journal = { enabled: !!s.journal.enabled,
+      fields: (Array.isArray(s.journal.fields) ? s.journal.fields : []).filter(f => f && f.key).slice(0, 12)
+        .map(f => ({ key: String(f.key).slice(0, 30), label: String(f.label || f.key).slice(0, 40), track: !!f.track })),
+      sections: (Array.isArray(s.journal.sections) ? s.journal.sections : []).filter(x => x && x.key).slice(0, 10)
+        .map(x => ({ key: String(x.key).slice(0, 30), title: String(x.title || x.key).slice(0, 60),
+          stash: ['column', 'folder', 'file'].includes(x.stash) ? x.stash : 'column', familyLog: !!x.familyLog })) };
+  }
   if (s.quadrants && typeof s.quadrants === 'object') {
     // MERGE per list key — full-object replacement let any stale page wipe labels set
     // elsewhere (Q4 rename kept reverting, 2026-07-10). null deletes a key; {} resets it.
@@ -3499,7 +3517,7 @@ app.post('/api/bio/refresh', asyncRoute(async (req, res) => {
     // dated milestones accumulate in PhaseHistory rather than overwriting the analyst's text
     const stamp = [s.startDate && `start ${s.startDate}`, s.primaryCompletion && `primary completion ${s.primaryCompletion}`]
       .filter(Boolean).join('; ');
-    if (stamp && !String(r.PhaseHistory || '').includes(s.startDate || ' ')) {
+    if (stamp && !String(r.PhaseHistory || '').includes(s.startDate || '\x00')) {
       upd.PhaseHistory = [String(r.PhaseHistory || '').trim(), `[${s.nctId}] ${stamp}`].filter(Boolean).join(' | ');
     }
     if (Object.keys(upd).length) {
@@ -4322,7 +4340,7 @@ app.post('/api/habits/stop', asyncRoute(async (req, res) => {
 // them beside calendar events; rows with a lead window surface early as a "Coming up" line.
 const ACTEV_TAB = 'Activity Events';
 const ACTEV_HEADERS = ['Activity', 'Date', 'Title', 'Time', 'Venue', 'URL', 'Note', 'FoundAt', 'ID'];
-const ACTEV_HEADERS_ALL = [...ACTEV_HEADERS, 'ScanLoc'];
+const ACTEV_HEADERS_ALL = [...ACTEV_HEADERS, 'ScanLoc', 'EndDate']; // EndDate: multi-day runs (expo, harvest season) — expanded to Fri/Sat instances at read time
 let actCfgMemo = { at: 0, val: [] };
 async function loadActivitiesConfig() {
   if (Date.now() - actCfgMemo.at < 300000) return actCfgMemo.val;
@@ -4378,7 +4396,8 @@ async function scanActivities() {
           (known ? `ALREADY KNOWN (do NOT return these again, even reworded — only genuinely NEW events):\n${known}\n` : '') +
           `At most 8 new events. ONE entry per real-world event — use a canonical title (e.g. "Australia v France — Nations Championship R2"), never multiple phrasings.\n` +
           `For TELEVISED matches/tournaments, "note" MUST name the TV channel or streamer carrying it${projLoc ? " in the owner's projected location on that date (per the projection above)" : ''} — e.g. "beIN Sports 1 (QA)", "Canal+ (FR)"; fall back to the primary international broadcaster if the local carrier is unclear.\n` +
-          `Return STRICT JSON only, no prose, no code fences: {"events":[{"date":"YYYY-MM-DD","title":"…","time":"HH:MM or ''","venue":"…","url":"https://…","note":"one short practical line (where to watch — channel — / tickets / cost)","local":true|false}]}`,
+          `For an event that RUNS OVER MULTIPLE DAYS (a festival, exhibition, season — e.g. date harvesting weeks), set "date" to its start (or today if already running) and add "endDate" (YYYY-MM-DD, the last day); single-day events omit endDate.\n` +
+          `Return STRICT JSON only, no prose, no code fences: {"events":[{"date":"YYYY-MM-DD","endDate":"YYYY-MM-DD or omit","title":"…","time":"HH:MM or ''","venue":"…","url":"https://…","note":"one short practical line (where to watch — channel — / tickets / cost)","local":true|false}]}`,
           { tools: 'WebSearch,WebFetch', timeoutMs: 240000, module: 'activities', model: 'claude-sonnet-5' });
         const block2 = (String(raw).replace(/```json?/gi, '').replace(/```/g, '').match(/\{[\s\S]*\}/) || [])[0];
         let j = null; try { j = JSON.parse(block2); } catch (e) {}
@@ -4391,6 +4410,7 @@ async function scanActivities() {
           a.activity, ev.date, String(ev.title).slice(0, 120), String(ev.time || ''), String(ev.venue || '').slice(0, 80),
           String(ev.url || '').slice(0, 300), String(ev.note || '').slice(0, 200), nowIso(), crypto.randomUUID(),
           ev.local === false ? '' : locationOnDate(ev.date), // '' = location-independent (TV/online)
+          /^\d{4}-\d{2}-\d{2}$/.test(ev.endDate || '') && ev.endDate > ev.date ? ev.endDate : '',
         ]));
         fresh.forEach(ev => { seen.add(key(a.activity, ev.date, ev.title)); (tokIdx[a.activity + '|' + ev.date] = tokIdx[a.activity + '|' + ev.date] || []).push(toks(ev.title)); });
         track('activities', true, `${a.activity}: +${fresh.length} event${fresh.length === 1 ? '' : 's'}`);
@@ -4446,17 +4466,40 @@ if (!process.env.DASHBOARD_NO_JOBS || process.env.DASHBOARD_SCAN_EVENTS) {
   setTimeout(() => tuneEventPrefs().catch(() => {}), 5 * 60000);           // shortly after boot
   setInterval(() => tuneEventPrefs().catch(() => {}), 24 * 3600e3);        // then daily
 }
-// batch dismissal for the Clear-all button: one call, N durable dismissal rows
+// batch dismissal for the Clear-all button — ONE Sheets append for the whole pool.
+// The old per-item loop made 2 sequential API calls per event with errors swallowed:
+// a 38-event pool = ~76 calls, which blows the per-minute Sheets write quota, so every
+// click cleared a random subset and the owner had to keep clicking (reported 2026-08-09).
 app.post('/api/events/clear-all', asyncRoute(async (req, res) => {
-  const items = (Array.isArray((req.body || {}).items) ? req.body.items : []).slice(0, 40);
-  for (const it of items) {
-    if (!it || !it.title) continue;
-    await appendTabRow(DISMISS_TAB, DISMISS_HEADERS, ['evt:' + normTitle(it.title) + '|' + (it.activity || ''), String(it.title).slice(0, 120), nowIso()]).catch(() => {});
-    await writeFeedbackEntry({ at: nowIso(), kind: 'event_skipped', signal: SIGNAL_BY_KIND.event_skipped,
-      title: String(it.title).slice(0, 120), source: String(it.activity || ''), url: '', subjects: [], person: '', author: '', context: 'clear-all' }).catch(() => {});
+  const items = (Array.isArray((req.body || {}).items) ? req.body.items : [])
+    .filter(it => it && it.title).slice(0, 200);
+  if (!items.length) return res.json({ ok: true, cleared: 0 });
+  const at = nowIso();
+  try {
+    await appendTabRows(DISMISS_TAB, DISMISS_HEADERS,
+      items.map(it => ['evt:' + normTitle(it.title) + '|' + (it.activity || ''), String(it.title).slice(0, 120), at]));
+  } catch (e) {
+    // the dismissal rows are what actually hides events — if they didn't land, say so
+    return res.status(502).json({ error: 'dismissal write failed: ' + e.message });
   }
+  const fb = items.map(it => ({ at, kind: 'event_skipped', signal: SIGNAL_BY_KIND.event_skipped,
+    title: String(it.title).slice(0, 120), source: String(it.activity || ''), url: '', subjects: [], person: '', author: '', context: 'clear-all' }));
+  try {
+    if (HAS_JOURNAL) fb.forEach(e => fs.appendFileSync(FEEDBACK_FILE, JSON.stringify(e) + '\n'));
+    else await appendTabRows(FB_TAB, FB_HEADERS, fb.map(e => [JSON.stringify(e), at, '']));
+  } catch (e) { console.error('clear-all feedback log:', e.message); }
   dismissedCache.at = 0;
   res.json({ ok: true, cleared: items.length });
+}));
+// per-day dismissal for multi-day runs: hides ONE Fri/Sat instance; the evt: token (swipe
+// or "all days") still kills every instance of the run at once.
+app.post('/api/events/dismiss-day', asyncRoute(async (req, res) => {
+  const { title, activity, date } = req.body || {};
+  if (!title || !/^\d{4}-\d{2}-\d{2}$/.test(String(date || ''))) return res.status(400).json({ error: 'title + date required' });
+  await appendTabRow(DISMISS_TAB, DISMISS_HEADERS,
+    ['evtd:' + normTitle(title) + '|' + (activity || '') + '|' + date, String(title).slice(0, 120), nowIso()]);
+  dismissedCache.at = 0;
+  res.json({ ok: true });
 }));
 app.get('/api/activities', asyncRoute(async (req, res) => {
   const acts = await loadActivitiesConfig();
@@ -4486,8 +4529,24 @@ app.get('/api/activities', asyncRoute(async (req, res) => {
     const end = m[2] || (String(Math.min(23, +m[1].slice(0, 2) + 3)).padStart(2, '0') + m[1].slice(2));
     return end >= nowHM;
   };
-  const events = tab.rows.filter(r => r.Date >= t0 && r.Date <= horizon).filter(stillOn)
-    .filter(r => { // projected-location gate (see ScanLoc column)
+  // Multi-day runs expand FIRST (owner decree 2026-08-09: list on every Fri & Sat until the
+  // end date) so every later filter judges each INSTANCE date — expanding after the date
+  // filter killed the whole run the day after its start date slipped past "today".
+  const expanded = tab.rows.flatMap(r => {
+    const end = /^\d{4}-\d{2}-\d{2}$/.test(String(r.EndDate || '')) ? r.EndDate : '';
+    if (!end || end <= r.Date) return [r];
+    const out = [];
+    for (let t = Math.max(Date.parse(r.Date), Date.parse(t0)); t <= Math.min(Date.parse(end), Date.parse(horizon)); t += 86400000) {
+      const dt = new Date(t); const dow = dt.getUTCDay();
+      if (dow === 5 || dow === 6) out.push({ ...r, Date: dt.toISOString().slice(0, 10), _runsTo: end, _multi: true });
+    }
+    return out;
+  });
+  const events = expanded.filter(r => r.Date >= t0 && r.Date <= horizon).filter(stillOn)
+    .filter(r => { // projected-location gate (see ScanLoc column); selected multi-day runs
+      // bypass it — they are planning-relevant wherever the owner is, and the (location)
+      // suffix in the label makes the geography explicit
+      if (r._multi) return true;
       const here = locationOnDate(r.Date); if (!here) return true;
       const scanLoc = String(r.ScanLoc || '').trim();
       if (scanLoc) return scanLoc.toLowerCase() === here.toLowerCase();
@@ -4503,7 +4562,9 @@ app.get('/api/activities', asyncRoute(async (req, res) => {
     })
     .filter(r => !dismissedEvt.has('evt:' + normTitle(r.Title) + '|' + r.Activity)) // swiped away = gone, every tier
     .filter(r => !evtNearDismissed(dismissedToks, r.Activity, r.Title)) // …including the rescan's near-clone retitlings
+    .filter(r => !r._multi || !dismissedEvt.has('evtd:' + normTitle(r.Title) + '|' + r.Activity + '|' + r.Date)) // per-day ✕
     .map(r => ({ activity: r.Activity, date: r.Date, title: r.Title, time: r.Time, venue: r.Venue, url: r.URL, note: r.Note, show: showOf[r.Activity] || 'all',
+      loc: String(r.ScanLoc || '').trim(), runsTo: r._runsTo || '', multi: !!r._multi,
       score: eventPrefScore(loadSettings().eventPrefs || {}, r.Title) }))
     .sort((x, y) => x.date.localeCompare(y.date) || String(x.time).localeCompare(String(y.time)));
   const leads = events.filter(ev => {
@@ -5333,6 +5394,146 @@ async function sharedListView(slug, cfg) {
     items: items.map(i => ({ text: disp(i.text), orig: tr[i.text] ? i.text : undefined, done: i.mark === 'Y', doer: i.mark === 'D',
       comments: comments.filter(c => c.Item === i.text || !c.Item).map(c => ({ from: c.From, text: disp(c.Text), at: c.At })) })) };
 }
+// ---------- Journal widget (core, 2026-08-10) ----------
+// A dashboard-native daily journal for deployments without an Obsidian vault (the vault
+// journal above stays the owner-of-record wherever HAS_JOURNAL). Config lives in
+// settings.journal: { enabled, fields:[{key,label,track}], sections:[{key,title,stash,familyLog}] }.
+// Defaults: OFF, and entries land in the datastore 'Journal' tab — Date + one COLUMN per
+// section (owner decree). stash per section: 'column' (default) | 'folder' (obsidian-shaped
+// data/journal/YYYY-MM-DD.md) | 'file' (agglomerated single md). Header fields marked
+// track:true also upsert 'Journal Tracking' rows (Date + one row per tracked item), which is
+// the graphable long-term store. Agents read GET /api/journal/scrape — todos + the
+// agent-feedback section (issue tracking = the same AT### /api/agent-tasks machinery).
+const JOURNAL_TAB = 'Journal';
+const JTRACK_TAB = 'Journal Tracking';
+const JTRACK_HEADERS = ['Date', 'Item', 'Value', 'At'];
+const JOURNAL_DEFAULTS = {
+  enabled: false,
+  fields: [{ key: 'mood', label: 'Mood', track: true }, { key: 'energy', label: 'Energy', track: true }],
+  sections: [{ key: 'journal', title: 'Journal', stash: 'column' },
+             { key: 'todo', title: 'Todo', stash: 'column' },
+             { key: 'agent-feedback', title: 'Agent Feedback', stash: 'column' }],
+};
+function journalCfg() {
+  const j = (loadSettings().journal || {});
+  const fields = (Array.isArray(j.fields) ? j.fields : JOURNAL_DEFAULTS.fields)
+    .filter(f => f && f.key).slice(0, 12)
+    .map(f => ({ key: String(f.key).slice(0, 30), label: String(f.label || f.key).slice(0, 40), track: !!f.track }));
+  const sections = (Array.isArray(j.sections) ? j.sections : JOURNAL_DEFAULTS.sections)
+    .filter(x => x && x.key).slice(0, 10)
+    .map(x => ({ key: String(x.key).slice(0, 30), title: String(x.title || x.key).slice(0, 60),
+      stash: ['column', 'folder', 'file'].includes(x.stash) ? x.stash : 'column', familyLog: !!x.familyLog }));
+  return { enabled: !!j.enabled, fields, sections };
+}
+const JR_DIR = CFG.journalStashDir || path.join(__dirname, 'data', 'journal');
+const JR_FILE = CFG.journalStashFile || path.join(__dirname, 'data', 'journal.md');
+async function journalHeaders(cfg) {
+  // dynamic columns: Date | <one per section title> | Fields (JSON) | Updated.
+  // The header row self-extends when a new section is configured; existing columns never move.
+  const want = ['Date', ...cfg.sections.map(x => x.title), 'Fields', 'Updated'];
+  await ensureTab(JOURNAL_TAB, want);
+  const { headers, headerRow } = await readTab(TODO_SHEET_ID, JOURNAL_TAB, ['Date']);
+  const missing = want.filter(h => !headers.includes(h));
+  if (missing.length) {
+    const all = [...headers, ...missing];
+    await store.values.update({ spreadsheetId: TODO_SHEET_ID, range: `'${JOURNAL_TAB}'!A${headerRow}:${colLetter(all.length - 1)}${headerRow}`,
+      valueInputOption: 'RAW', requestBody: { values: [all] } });
+    return all;
+  }
+  return headers;
+}
+function jrMdRender(date, cfg, fields, sections, routed) {
+  const fm = Object.entries(fields).filter(([, v]) => String(v).trim() !== '')
+    .map(([k, v]) => `${k} = ${JSON.stringify(String(v))}`).join('\n');
+  const body = routed.map(sec => `## ${sec.title}\n\n${(sections[sec.key] || '').trim()}\n`).join('\n');
+  return `+++\ndate = "${date}"\n${fm}\n+++\n\n${body}`;
+}
+function jrStashMd(date, cfg, fields, sections) {
+  const toFolder = cfg.sections.filter(x => x.stash === 'folder');
+  const toFile = cfg.sections.filter(x => x.stash === 'file');
+  if (toFolder.length) {
+    fs.mkdirSync(JR_DIR, { recursive: true });
+    fs.writeFileSync(path.join(JR_DIR, date + '.md'), jrMdRender(date, cfg, fields, sections, toFolder));
+  }
+  if (toFile.length) {
+    // agglomerate: one file, one '# YYYY-MM-DD' block per day, replaced in place on re-save
+    let txt = ''; try { txt = fs.readFileSync(JR_FILE, 'utf8'); } catch (e) {}
+    const blk = `# ${date}\n\n` + toFile.map(sec => `## ${sec.title}\n\n${(sections[sec.key] || '').trim()}\n`).join('\n');
+    const re = new RegExp(`(^|\\n)# ${date}\\n[\\s\\S]*?(?=\\n# \\d{4}-\\d{2}-\\d{2}\\n|$)`);
+    txt = re.test(txt) ? txt.replace(re, (m, p1) => p1 + blk) : (txt ? txt.replace(/\n*$/, '\n\n') : '') + blk;
+    fs.writeFileSync(JR_FILE, txt);
+  }
+}
+app.get('/api/journal/day', asyncRoute(async (req, res) => {
+  const cfg = journalCfg();
+  if (!cfg.enabled) return res.status(404).json({ error: 'journal disabled on this deployment' });
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.date || '')) ? req.query.date : today();
+  let row = null;
+  try { row = (await readTab(TODO_SHEET_ID, JOURNAL_TAB, ['Date'])).rows.find(r => r.Date === date) || null; }
+  catch (e) {} // tab not created yet = empty day
+  let fields = {}; try { fields = JSON.parse((row || {}).Fields || '{}'); } catch (e) {}
+  const sections = {};
+  for (const x of cfg.sections) sections[x.key] = (row || {})[x.title] || '';
+  res.json({ date, cfg, fields, sections });
+}));
+app.post('/api/journal/day', asyncRoute(async (req, res) => {
+  const cfg = journalCfg();
+  if (!cfg.enabled) return res.status(404).json({ error: 'journal disabled on this deployment' });
+  const { date: d, fields = {}, sections = {} } = req.body || {};
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(String(d || '')) ? d : today();
+  const headers = await journalHeaders(cfg);
+  const { rows, headerRow } = await readTab(TODO_SHEET_ID, JOURNAL_TAB, ['Date']);
+  const vals = headers.map(h => {
+    if (h === 'Date') return date;
+    if (h === 'Fields') return JSON.stringify(Object.fromEntries(cfg.fields.map(f => [f.key, String(fields[f.key] ?? '')]))).slice(0, 4000);
+    if (h === 'Updated') return nowIso();
+    const sec = cfg.sections.find(x => x.title === h);
+    return sec ? String(sections[sec.key] ?? '').slice(0, 20000) : null; // null = leave unknown columns alone
+  });
+  const existing = rows.find(r => r.Date === date);
+  if (existing) {
+    const data = vals.map((v, i) => v === null ? null : ({ range: `'${JOURNAL_TAB}'!${colLetter(i)}${existing._row}`, values: [[v]] })).filter(Boolean);
+    await store.values.batchUpdate({ spreadsheetId: TODO_SHEET_ID, requestBody: { valueInputOption: 'RAW', data } });
+  } else {
+    await appendTabRows(JOURNAL_TAB, headers, [vals.map(v => v === null ? '' : v)]);
+  }
+  // tracked header fields -> one row per item per day (upsert, so edits do not duplicate)
+  const tracked = cfg.fields.filter(f => f.track && String(fields[f.key] ?? '').trim() !== '');
+  if (tracked.length) {
+    await ensureTab(JTRACK_TAB, JTRACK_HEADERS);
+    const t = await readTab(TODO_SHEET_ID, JTRACK_TAB, JTRACK_HEADERS);
+    const upd = [], add = [];
+    for (const f of tracked) {
+      const v = String(fields[f.key]).slice(0, 200);
+      const hit = t.rows.find(r => r.Date === date && r.Item === f.key);
+      if (hit && hit.Value !== v) upd.push({ range: `'${JTRACK_TAB}'!${colLetter(2)}${hit._row}`, values: [[v]] }, { range: `'${JTRACK_TAB}'!${colLetter(3)}${hit._row}`, values: [[nowIso()]] });
+      else if (!hit) add.push([date, f.key, v, nowIso()]);
+    }
+    if (upd.length) await store.values.batchUpdate({ spreadsheetId: TODO_SHEET_ID, requestBody: { valueInputOption: 'RAW', data: upd } });
+    if (add.length) await appendTabRows(JTRACK_TAB, JTRACK_HEADERS, add);
+  }
+  try { jrStashMd(date, cfg, fields, sections); } catch (e) { console.error('journal md stash:', e.message); }
+  _tabCache.delete(TODO_SHEET_ID + '|' + JOURNAL_TAB);
+  res.json({ ok: true, date });
+}));
+// Agent surface: todos + agent-feedback across the last N days. Issue tracking rides the
+// existing AT### store — agents mint/close via /api/agent-tasks and reference IDs in the
+// feedback text, exactly like the owner-side protocol.
+app.get('/api/journal/scrape', asyncRoute(async (req, res) => {
+  const cfg = journalCfg();
+  if (!cfg.enabled) return res.json({ enabled: false, days: [] });
+  const since = new Date(Date.now() - (parseInt(req.query.days, 10) || 7) * 864e5).toISOString().slice(0, 10);
+  let rows = []; try { rows = (await readTabCached(TODO_SHEET_ID, JOURNAL_TAB, ['Date'], 60000)).rows; } catch (e) {}
+  const afSec = cfg.sections.find(x => x.key === 'agent-feedback') || null;
+  const days = rows.filter(r => r.Date >= since).sort((a, b) => a.Date.localeCompare(b.Date)).map(r => {
+    const sections = {}; for (const x of cfg.sections) sections[x.key] = r[x.title] || '';
+    const todos = Object.values(sections).join('\n').split('\n')
+      .filter(l => /^\s*[-*]\s*\[ \]|#todo\b/i.test(l)).map(l => l.replace(/^\s*[-*]\s*\[ \]\s*/, '').trim());
+    let fields = {}; try { fields = JSON.parse(r.Fields || '{}'); } catch (e) {}
+    return { date: r.Date, fields, todos, agentFeedback: afSec ? (sections[afSec.key] || '') : '', sections };
+  });
+  res.json({ enabled: true, cfg, days });
+}));
 app.get('/api/journal-lists', asyncRoute(async (req, res) => res.json({ lists: await elistsPayload() })));
 app.post('/api/journal-lists/scan', asyncRoute(async (req, res) => {
   if (!HAS_JOURNAL) return res.status(400).json({ error: 'journal scanning runs on the vault host' });

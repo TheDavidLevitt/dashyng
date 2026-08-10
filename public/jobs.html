@@ -96,6 +96,7 @@ const isNew = j => (Date.parse(j.created || '') || 0) > NEW_CUTOFF;
 // stable category order — derived-from-data ordering made sections swap places on every
 // star/remove (owner bug report 2026-07-28); unknown categories append alphabetically
 const CAT_ORDER = ['Chemistry + ML', 'Data center power development', 'AI application', 'AI-first energy & mining',
+  'Petroleum development & EOR',
   'Energy software & AI-for-energy', 'Data-center BD at energy companies',
   'TotalEnergies internal', 'France / Pau', 'International institutions'];
 const catRank = c => { const i = CAT_ORDER.indexOf(c); return i === -1 ? 99 : i; };

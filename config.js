@@ -32,6 +32,8 @@ module.exports = {
   allowedEmail: String(pick('allowedEmail', 'ALLOWED_EMAIL', '')).toLowerCase(),
   // optional journal vault (Obsidian-style markdown daily notes); '' = journal features off
   journalVault: pick('journalVault', 'JOURNAL_VAULT', ''),
+  journalStashDir: pick('journalStashDir', 'DASHBOARD_JOURNAL_STASH_DIR', ''),   // journal widget: obsidian-shaped per-day md folder
+  journalStashFile: pick('journalStashFile', 'DASHBOARD_JOURNAL_STASH_FILE', ''), // journal widget: single agglomerated md
   // one-line salience profile for agent prompts (brief ranking, APA relevance):
   // who the owner is / what genuinely matters to them. '' = prompts stay generic.
   profile: pick('profile', 'DASHBOARD_PROFILE', ''),
