@@ -7232,6 +7232,35 @@ app.get('/api/agents/summary', asyncRoute(async (req, res) => {
     out.activities = Object.entries(byMod).sort((a, b) => b[1] - a[1]).map(([m, n]) => ({ module: m, n }));
   } catch (e) { readFailures++; }
   try { const o = JSON.parse(fs.readFileSync(MODEL_OVERRIDES_FILE, 'utf8')); out.adopted = Object.keys(o).filter(k => !k.startsWith('_') && !['autoAdopt', 'crossProvider'].includes(k)).map(k => ({ module: k, model: o[k] })); } catch (e) {}
+  // headline TIER TABLE (owner decree 2026-08-10): month-to-date usage grouped by the
+  // roster's funding surface — which model is actually carrying each tier right now,
+  // which agents ride it, tokens, and cost twice: REAL (dollars actually paid) vs
+  // HYPOTHETICAL (what the same tokens would cost at list API rates — the subscription's
+  // shadow price). freshest timestamp per tier makes staleness visible at a glance.
+  try {
+    const modSurface = {}; const modAgent = {};
+    for (const a of AGENT_STABLE) for (const m of (a.modules || [])) { modSurface[m] = a.surface || ''; modAgent[m] = a.name; }
+    const tiers = {};
+    for (const r of await usageRows()) {
+      const t = new Date(r.at).getTime(); if (!t || t < monthStart.getTime()) continue;
+      const cls = costClass(r.model, r.module, r.at);
+      const tier = modSurface[r.module] || (cls === 'real' ? 'metered' : cls === 'included' ? 'free' : 'subscription');
+      const g = tiers[tier] = tiers[tier] || { tier, models: {}, agents: new Set(), input: 0, output: 0, real: 0, hypo: 0, lastAt: '' };
+      g.models[r.model] = Math.max(g.models[r.model] || 0, t);
+      g.agents.add(modAgent[r.module] || r.module);
+      g.input += r.input; g.output += r.output;
+      let cost = r.costUsd; const p = priceOf(r.model);
+      if (!cost && p) cost = (r.input * p.in + r.output * p.out) / 1e6;
+      if (cls === 'real') g.real += cost;
+      g.hypo += p ? (r.input * p.in + r.output * p.out) / 1e6 : cost;
+      if (r.at > g.lastAt) g.lastAt = r.at;
+    }
+    out.tiers = Object.values(tiers).map(g => ({ tier: g.tier,
+      model: Object.entries(g.models).sort((a, b) => b[1] - a[1])[0][0].replace(/-20\d{6}$/, ''),
+      agents: [...g.agents].slice(0, 12), input: g.input, output: g.output,
+      real: Math.round(g.real * 100) / 100, hypo: Math.round(g.hypo * 100) / 100, lastAt: g.lastAt }))
+      .sort((a, b) => (b.input + b.output) - (a.input + a.output));
+  } catch (e) { readFailures++; }
   const r2 = o => { for (const k in o) if (typeof o[k] === 'number') o[k] = Math.round(o[k] * 100) / 100; return o; };
   // both source reads failed with no cached fallback (cold instance in a Sheets-quota
   // storm) → tell the client, which retries — silent zeros looked like a blank section

@@ -132,9 +132,12 @@ input.sec-rename { display: inline-block; max-width: 200px; font-size: inherit; 
 .q-folded .q-fold { color: var(--accent); font-weight: 700; }
 .sig-inline .q-body { font-size: 12px; }
 /* section collapse-by-default (⚙): only the heading shows; click it to expand this session */
-.sec-collapsed > *:not(h2):not(:first-child) { display: none !important; }
-.sec-collapsed > h2 { cursor: pointer; opacity: 0.85; }
-.sec-collapsed > h2::after { content: ' ▸'; color: var(--text3); }
+.sec-collapsed > :not(.sec-colbar) { display: none !important; }
+.sec-colbar { display: none; cursor: pointer; padding: 3px 2px; color: var(--text2); }
+.sec-collapsed > .sec-colbar { display: block; }
+.sec-fold-btn { position: absolute; top: 2px; right: 2px; opacity: 0.35; z-index: 3; }
+.sec-fold-btn:hover { opacity: 1; }
+section[data-sec] { position: relative; }
 .ag-tbl { width: 100%; border-collapse: collapse; font-size: 12px; }
 .ag-tbl th { text-align: left; font-size: 9px; text-transform: uppercase; color: var(--text3); padding: 2px 6px; }
 .ag-tbl td { padding: 2px 6px; border-top: 1px solid var(--border); vertical-align: top; }
@@ -643,6 +646,31 @@ function setSecTitle(el, title) { // replace only the text node — keep the ＋
   const n = [...el.childNodes].find(x => x.nodeType === 3 && x.nodeValue.trim());
   if (n) n.nodeValue = title + ' '; else el.prepend(document.createTextNode(title + ' '));
 }
+function toggleSecCollapse(k, on) {
+  // sticky per-section collapse (owner decree 2026-08-10): state = settings.sections[key].collapsed,
+  // the same field the gear's "fold" checkbox has always written — the render side finally honors it.
+  appSettings.sections = { ...(appSettings.sections || {}) };
+  appSettings.sections[k] = { ...(appSettings.sections[k] || {}), collapsed: on };
+  applySettings();
+  api('/api/settings', { method: 'POST', body: JSON.stringify({ settings: { sections: appSettings.sections } }) }).catch(() => {});
+}
+function ensureFoldUi(s) {
+  const k = s.dataset.sec;
+  if (!s.querySelector(':scope > .sec-colbar')) {
+    const bar = document.createElement('div');
+    bar.className = 'sec-colbar';
+    bar.onclick = () => toggleSecCollapse(k, false);
+    s.prepend(bar);
+    const btn = document.createElement('button');
+    btn.className = 'ib sec-fold-btn';
+    btn.title = 'Collapse this section (sticky)';
+    btn.textContent = '▾';
+    btn.onclick = e => { e.stopPropagation(); toggleSecCollapse(k, true); };
+    s.appendChild(btn);
+  }
+  const title = ((appSettings.sections || {})[k] || {}).title || SEC_DEFS[k] || k;
+  s.querySelector(':scope > .sec-colbar').innerHTML = '▸ <b>' + esc(title) + '</b> <span class="tiny" style="color:var(--text3)">click to expand</span>';
+}
 function applySettings() {
   renderLinks();
   const wrap = document.getElementById('secs');
@@ -655,6 +683,8 @@ function applySettings() {
     wrap.appendChild(s);
     const c = conf[s.dataset.sec] || {};
     s.style.display = c.hidden ? 'none' : '';
+    ensureFoldUi(s);
+    s.classList.toggle('sec-collapsed', !!c.collapsed);
     const t = s.querySelector('[data-sec-title]');
     if (t && c.title) setSecTitle(t, c.title);
   }
@@ -719,6 +749,7 @@ function cfgToggle() {
       <b style="font-size:12px">${esc(SEC_DEFS[k] || k)}</b>
       <span class="tiny muted">${conf[k]?.title ? 'shown as “' + esc(conf[k].title) + '”' : ''}</span>
     </div>`).join('')}</div>
+    ${!(appSettings.journal && appSettings.journal.enabled) ? `<div class="cfg-row tiny"><button id="cfg-journal-on" type="button">📓 enable Journal widget</button><span class="muted">daily journal — tracked header fields, agent-readable sections; currently off on this deployment</span></div>` : ''}
     <div class="cfg-head">Task lists — rename · subtitle/agent instruction · width · bullets/ranked · webhook · ✕ remove</div>
     ${sortedQuads().map((q, i) => `<div class="cfg-row" data-q="${q.key}" style="flex-wrap:wrap">
       <span style="min-width:20px" class="tiny" title="${esc(q.key)}">${i + 1}</span>
@@ -814,6 +845,15 @@ function cfgToggle() {
       if (n) { toast(`Move or finish its ${n} task${n > 1 ? 's' : ''} first`); return; }
       quadRemove(k).then(() => { cfgToggle(); cfgToggle(); }); // hide + reopen = fresh panel
     });
+    const jon = p.querySelector('#cfg-journal-on');
+    if (jon) jon.onclick = async () => {
+      const r = await api('/api/settings', { method: 'POST', body: JSON.stringify({ settings: { journal: {
+        enabled: true,
+        fields: [{ key: 'mood', label: 'Mood', track: true }, { key: 'energy', label: 'Energy', track: true }],
+        sections: [{ key: 'journal', title: 'Journal', stash: 'column' }, { key: 'todo', title: 'Todo', stash: 'column' }, { key: 'agent-feedback', title: 'Agent Feedback', stash: 'column' }] } } }) }).catch(() => null);
+      if (!r || r.error) { showErr((r && r.error) || 'could not enable journal'); return; }
+      location.reload();
+    };
     const qa = p.querySelector('#cfg-qadd');
     if (qa) qa.onclick = () => quadAddList().then(() => { cfgToggle(); cfgToggle(); });
   };
@@ -3716,8 +3756,18 @@ api('/api/agents/summary').then(d => {
   const worked = (d.activities||[]).slice(0,5).map(a => `${esc(a.module)} ×${a.n}`).join(' · ') || 'quiet';
   const dec = (d.decisions||[]).slice(0,3).map(x => `<div class="tiny" style="padding:1px 0;font-size:11.5px">• <b>${esc(x.module)}</b> ${esc(x.decision)}${x.why ? ' <span class="muted">— ' + esc(String(x.why).slice(0,90)) + '</span>' : ''}</div>`).join('');
   const adopted = (d.adopted||[]).map(a => `<span class="tiny" style="color:var(--green)">✅ ${esc(a.module)}→${esc(a.model)}</span>`).join(' ');
-  $('agents-summary').innerHTML =
-    `<div style="font-size:12.5px"><b>24h:</b> ${worked} · ${fmtTok(d.day.input)} in / ${fmtTok(d.day.output)} out · ${COST(d.day) || '$0.00'}</div>`
+  const tierRows = (d.tiers || []).map(t => `<tr>
+      <td><b>${esc(t.tier)}</b></td><td>${esc(t.model)}</td>
+      <td title="${esc((t.agents || []).join(', '))}" style="cursor:default">${(t.agents || []).length}</td>
+      <td style="text-align:right">${fmtTok((t.input || 0) + (t.output || 0))}</td>
+      <td style="text-align:right;color:${t.real ? 'var(--red)' : 'var(--text3)'}">$${(t.real || 0).toFixed(2)}</td>
+      <td style="text-align:right;color:var(--text3)">$${(t.hypo || 0).toFixed(2)}</td>
+      <td style="color:var(--text3)">${esc(String(t.lastAt || '').slice(5, 16).replace('T', ' '))}</td></tr>`).join('');
+  const tierTable = tierRows ? `<table class="tiny" style="border-collapse:collapse;width:100%;margin-bottom:5px">
+      <tr style="text-transform:uppercase;font-size:10px;color:var(--text3)"><th align="left">tier</th><th align="left">model now</th><th align="left" title="hover a count for the full agent list">agents</th><th align="right">tok (mo)</th><th align="right">real</th><th align="right" title="the same tokens at list API rates — the subscription's shadow price">@api</th><th align="left">last</th></tr>
+      ${tierRows}</table>` : '';
+  $('agents-summary').innerHTML = tierTable
+    + `<div style="font-size:12.5px"><b>24h:</b> ${worked} · ${fmtTok(d.day.input)} in / ${fmtTok(d.day.output)} out · ${COST(d.day) || '$0.00'}</div>`
     + (dec ? `<div class="tiny" style="text-transform:uppercase;font-weight:700;margin-top:4px">Key decisions</div>${dec}` : '')
     + `<div style="font-size:12.5px;margin-top:4px"><b>Month to date:</b> $${mo.toFixed(2)} — ${COST(d.month) || '$0.00'} ${adopted}</div>`
     + `<div class="tiny" style="margin-top:3px"><span style="color:var(--red)">red</span>=charged (real) · <span style="color:var(--green)">green</span>=credit · grey=subscription (hypothetical) · <a href="/agents.html">full agents dashboard →</a></div>`;
