@@ -348,6 +348,12 @@ module.exports = {
     setTimeout(() => louetCheck(ctx).catch(e => lesc({ level: 'error', text: 'check failed: ' + e.message })), 2 * 60e3);
     setInterval(() => louetCheck(ctx).catch(e => lesc({ level: 'error', text: 'check failed: ' + e.message })), 3600e3);
     app.get('/api/louet/series', async (req, res) => { // cache-first; background refresh >6h
+      if (String(req.query.raw || '') === '1') { // full 13-month series — client-side windowing
+        let c0 = lfRead();
+        if (!c0.daily.length) { await louetFlowRefresh(); c0 = lfRead(); }
+        else if (Date.now() - c0.updatedAt > 6 * 3600e3) louetFlowRefresh();
+        return res.json({ unit: 'm³/s', updatedAt: c0.updatedAt, daily: c0.daily });
+      }
       const days = Math.min(185, Math.max(7, parseInt(req.query.days, 10) || 30));
       let c = lfRead();
       if (!c.daily.length) { await louetFlowRefresh(); c = lfRead(); } // first ever call: block once

@@ -242,7 +242,7 @@ input.loc-bar-input { font-size: 10.5px; width: 100%; padding: 0 3px; background
 .q-task.drop-before { box-shadow: 0 -2px 0 0 var(--accent); }
 .q-task.drop-after { box-shadow: 0 2px 0 0 var(--accent); }
 .q-task.q-settled { opacity: .45; }
-.q-task.q-settled .q-body { text-decoration: line-through; text-decoration-color: var(--text2); }
+/* settled = faded + green ✓ only — never strikethrough (owner call, 2026-08) */
 .q-thread { margin: 0 0 3px 30px; }
 .q-cline { font-size: 11px; color: var(--text2); padding: 1px 0; }
 .q-cline b { color: var(--accent); }
@@ -1150,7 +1150,7 @@ function reportedHtml(t) {
   if (!on) return '';
   const d = Math.round((Date.parse(todayIso() + 'T00:00:00Z') - Date.parse(on + 'T00:00:00Z')) / 864e5);
   const when = d <= 0 ? T('today') : d === 1 ? T('yesterday') : T('%d days ago').replace('%d', d);
-  return ` <span class="q-reported">${T('last reported completed')}: ${when} (${on.split('-').reverse().join('-')})</span>`;
+  return ` <span class="q-reported">✓ ${T('last reported completed')}: ${when} (${on.split('-').reverse().join('-')})</span>`;
 }
 // grey until its next occurrence is actually due: a fresh report (reportedOn) settles the
 // row immediately; after the day rolls over, a recurring row stays settled off its last
