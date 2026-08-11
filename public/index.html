@@ -1220,13 +1220,46 @@ function taskHtml(t, opts) {
     (t.comments || []).length ? ` <span class="q-cmt" title="${esc(t.comments.map(c => `${c.from}: ${c.text}`).join('\n'))}">💬${t.comments.length}</span>` : ''}${reportedHtml(t)}${note}</span>
     ${star}
     ${t.history ? `<button class="q-btn q-hist" title="${T('conversation & completion history')}">🕓</button>` : ''}
+    ${normQ(t.Quadrant) === 'Q3' && !opts.child ? '<button class="q-btn q-ithread" title="Agent thread — the intern attempts this task autonomously; reply here to steer it">🤖</button>' : ''}
     <button class="q-btn move" title="Move / group">⇄</button>
     <button class="q-btn done" title="Mark done">✓</button>
-  </div>${sharedThreadHtml(t)}`;
+  </div>${sharedThreadHtml(t)}${normQ(t.Quadrant) === 'Q3' && !opts.child ? `<div class="q-ithreadbox" data-for="${esc(t.ID)}" style="display:none"></div>` : ''}`;
 }
 // Shared rows carry a conversation: the helper's questions with my replies inline under
 // them (one thread per occurrence), a reply box, and a 🕓-expanded history of past
 // occurrences — each with its conversation and the dates the round was completed.
+// Q3 intern threads (owner decree 2026-08-10): mirrors the shared-row conversation UX.
+// The whole thread is auto-collapsed behind the row's 🤖; exchanges are '-------'-separated
+// sections, all but the newest folded. Replying re-runs the intern IMMEDIATELY.
+const internPolls = {};
+async function openInternThread(id, box) {
+  const d = await api('/api/intern/thread/' + encodeURIComponent(id)).catch(() => null);
+  const md = (d && d.md) || '';
+  const parts = md.split(/\n-------\n/).filter(p => p.trim());
+  const head = parts.shift() || '';
+  box.innerHTML = `<div class="q-cline tiny muted">${esc(head.split('\n')[0].replace(/^#\s*/, ''))}</div>`
+    + (parts.length ? parts.map((p, i) => {
+        const lines = p.trim().split('\n');
+        const who = lines.shift() || '';
+        return `<details ${i === parts.length - 1 ? 'open' : ''} style="margin:2px 0"><summary class="tiny" style="cursor:pointer">${esc(who.replace(/\*\*/g, ''))}</summary><div class="q-cline" style="white-space:pre-wrap;font-size:12px">${esc(lines.join('\n').trim())}</div></details>`;
+      }).join('') : '<div class="q-cline tiny muted">no attempts yet — the intern picks this up within the hour, or reply below to start it now</div>')
+    + `<div style="display:flex;gap:4px;margin-top:3px"><input class="q-input q-ireply" placeholder="reply to the intern — it re-runs immediately" style="flex:1">
+       <button class="ib q-isend">↩</button></div>`;
+  const inp = box.querySelector('.q-ireply'), send = box.querySelector('.q-isend');
+  const go = async () => {
+    const text = inp.value.trim(); if (!text) return;
+    send.textContent = '…';
+    const r = await api('/api/intern/reply/' + encodeURIComponent(id), { method: 'POST', body: JSON.stringify({ text }) }).catch(() => null);
+    if (!r || r.error) { showErr((r && r.error) || 'reply failed'); send.textContent = '↩'; return; }
+    inp.value = '';
+    openInternThread(id, box); // shows the owner line; the agent's reply lands on the next polls
+    clearInterval(internPolls[id]);
+    let n = 0;
+    internPolls[id] = setInterval(() => { if (box.style.display === 'none' || ++n > 20) return clearInterval(internPolls[id]); openInternThread(id, box); }, 20000);
+  };
+  send.onclick = go;
+  inp.onkeydown = e => { if (e.key === 'Enter') go(); e.stopPropagation(); };
+}
 function sharedThreadHtml(t) {
   if (!String(t.ID || '').startsWith('sh:')) return '';
   const convo = (t.comments || []).map(c =>
@@ -1339,6 +1372,15 @@ function renderMatrix() {
   renderCompleted();
   renderSalient();
   attachHandlers();
+  $('eisen').querySelectorAll('.q-ithread').forEach(b => b.onclick = e => {
+    e.stopPropagation();
+    const row = b.closest('.q-task'); const id = row.dataset.id;
+    const box = $('eisen').querySelector(`.q-ithreadbox[data-for="${CSS.escape(id)}"]`);
+    if (!box) return;
+    const opening = box.style.display === 'none';
+    box.style.display = opening ? '' : 'none';
+    if (opening) openInternThread(id, box); else clearInterval(internPolls[id]);
+  });
   $('eisen').querySelectorAll('.q-fold').forEach(b => b.onclick = e => {
     e.stopPropagation();
     const k = b.dataset.k;

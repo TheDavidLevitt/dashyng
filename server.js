@@ -5394,6 +5394,127 @@ async function sharedListView(slug, cfg) {
     items: items.map(i => ({ text: disp(i.text), orig: tr[i.text] ? i.text : undefined, done: i.mark === 'Y', doer: i.mark === 'D',
       comments: comments.filter(c => c.Item === i.text || !c.Item).map(c => ({ from: c.From, text: disp(c.Text), at: c.At })) })) };
 }
+// ---------- Q3 intern engine (owner decree 2026-08-10) ----------
+// Q3 = "Delegated to Agent". Open Q3 rows are ATTEMPTED AUTONOMOUSLY: a tiered intern
+// (tag agent:steeldust|thoroughbred|secretariat -> cheap|mid|super, models from the roster
+// when present) advances each task conversationally. The full back-and-forth persists as
+// one .md per task (CFG.internTasksDir) AND mirrors to the 'Agent Threads' tab so every
+// tier can read it. Owner replies (dashboard thread box) trigger an IMMEDIATE re-run —
+// recursion on response, not next-heartbeat. Each run ends with a self-check ("could I
+// advance further? would a higher tier?"): one extra same-run iteration is allowed, and
+// escalation is RECOMMENDED, never self-granted. Guardrails identical to the heartbeat:
+// draft/queue/propose — never send, never move money, never change settings.
+const INTERN_DIR = CFG.internTasksDir || path.join(__dirname, 'data', 'agent-threads');
+const ITHREADS_TAB = 'Agent Threads';
+const ITHREADS_HEADERS = ['ID', 'Task', 'Thread', 'Status', 'Updated'];
+const INTERN_TIER_DEFAULTS = {
+  'intern-cheap': 'claude-haiku-4-5-20251001', intern: 'claude-sonnet-5', 'intern-super': 'claude-opus-5',
+};
+function internTierFor(task) {
+  const tags = String(task.Tags || '').toLowerCase();
+  const mod = /agent:secretariat/.test(tags) ? 'intern-super' : /agent:thoroughbred/.test(tags) ? 'intern' : 'intern-cheap';
+  const roster = AGENT_STABLE.find(a => (a.modules || []).includes(mod));
+  return { module: mod, model: modelFor(mod, (roster && roster.model) || INTERN_TIER_DEFAULTS[mod]), name: (roster && roster.name) || mod };
+}
+const internThreadPath = id => path.join(INTERN_DIR, id + '.md');
+function readInternThread(id) { try { return fs.readFileSync(internThreadPath(id), 'utf8'); } catch (e) { return ''; } }
+async function writeInternThread(id, taskTitle, md, status) {
+  fs.mkdirSync(INTERN_DIR, { recursive: true });
+  fs.writeFileSync(internThreadPath(id), md);
+  try { // sheet mirror = the cross-tier read path (phone reads threads from here)
+    await ensureTab(ITHREADS_TAB, ITHREADS_HEADERS);
+    const { rows } = await readTab(TODO_SHEET_ID, ITHREADS_TAB, ITHREADS_HEADERS);
+    const hit = rows.find(r => r.ID === id);
+    const vals = [id, String(taskTitle).slice(0, 120), md.slice(0, 45000), status || '', nowIso()];
+    if (hit) await store.values.batchUpdate({ spreadsheetId: TODO_SHEET_ID, requestBody: { valueInputOption: 'RAW',
+      data: vals.map((v, i) => ({ range: `'${ITHREADS_TAB}'!${colLetter(i)}${hit._row}`, values: [[v]] })) } });
+    else await appendTabRows(ITHREADS_TAB, ITHREADS_HEADERS, [vals]);
+    _tabCache.delete(TODO_SHEET_ID + '|' + ITHREADS_TAB);
+  } catch (e) { console.error('intern thread mirror:', e.message); }
+}
+const internBusy = new Set();
+async function internRun(taskId, trigger = 'interval') {
+  if (!HAS_CLAUDE && !(CFG.llmRelayUrl && CFG.llmRelayKey)) return { error: 'no llm on this tier' };
+  if (internBusy.has(taskId)) return { busy: true };
+  internBusy.add(taskId);
+  try {
+    const { rows } = await readTodoTab();
+    const task = rows.find(r => r.ID === taskId);
+    if (!task || String(task.Status).trim().toLowerCase() !== 'open' || String(task.Quadrant).trim() !== 'Q3') return { skipped: 'not an open Q3 task' }; // case-insensitive: the heartbeat once wrote 'Open' and the rows went invisible
+    const tier = internTierFor(task);
+    let md = readInternThread(taskId);
+    if (!md) md = `# ${task.Task}\n\ntask ${taskId} · opened ${task.Created || '?'} · tags: ${task.Tags || '-'}\n${task.Notes ? '\nOwner notes at delegation:\n' + task.Notes + '\n' : ''}`;
+    const runsToday = (md.match(new RegExp('\\*\\*' + tier.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ' · ' + today(), 'g')) || []).length;
+    if (trigger === 'interval' && runsToday >= 3) return { skipped: 'daily attempt cap' };
+    let extraUsed = false;
+    for (let iter = 0; iter < 2; iter++) {
+      const raw = await runClaude(
+        `You are "${tier.name}", an autonomous intern advancing ONE delegated task for your owner. Work conversationally — this thread reads like a dialogue with the owner (same style as a human assistant's task thread).\n` +
+        `THE TASK: ${task.Task}\n\nTHE THREAD SO FAR (your past attempts + owner replies):\n${md.slice(-14000)}\n\n` +
+        `Advance the task CONCRETELY right now: research with the tools, compute, draft, compare options, verify facts, produce the artifact — do not merely restate a plan. If truly blocked on the owner, say exactly what you need (ONE crisp question max — never repeat a question already answered or asked in the thread).\n` +
+        `GUARDRAILS: draft/queue/propose only — NEVER send email, move money, or change settings. No placeholders pretending to be results.\n` +
+        `Write your reply as thread markdown (concise, deliverable-first). End with EXACTLY one status line:\n` +
+        `STATUS: advanced | blocked-on-owner | done-proposed\n` +
+        `Then IF AND ONLY IF warranted add one more line from these:\n` +
+        `CONTINUE (you can concretely advance further in a second pass right now — you get at most one)\n` +
+        `ESCALATE: thoroughbred|secretariat — <one line why a more capable tier would materially help>`,
+        { tools: 'WebSearch,WebFetch', timeoutMs: 300000, module: tier.module, model: tier.model });
+      const reply = String(raw || '').trim();
+      if (!reply) break;
+      md += `\n\n-------\n**${tier.name} · ${today()} ${new Date().toTimeString().slice(0, 5)} · ${tier.model.replace(/-20\d{6}$/, '')}**\n\n${reply}`;
+      const wantsMore = /\nCONTINUE\s*$/m.test(reply) || /\nCONTINUE\n/.test(reply);
+      if (!wantsMore || extraUsed) break;
+      extraUsed = true; // the single self-granted extra iteration
+    }
+    const status = (md.match(/STATUS:\s*(advanced|blocked-on-owner|done-proposed)/g) || []).pop() || '';
+    await writeInternThread(taskId, task.Task, md, status.replace('STATUS:', '').trim());
+    await updateTaskById(taskId, { Updated: nowIso() }).catch(() => {});
+    return { ok: true, status };
+  } finally { internBusy.delete(taskId); }
+}
+async function internDrain() {
+  try {
+    const { rows } = await readTodoTab();
+    const q3 = rows.filter(r => String(r.Status).trim().toLowerCase() === 'open' && String(r.Quadrant).trim() === 'Q3');
+    for (const t of q3) {
+      let mtime = 0; try { mtime = fs.statSync(internThreadPath(t.ID)).mtimeMs; } catch (e) {}
+      if (Date.now() - mtime < 4 * 3600e3) continue; // attempted recently
+      await internRun(t.ID, 'interval').catch(e => console.error('internRun', t.ID, e.message));
+    }
+  } catch (e) { console.error('internDrain:', e.message); }
+}
+if ((HAS_CLAUDE || (CFG.llmRelayUrl && CFG.llmRelayKey)) && !process.env.DASHBOARD_NO_JOBS) {
+  setTimeout(() => internDrain().catch(() => {}), 4 * 60000);
+  setInterval(() => internDrain().catch(() => {}), 45 * 60000); // "within a few hours" with margin
+}
+app.get('/api/intern/thread/:id', asyncRoute(async (req, res) => {
+  const local = readInternThread(req.params.id);
+  if (local) return res.json({ id: req.params.id, md: local, source: 'file' });
+  try { // cross-tier: the sheet mirror
+    const { rows } = await readTabCached(TODO_SHEET_ID, ITHREADS_TAB, ITHREADS_HEADERS, 20000);
+    const hit = rows.find(r => r.ID === req.params.id);
+    if (hit) return res.json({ id: req.params.id, md: hit.Thread || '', status: hit.Status, source: 'sheet' });
+  } catch (e) {}
+  res.json({ id: req.params.id, md: '' });
+}));
+app.post('/api/intern/reply/:id', asyncRoute(async (req, res) => {
+  const text = String((req.body || {}).text || '').trim();
+  if (!text) return res.status(400).json({ error: 'text required' });
+  if (!HAS_CLAUDE && !(CFG.llmRelayUrl && CFG.llmRelayKey)) { // phone tier: park it, the Mac drains + runs
+    const id = await enqueueRpc('intern-reply', { id: req.params.id, text });
+    return res.json({ ok: true, queued: true, id });
+  }
+  const { rows } = await readTodoTab();
+  const task = rows.find(r => r.ID === req.params.id);
+  if (!task) return res.status(404).json({ error: 'task not found' });
+  let md = readInternThread(req.params.id) || `# ${task.Task}\n`;
+  md += `\n\n-------\n**Owner · ${today()} ${new Date().toTimeString().slice(0, 5)}**\n\n${text}`;
+  await writeInternThread(req.params.id, task.Task, md, 'owner-replied');
+  setTimeout(() => internRun(req.params.id, 'owner-reply').catch(() => {}), 100); // recursion is immediate
+  res.json({ ok: true });
+}));
+app.post('/api/intern/run/:id', asyncRoute(async (req, res) => res.json(await internRun(req.params.id, 'manual'))));
+
 // ---------- Journal widget (core, 2026-08-10) ----------
 // A dashboard-native daily journal for deployments without an Obsidian vault (the vault
 // journal above stays the owner-of-record wherever HAS_JOURNAL). Config lives in
@@ -6234,6 +6355,15 @@ const AGENTQ_HEADERS = ['Title', 'URL', 'Source', 'Added', 'Done'];
 const RPC_TAB = 'RPC Queue';
 const RPC_HEADERS = ['ID', 'Kind', 'Payload', 'Result', 'Error', 'Created', 'Done'];
 const RPC_HANDLERS = { reparse: (p) => doReparse(p), media_find: (p) => doMediaFind(p), habit_freq: (p) => resolveHabitFreq(p), news_describe: (p) => doNewsDescribe(p),
+  'intern-reply': async (p) => { // phone thread replies: append + immediate re-run on the Mac
+    const { rows } = await readTodoTab(); const task = rows.find(r => r.ID === p.id);
+    if (!task) throw new Error('task not found: ' + p.id);
+    let md = readInternThread(p.id) || ('# ' + task.Task + '\n');
+    md += '\n\n-------\n**Owner · ' + today() + '**\n\n' + p.text;
+    await writeInternThread(p.id, task.Task, md, 'owner-replied');
+    internRun(p.id, 'owner-reply').catch(() => {});
+    return { ok: true };
+  },
   ...(HAS_JOURNAL ? { 'gmail-token': (p) => { // journal host only — the VM never holds the gmail grant
     if (!p || !p.refresh_token) throw new Error('no refresh_token in payload');
     fs.mkdirSync(path.dirname(GMAIL_TOKEN_FILE), { recursive: true });

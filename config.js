@@ -32,6 +32,7 @@ module.exports = {
   allowedEmail: String(pick('allowedEmail', 'ALLOWED_EMAIL', '')).toLowerCase(),
   // optional journal vault (Obsidian-style markdown daily notes); '' = journal features off
   journalVault: pick('journalVault', 'JOURNAL_VAULT', ''),
+  internTasksDir: pick('internTasksDir', 'DASHBOARD_INTERN_TASKS_DIR', ''),      // Q3 intern engine: one thread .md per delegated task
   journalStashDir: pick('journalStashDir', 'DASHBOARD_JOURNAL_STASH_DIR', ''),   // journal widget: obsidian-shaped per-day md folder
   journalStashFile: pick('journalStashFile', 'DASHBOARD_JOURNAL_STASH_FILE', ''), // journal widget: single agglomerated md
   // one-line salience profile for agent prompts (brief ranking, APA relevance):
