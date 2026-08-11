@@ -7910,9 +7910,12 @@ app.get('/api/agent-stable', asyncRoute(async (req, res) => {
   const decRows = (dec?.data.values || []).filter(v => new Date(v[0]).getTime() >= cutoff);
   const rolesCfg = loadApaRoles();
   const out = AGENT_STABLE.map(a => {
-    const u = rows.filter(r => a.modules.includes(r.module));
+    // prefix-aware join: a roster module 'worker' also claims rows metered as 'worker:<sub>'
+    // (external services namespace their per-group runs under one module prefix)
+    const owns = mod => a.modules.some(m => mod === m || String(mod || '').startsWith(m + ':'));
+    const u = rows.filter(r => owns(r.module));
     const acts = [...u.map(r => `${r.module} run [${r.model.replace(/-20\d{6}$/, '')}] — ${r.input}+${r.output} tok`),
-                  ...decRows.filter(v => a.modules.includes(v[2])).map(v => v[4])];
+                  ...decRows.filter(v => owns(v[2])).map(v => v[4])];
     const cost = u.reduce((n, r) => n + r.costUsd, 0);
     const cls = u.length ? costClass(u[0].model, u[0].module, u[0].at) : costClass(a.model, a.modules[0]);
     // effective model = APA override for the agent's primary module, else registry default;
