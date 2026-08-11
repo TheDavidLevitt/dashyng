@@ -1,5 +1,5 @@
 {
-  "_doc": "Use cases (roles): primary = plot y-axis benchmark; min = quality threshold (user value overrides APA's hypothesis); winner = currently selected model; fallbacks = ordered stand-ins when the winner hits subscription limits or is unavailable; modules = which agent modules run under this role; special = capability note when no public benchmark applies. all_benchmarks = the well-known set the board compiler always tries to fill. CI refines everything from outcomes; manual edits win.",
+  "_doc": "Use cases (roles): primary = plot y-axis benchmark; min = quality threshold (user value overrides APA's hypothesis); winner = currently selected model; fallbacks = ordered stand-ins when the winner hits subscription limits or is unavailable; modules = which agent modules run under this role; special = capability note when no public benchmark applies. all_benchmarks = the well-known set the board compiler always tries to fill. CI refines everything from outcomes; manual edits win. delistN (top-level, default 3) = consecutive board compiles a winner may be missing before the delisted-winner watch emits a relaxed-gate replacement proposal (proposal only, never an auto-swap).",
   "roles": {
     "thoroughbred": {
       "label": "Thoroughbred \u2014 top reasoning",

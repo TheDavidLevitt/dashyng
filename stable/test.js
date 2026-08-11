@@ -6,6 +6,8 @@ const { createMeter, createAdapters, createApa, createBoard, createTiers, pricin
   // pricing
   assert(pricing.priceOf('claude-sonnet-5').out === 15, 'priceOf');
   assert(pricing.costClass('grok-4', 'x') === 'real', 'grok is out-of-pocket');
+  assert(pricing.costClass('anthropic/claude-sonnet-5') === 'real', 'marketplace-routed claude is out-of-pocket');
+  assert(pricing.costClass('openrouter:claude-opus-5') === 'real', 'openrouter-prefixed is out-of-pocket');
   assert(pricing.selfHostPerMTok({ kwhPrice: 0.15, watts: 700, tokPerSec: 40 }) === 0.73, 'self-host estimate');
 
   // meter + memory sink: cost fill-in + funding class + query

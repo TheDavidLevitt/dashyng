@@ -86,7 +86,7 @@ function loadCredits(){
       const pct=c.total&&c.used!=null?Math.min(100,Math.round(c.used/c.total*100)):null;
       const bar=pct!=null?`<div style="height:4px;background:var(--card2);border-radius:2px;margin:3px 0"><div style="height:4px;width:${pct}%;border-radius:2px;background:${pct>85?'var(--red)':pct>60?'var(--amber)':'var(--green)'}"></div></div>`:'';
       const expSoon=c.until&&(new Date(c.until)-Date.now())<21*86400e3;
-      const amt=c.used!=null?`$${c.used.toFixed(2)} used${c.total?` of $${c.total}${left!=null?` — <b style="color:var(--green)">$${left.toFixed(2)} left</b>`:''}`:' (no cap entered)'}`:(c.total?`$${c.total} (not metered)`:'not metered');
+      const amt=c.used!=null?`$${c.used.toFixed(2)} used${c.period==='month'?' this month':' to date'}${c.total?` of $${c.total}${left!=null?` — <b style="color:var(--green)">$${left.toFixed(2)} left</b>`:''}`:' (no cap entered)'}`:(c.total?`$${c.total} (not metered)`:'not metered');
       const del=BUILTIN_POOLS.includes(c.key)?'':` · <a class="tiny" href="#" onclick="delCredit('${esc(c.key)}');return false">✕</a>`;
       return `<div style="padding:4px 0;border-bottom:1px solid var(--border)"><div style="display:flex;gap:8px;align-items:baseline"><b style="font-size:12.5px">${esc(c.name)}</b><span class="muted" style="font-size:11.5px">${amt}${c.until?` · until <span style="color:${expSoon?'var(--amber)':'inherit'}">${esc(c.until)}</span>`:''}${c.period==='month'?' · resets monthly':''}</span><span style="margin-left:auto"><a class="tiny" href="#" onclick="editCredit('${esc(c.key)}');return false">edit</a>${del}</span></div>${bar}<div class="tiny">${esc(c.note||'')}${c.match?` · matches /${esc(c.match)}/`:''}</div></div>`;
     }).join('')
@@ -149,7 +149,7 @@ api('/api/apa/status').then(d=>{
   $('apa-meta').textContent=`— scanned ${scan}`;
   const tg=(n,on,l)=>`<label class="t"><input type="checkbox" ${on?'checked':''} onchange="apaConfig('${n}',this.checked)" style="vertical-align:-2px"> ${l}</label>`;
   const adopted=ov.map(k=>`<div class="tiny" style="color:var(--green);font-size:11.5px">✅ ${esc(k)} → <b>${esc(d.overrides[k])}</b> (<a href="#" onclick="apaRevert('${esc(k)}');return false">revert</a>)</div>`).join('');
-  const list=(d.recent||[]).map(r=>`<div class="tiny" style="padding:1px 0;font-size:11.5px">${APA_ACT[r.action]||'·'} <a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.headline)}</a> <span class="muted">${esc(r.lab||r.kind||'')}</span></div>`).join('')||'<div class="empty">No findings yet.</div>';
+  const list=(d.recent||[]).map(r=>`<div class="tiny" style="padding:1px 0;font-size:11.5px">${APA_ACT[r.action]||'·'} <a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.headline)}</a> <span class="muted">${esc(r.lab||r.kind||'')}${r.at?` · ${new Date(r.at).toLocaleDateString('en-GB',{day:'2-digit',month:'short'})}`:''}</span></div>`).join('')||'<div class="empty">No findings yet.</div>';
   $('apa-body').innerHTML=`<div style="margin-bottom:5px">${tg('autoAdopt',d.autoAdopt,'auto-adopt')}${tg('crossProvider',d.crossProvider,'cross-provider (US)')}<a class="tiny" href="#" onclick="apaScan();return false">scan now</a></div>`+adopted+list;
 }).catch(()=>{$('apa-body').innerHTML='<div class="empty">APA idle.</div>';});
 function apaConfig(k,v){const b={};b[k]=v;api('/api/apa/config',{method:'POST',body:JSON.stringify(b)}).then(()=>toast(k+' '+(v?'on':'off')));}
@@ -174,7 +174,8 @@ function renderBoard(){
   if(!models.length){$('board').innerHTML='<div class="empty">empty — <a href="#" onclick="apaBoardCompile();return false">compile now</a> (Mac/VM)</div>';return;}
   $('board-meta').textContent=`— ${models.length} models · ${d.updated?new Date(d.updated).toLocaleDateString('en-GB',{day:'2-digit',month:'short'}):''}`;
   const seen={},uniq=models.filter(m=>{const k=(m.model||'').toLowerCase();if(seen[k])return false;seen[k]=1;return true;});
-  const head=`<div style="display:flex;gap:10px;align-items:center;margin-bottom:4px"><a class="tiny" href="#" onclick="boardMode=boardMode==='plots'?'table':'plots';renderBoard();return false">${boardMode==='plots'?'as table':'as plots'}</a><a class="tiny" href="#" onclick="apaBoardCompile();return false">refresh data</a></div>`;
+  const head=`<div style="display:flex;gap:10px;align-items:center;margin-bottom:4px"><a class="tiny" href="#" onclick="boardMode=boardMode==='plots'?'table':'plots';renderBoard();return false">${boardMode==='plots'?'as table':'as plots'}</a><a class="tiny" href="#" onclick="apaBoardCompile();return false">refresh data</a></div>`
+    +((d.warnings||[]).length?`<div style="margin:0 0 4px">${d.warnings.map(w=>`<div class="tiny" style="color:var(--amber)">⚠ ${esc(w.text)}</div>`).join('')}</div>`:'');
   const assume=`<div class="tiny" style="margin-top:4px">⚑ open-weight, plotted at cheapest major host's price (host named per model). ^ marks the <b>self-host reference</b>: <b>${d.selfHost.watts}W</b> rig @ <b>${d.selfHost.tokPerSec}</b> tok/s × <b>$${d.selfHost.kwhPrice}/kWh</b> ⇒ <b>$${d.selfHost.perMTokOut}/1M out</b> — a single-rig electricity-only estimate (per-token energy varies with model size/throughput, so it's an axis marker, not a per-model price) — <a href="#" onclick="editSelfHost();return false">edit assumptions</a></div>`;
   if(boardMode==='table'){
     const benches=[...new Set(uniq.flatMap(m=>Object.keys(m.benchmarks||{})))].slice(0,6);
@@ -253,7 +254,7 @@ loadBoard();
 
 // ---- stable + incoming ----
 api('/api/agent-stable').then(d=>{
-  $('stable-meta').textContent=`— ${d.active} active, ${d.standby} on standby`;
+  $('stable-meta').textContent=`— ${d.active} active, ${d.standby} on standby · usage & spend: last ${d.windowDays||7} days`;
   if(!d.agents.length){$('stable-body').innerHTML='<div class="empty">No agents declared yet — describe your fleet in data/agents-roster.json (name, model, modules, useCase, role, jd) and it renders here joined with live usage.</div>';return;}
   $('stable-body').innerHTML=d.agents.map(a=>{
     const badge=a.status==='active'?'':` <span class="tiny">[${a.status}]</span>`;
@@ -261,10 +262,14 @@ api('/api/agent-stable').then(d=>{
     // if the agent's effective model isn't the role's declared winner.
     const uc=a.useCaseLabel?` <span class="muted">(${esc(a.useCaseLabel)}: ${fundSpan(a.model)}${a.winner&&a.winner!==a.model?` <span style="color:var(--amber)" title="role winner is ${esc(a.winner)}">≠winner ${esc(a.winner)}</span>`:''})</span>`:` (${fundSpan(a.model)})`;
     const head=`${esc(a.name)}${uc}${badge} — ${a.tasks} task${a.tasks===1?'':'s'}`+(a.input?` · ${fmtTok(a.input)}/${fmtTok(a.output)} tok · ${COST(a.costUsd,a.costClass)}`:'');
+    // what this agent ACTUALLY ran on (7d) — can differ from the declared model when quota
+    // fallbacks or reroutes fire; each model line carries its own funding color and spend
+    const bm=(a.byModel&&a.byModel.length>1?a.byModel:[]).map(b=>
+      `<div class="tiny" style="padding:0 0 2px 16px">↳ ${fundSpan(b.model)} — ${b.runs} run${b.runs===1?'':'s'} · ${fmtTok(b.input)}/${fmtTok(b.output)} tok · ${COST(b.costUsd,b.costClass)||'<$0.01'}</div>`).join('');
     const fb=(a.fallbacks||[]).length?`<div class="tiny" style="padding:0 0 2px 16px">fallbacks: ${a.fallbacks.map(fundSpan).join(' → ')}</div>`:'';
     const sp=a.special?`<div class="tiny" style="padding:0 0 2px 16px;color:var(--amber)">★ ${esc(a.special)}</div>`:'';
     const jd=a.jd?`<details style="margin:0 0 2px 16px;padding:0"><summary class="tiny" style="text-transform:none;font-weight:400;padding:0">job description</summary><div class="tiny" style="font-size:11px;color:var(--text2);padding:2px 0 2px 10px">${esc(a.jd)}</div></details>`:'';
-    return `<details style="padding:1px 0;margin:0"><summary style="font-size:12px;text-transform:none;font-weight:400;color:var(--text)">${head}</summary><div class="tiny" style="padding:0 0 2px 16px">${esc(a.role)}</div>${fb}${sp}${jd}`+a.activities.map(x=>`<div class="tiny" style="padding:0 0 0 16px;font-size:11px">• ${esc(x)}</div>`).join('')+'</details>';
+    return `<details style="padding:1px 0;margin:0"><summary style="font-size:12px;text-transform:none;font-weight:400;color:var(--text)">${head}</summary><div class="tiny" style="padding:0 0 2px 16px">${esc(a.role)}</div>${bm}${fb}${sp}${jd}`+a.activities.map(x=>`<div class="tiny" style="padding:0 0 0 16px;font-size:11px">• ${esc(x)}</div>`).join('')+'</details>';
   }).join('');
 }).catch(()=>{$('stable-body').innerHTML='<div class="err">stable unreachable</div>';});
 api('/api/agent-incoming').then(d=>{

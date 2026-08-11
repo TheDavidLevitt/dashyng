@@ -7204,6 +7204,8 @@ const apaHostDeps = {
     propose: line => appendToJournal(line),
   },
   log: (e) => logDecision({ module: 'apa', actor: 'apa', ...e }),
+  // incumbent off the AA board (per the winner watch's miss counter) → relaxed propose-only gate
+  incumbentDelisted: (module, incId) => apaModelDelisted(incId),
   resolveId: apaModelId,
   providerFor: (id, lab) => require('./providers').apaProviderFor(id, lab || id), // lab||id so a non-claude incumbent still resolves
   sameFamily: f => /anthropic|claude/.test(String(f.lab || '').toLowerCase()) || /^claude/.test(String(f.model || '').toLowerCase()),
@@ -7486,6 +7488,67 @@ app.post('/api/credits', asyncRoute(async (req, res) => {
 const APA_MODELS_TAB = 'APA Models';
 const APA_MODELS_HEADERS = ['Model', 'Lab', 'Country', 'OS', 'Role', 'PriceIn', 'PriceOut', 'Benchmarks', 'Updated', 'Source'];
 const APA_CUTOFF_CELL = "'Heartbeat'!J1";
+// ---- delisted-winner watch (2026-08-11) ----
+// A role winner absent from the AA board has no live price or score, so the strict
+// "equal-or-better AND cheaper" adopt gate can never replace it — the winner freezes forever
+// (observed 2026-08-10: thoroughbred/workhorse/x-access still on AA-delisted claude-opus-4-8 /
+// claude-haiku-4-5 / grok-4.3 while the feed showed only test/arbitrage actions). Every board
+// compile counts consecutive missing days per role (once per UTC day, so manual recompiles stay
+// idempotent); at apaDelistN() misses the relaxed gate runs — equal-or-better on the role's
+// primary benchmark (bar = the winner's last-seen score if the watch ever recorded one, else the
+// effective min) at comparable-or-better price vs the winner's LAST KNOWN price (apaState().prices
+// keeps delisted models' prices) — and the best qualifier is PROPOSED: APA Feed row + journal
+// propose line + Decisions row. Never auto-swaps — the winner field only changes via a roles
+// edit (manual edits win), so this stays reversible and human-decided.
+const APA_DELIST_N = 3;
+function apaDelistN() { const n = +loadApaRoles().delistN; return n >= 1 ? n : APA_DELIST_N; }
+function apaModelDelisted(id) {
+  if (!id) return false;
+  const { normModel } = require('./stable/board');
+  const n = apaDelistN();
+  return Object.values(apaState().winnerBoard || {}).some(e => e && normModel(e.winner) === normModel(id) && (e.misses || 0) >= n);
+}
+async function apaWinnerWatch(bd, models, st) {
+  const roles = loadApaRoles();
+  const cutoffs = st.cutoffs || {};
+  const wb = st.winnerBoard = st.winnerBoard || {};
+  const today = nowIso().slice(0, 10);
+  const n = apaDelistN();
+  for (const k of Object.keys(wb)) if (!(roles.roles || {})[k]) delete wb[k]; // role removed
+  for (const [k, rc] of Object.entries(roles.roles || {})) {
+    const s = bd.winnerOnBoard(models, k);
+    if (!s) { delete wb[k]; continue; } // no winner configured for this role
+    if (s.present) { wb[k] = { winner: rc.winner, misses: 0, lastScore: s.score, lastSeenAt: nowIso() }; continue; }
+    const e = (wb[k] && wb[k].winner === rc.winner) ? wb[k] : { winner: rc.winner, misses: 0 };
+    if (e.lastMissDay !== today) { e.misses = (e.misses || 0) + 1; e.lastMissDay = today; e.firstMissAt = e.firstMissAt || nowIso(); }
+    wb[k] = e;
+    if (e.misses < n) continue;
+    const lastP = apaPriceOf(rc.winner);
+    const minScore = e.lastScore ?? rc.min ?? (cutoffs[k] || {}).min ?? null;
+    // capability stand-in roles (rc.special — e.g. x-access, where grok's x_search is the point
+    // and "no public benchmark measures this") get the delisting FLAGGED but never a
+    // benchmark-picked nominee: scores don't measure the capability the role exists for.
+    const special = !!rc.special;
+    const cand = special ? null : bd.bestReplacement(models, k, { minScore, maxPriceTotal: lastP ? lastP.in + lastP.out : null });
+    const cKey = cand ? cand.model : (special ? '(capability role)' : '(none)');
+    // one proposal per candidate per 10 days (mirrors the feed's re-surface window), not one per compile
+    if (e.proposed && e.proposed.cand === cKey && Date.now() - new Date(e.proposed.at).getTime() < 10 * 86400000) continue;
+    e.proposed = { cand: cKey, at: nowIso() };
+    const priceStr = lastP ? `$${lastP.in}/$${lastP.out}` : 'unknown';
+    const bar = minScore != null ? `${rc.primary} ≥ ${minScore}${e.lastScore != null ? ' (winner\'s last-seen score)' : ' (role min)'}` : `any ${rc.primary} score`;
+    const headline = cand
+      ? `winner delisted: ${rc.winner} (${k}) off the AA board ${e.misses} compiles — ${cand.model} passes the relaxed gate (${rc.primary} ${cand.score}, $${cand.priceIn}/$${cand.priceOut} vs last-known ${priceStr})`
+      : special
+        ? `winner delisted: ${rc.winner} (${k}) off the AA board ${e.misses} compiles — capability stand-in role, so no benchmark can nominate a stand-in; review whether the capability still works or a successor exists`
+        : `winner delisted: ${rc.winner} (${k}) off the AA board ${e.misses} compiles — no model passes the relaxed gate (${bar} at ≤ last-known ${priceStr})`;
+    const detail = `Relaxed gate for delisted incumbents: equal-or-better on the role's primary benchmark at comparable-or-better price vs the winner's last-known price. Proposal only — edit the winner on /agents.html use-cases to act${rc.setBy ? ` (last edited by ${rc.setBy}; manual edits win)` : ''}.`;
+    try {
+      await appendTabRow(APA_TAB, APA_HEADERS, [crypto.randomUUID(), nowIso(), 'delisted', cand ? cand.lab : '', cand ? cand.model : rc.winner, headline.slice(0, 200), 'https://artificialanalysis.ai/models', '0.7', 'proposal', 'new', '1', detail.slice(0, 300)], STABLE_SHEET_ID);
+    } catch (err) { console.error('winner watch feed:', err.message); }
+    appendToJournal(`- **APA proposal**: ${headline}`);
+    await logDecision({ module: 'apa', actor: 'apa', decision: `winner-delisted proposal: ${k} ${rc.winner} → ${cKey}`, why: `absent ${e.misses} compiles; relaxed gate: ${bar} at ≤ last-known ${priceStr}`.slice(0, 200) }).catch(() => {});
+  }
+}
 let apaBoardBusy = false;
 async function runApaBoard() {
   // AA is the SOLE benchmark source (David 2026-07-30): fresher and deterministic; the LLM
@@ -7508,7 +7571,9 @@ async function runApaBoard() {
     const st = apaState(); st.prices = st.prices || {};
     for (const m of models) if (m.priceIn != null && m.priceOut != null) st.prices[String(m.model).toLowerCase()] = { in: +m.priceIn, out: +m.priceOut, src: 'aa' };
     st.boardAt = nowIso();
-    saveApaState(st);
+    saveApaState(st); // save prices first — the watch reads last-known prices via apaPriceOf (disk)
+    try { await apaWinnerWatch(bd, models, st); } catch (e) { console.error('winner watch:', e.message); }
+    saveApaState(st); // watch mutates st.winnerBoard
     track('apa-board', true, `${rows.length} models (AA)`);
     return { found: rows.length };
   } finally { apaBoardBusy = false; }
@@ -7529,7 +7594,22 @@ app.get('/api/apa/models', asyncRoute(async (req, res) => {
   });
   let cutoffs = apaState().cutoffs || null;
   if (!cutoffs) { try { const raw = (((await cachedGet(APA_CUTOFF_CELL, 300000)).data.values || [[]])[0] || [])[0]; if (raw) cutoffs = JSON.parse(raw); } catch (e) {} }
-  res.json({ roles: roles.roles || {}, models, cutoffs, selfHost: { ...roles.selfHost, perMTokOut: selfHostPerMTok(roles.selfHost) }, osCostBasis: roles.osCostBasis, updated: models.length ? models[0].updated : null });
+  // config warnings, not silent gaps: (1) a role whose primary benchmark has NO data on the
+  // board renders an empty leaderboard/plot (observed: secretariat's METR Long-Horizon — the AA
+  // board carries no such column) — say so; (2) a winner past the delist threshold is flagged
+  // here too, pointing at the relaxed-gate proposal in the feed.
+  const bd = require('./stable/board').createBoard({ roles });
+  const warnings = [];
+  if (models.length) for (const [k, rc] of Object.entries(roles.roles || {})) {
+    if (!rc || !rc.primary) continue;
+    const hasData = models.some(m => Object.entries(m.benchmarks || {}).some(([b, v]) => v != null && bd.sameBench(b, rc.primary)));
+    if (!hasData) warnings.push({ role: k, kind: 'no-primary-data', text: `${rc.label || k}: primary benchmark "${rc.primary}" has no data from the board source — its leaderboard/plot is empty. Pick a primary the source covers, or treat the role as a ★ capability stand-in.` });
+  }
+  const wn = apaDelistN();
+  for (const [k, e] of Object.entries(apaState().winnerBoard || {})) {
+    if (e && (e.misses || 0) >= wn) warnings.push({ role: k, kind: 'winner-delisted', text: `${((roles.roles || {})[k] || {}).label || k}: winner ${e.winner} has been off the board ${e.misses} compiles — relaxed-gate proposal in the APA feed; the winner stays until edited here.` });
+  }
+  res.json({ roles: roles.roles || {}, models, cutoffs, warnings, selfHost: { ...roles.selfHost, perMTokOut: selfHostPerMTok(roles.selfHost) }, osCostBasis: roles.osCostBasis, updated: models.length ? models[0].updated : null });
 }));
 app.post('/api/apa/board', asyncRoute(async (req, res) => {
   if (!HAS_CLAUDE) return res.status(503).json({ error: 'board compile runs on the Mac/VM agent tier' });
@@ -7839,10 +7919,21 @@ app.get('/api/agent-stable', asyncRoute(async (req, res) => {
     // useCase label + current role winner/fallbacks come from the roles config so the stable
     // reads e.g. "Summarizer — Daily driver: claude-sonnet-5 (fallback gemini-2.5-pro)"
     const rc = rolesCfg.roles[a.useCase] || {};
+    // per-model breakdown of THIS agent's window usage — an agent's actual traffic can span
+    // models its config never names (quota fallbacks, OpenRouter reroutes); showing only the
+    // declared model hid a paid anthropic/claude-sonnet-5 reroute inside "claude-sonnet-5"
+    const byModel = {};
+    for (const r of u) {
+      const k = String(r.model || 'unknown').replace(/-20\d{6}$/, '');
+      const b = byModel[k] = byModel[k] || { model: k, input: 0, output: 0, costUsd: 0, runs: 0, costClass: costClass(r.model, r.module, r.at) };
+      b.input += r.input; b.output += r.output; b.costUsd += r.costUsd; b.runs++;
+    }
     return { ...a, model: modelFor(a.modules[0], a.model), tasks: u.length,
       useCaseLabel: rc.label || a.useCase || '', winner: rc.winner || '', fallbacks: rc.fallbacks || [], special: rc.special || '',
       input: u.reduce((n, r) => n + r.input, 0), output: u.reduce((n, r) => n + r.output, 0),
-      costUsd: Math.round(cost * 100) / 100, costClass: cls, activities: acts.slice(0, 8) };
+      costUsd: Math.round(cost * 100) / 100, costClass: cls, activities: acts.slice(0, 8),
+      byModel: Object.values(byModel).sort((x, y) => y.costUsd - x.costUsd)
+        .map(b => ({ ...b, costUsd: Math.round(b.costUsd * 100) / 100 })) };
   });
   // per-MODEL 7d totals (all modules, incl. ones not mapped to a roster agent)
   const models = {};
@@ -7850,7 +7941,7 @@ app.get('/api/agent-stable', asyncRoute(async (req, res) => {
     const m = models[r.model] = models[r.model] || { input: 0, output: 0, costUsd: 0, runs: 0 };
     m.input += r.input; m.output += r.output; m.costUsd += r.costUsd; m.runs++;
   }
-  res.json({ active: out.filter(a => a.status === 'active').length, standby: out.filter(a => a.status !== 'active').length, agents: out,
+  res.json({ windowDays: 7, active: out.filter(a => a.status === 'active').length, standby: out.filter(a => a.status !== 'active').length, agents: out,
     models: Object.entries(models).sort((a, b) => b[1].costUsd - a[1].costUsd).map(([model, x]) => ({ model, ...x, costUsd: Math.round(x.costUsd * 100) / 100 })) });
 }));
 

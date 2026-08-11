@@ -10,6 +10,11 @@
 //   board.sameBench(a, b)                                 // fuzzy benchmark-name equality
 //   const bp = board.benchPrompt();                       // → knowledge-base prompt (optional)
 //   const kb = board.parseBench(rawLlmText);              // → [{name, measures, ...}]
+//   board.winnerOnBoard(rows, roleKey)                    // → {winner, present, score} | null
+//   board.bestReplacement(rows, roleKey, {minScore, maxPriceTotal})  // relaxed delisted-gate search
+
+// model-name equality across sources ("grok-4.3" vs AA's "grok-4-3"): case, dots, spaces → dashes
+const normModel = s => String(s || '').toLowerCase().replace(/[\s.]+/g, '-').replace(/-+/g, '-');
 
 function createBoard({ roles = { roles: {}, all_benchmarks: [], track_non_us_os: 3 }, prices = {}, labs = {} } = {}) {
   const benchAll = () => [...new Set([...(roles.all_benchmarks || []), ...Object.values(roles.roles || {}).flatMap(r => r.benchmarks || [])])];
@@ -52,7 +57,41 @@ function createBoard({ roles = { roles: {}, all_benchmarks: [], track_non_us_os:
     return rc.min ?? (cutoffs[roleKey] || {}).min ?? null;
   }
 
-  return { fromRows, thresholdFor, sameBench, benchPrompt, parseBench };
+  // ---- delisted winners ----
+  // A role winner absent from the source board has no live price or score, so a strict
+  // "equal-or-better AND cheaper" gate can never replace it — the winner freezes forever.
+  // The JUDGMENT for that case lives here: presence detection and the relaxed replacement
+  // search (equal-or-better on the role's primary benchmark, at comparable-or-better price
+  // vs the winner's last-known price — both bars supplied by the host, which keeps that
+  // history). The host owns miss-counting, state, and proposal I/O — and never auto-swaps.
+  function winnerOnBoard(rows, roleKey) {
+    const rc = (roles.roles || {})[roleKey] || {};
+    if (!rc.winner) return null;
+    const hit = (rows || []).find(m => m && normModel(m.model) === normModel(rc.winner));
+    if (!hit) return { winner: rc.winner, present: false, score: null };
+    const b = Object.entries(hit.benchmarks || {}).find(([k, v]) => v != null && sameBench(k, rc.primary));
+    return { winner: rc.winner, present: true, score: b ? +b[1] : null };
+  }
+
+  function bestReplacement(rows, roleKey, { minScore = null, maxPriceTotal = null } = {}) {
+    const rc = (roles.roles || {})[roleKey] || {};
+    if (!rc.primary) return null;
+    const cands = [];
+    for (const m of rows || []) {
+      if (!m || normModel(m.model) === normModel(rc.winner || '')) continue;
+      const b = Object.entries(m.benchmarks || {}).find(([k, v]) => v != null && !isNaN(+v) && sameBench(k, rc.primary));
+      if (!b) continue;
+      const score = +b[1];
+      if (minScore != null && score < +minScore) continue;
+      const total = (m.priceIn != null && m.priceOut != null) ? +m.priceIn + +m.priceOut : null;
+      if (maxPriceTotal != null && (total == null || total > maxPriceTotal)) continue;
+      cands.push({ model: m.model, lab: m.lab || '', score, priceIn: m.priceIn ?? null, priceOut: m.priceOut ?? null, total });
+    }
+    cands.sort((a, b) => (b.score - a.score) || ((a.total ?? Infinity) - (b.total ?? Infinity)));
+    return cands[0] || null;
+  }
+
+  return { fromRows, thresholdFor, sameBench, benchPrompt, parseBench, winnerOnBoard, bestReplacement };
 }
 
-module.exports = { createBoard };
+module.exports = { createBoard, normModel };

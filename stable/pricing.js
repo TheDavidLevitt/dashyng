@@ -9,23 +9,8 @@ const MODEL_PRICES = {
   'claude-opus-4-6':    { in: 5,  out: 25,  tier: 'opus' },
   'claude-sonnet-5':    { in: 3,  out: 15,  tier: 'sonnet', note: '$2/$10 intro pricing through 2026-08-31' },
   'claude-haiku-4-5':   { in: 1,  out: 5,   tier: 'haiku' },
-  // Google has THREE distinct access routes and they bill completely differently — the
-  // classification below (and costClass) depends on getting this right:
-  //   1. AI Studio FREE tier  — $0, no card. Rate-limited (single-digit RPM, ~hundreds–1k
-  //      requests/day, per model). CAVEAT: on the free tier Google may use submitted data to
-  //      improve its products — so it is suitable ONLY for non-personal content.
-  //   2. Vertex / AI Studio PAID — the per-token prices below (billed to GCP).
-  //   3. Google One / Gemini Advanced — a CONSUMER CHAT subscription with NO API access at
-  //      all. It cannot back any agent workload; never model it as capacity.
-  'gemini-2.5-flash-lite': { in: 0.10, out: 0.40, tier: 'gemini' },
   'gemini-2.5-flash':   { in: 0.30, out: 2.50, tier: 'gemini' },
-  'gemini-3.5-flash-lite': { in: 0.30, out: 2.50, tier: 'gemini' },
-  'gemini-3.1-flash-lite': { in: 0.25, out: 1.50, tier: 'gemini' },
-  'gemini-3.6-flash':   { in: 1.50, out: 7.50, tier: 'gemini' },
   'gemini-2.5-pro':     { in: 1.25, out: 10, tier: 'gemini' },
-  // free-tier route: same models, zero marginal cost, hard rate limits. Address a call to
-  // '<model>-free' (or set FREE_TIER_SUFFIX on the module) to price it at zero.
-  'gemini-free':        { in: 0, out: 0, tier: 'gemini-free', note: 'AI Studio free tier — rate-limited; data may train Google models, non-personal content only' },
   // grok is out-of-pocket (xAI paid API, reserved for X). Estimate — grok-4-fast list rate;
   // the grok-4.3 agent + x_search calls cost more. Refine when the real invoice lands.
   'grok':               { in: 0.20, out: 0.50, tier: 'grok' },
@@ -44,9 +29,12 @@ function priceOf(model) {
 const CREDIT_SPLIT_DAY = Date.UTC(2026, 5, 15);
 function costClass(model, module, atIso) {
   const m = String(model || '').toLowerCase();
+  // Marketplace-routed ids (OpenRouter et al: "anthropic/claude-…", "openrouter:…") are ALWAYS
+  // out-of-pocket — the underlying family's subscription/credit never applies to a reroute.
+  if (m.includes('/') || m.startsWith('openrouter:')) return 'real';
   if (module === 'claw' || (/opus/.test(m) && String(module || '').includes('esc'))) return 'real';
   if (/grok/.test(m)) return 'real';   // xAI is a paid API — out-of-pocket, not a credit or subscription
-  if (/gemini|vertex/.test(m)) return /free/.test(m) ? 'included' : 'credit'; // AI Studio free tier costs nothing; Vertex/paid draws GCP credit
+  if (/gemini|vertex/.test(m)) return 'credit';
   if (/claude|sonnet|haiku|opus/.test(m)) return (atIso ? new Date(atIso).getTime() : Date.now()) >= CREDIT_SPLIT_DAY ? 'credit' : 'included';
   return 'included';
 }

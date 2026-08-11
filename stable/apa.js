@@ -59,9 +59,19 @@ function createApa({ adapters, priceOf, judge, usageHistory, evalPrompts = DEFAU
     return Math.round(((inTok * (inc.in - cand.in) + outTok * (inc.out - cand.out)) / 1e6) * 100) / 100;
   }
 
-  // the adopt rule in one place: adopt ⟺ runnable ∧ quality ≥ incumbent ∧ cheaper ∧ autoAdopt
-  function adoptGate(ev, { autoAdopt = true } = {}) {
+  // the adopt rule in one place: adopt ⟺ runnable ∧ quality ≥ incumbent ∧ cheaper ∧ autoAdopt.
+  // { delisted: true } = the incumbent has vanished from the benchmark source, so "cheaper"
+  // vs a live price is unsatisfiable and the incumbent would freeze forever. The price test
+  // relaxes to comparable-or-better (≤) vs the incumbent's LAST KNOWN price (the host's
+  // priceOf must keep that history), and the verdict becomes a PROPOSAL, never an adopt:
+  // swapping an incumbent nobody benchmarks anymore is a judgment call for the human.
+  function adoptGate(ev, { autoAdopt = true, delisted = false } = {}) {
     if (!ev) return { adopt: false, reason: 'not runnable — recommend for review' };
+    if (delisted) {
+      const comparable = !!(ev.cp && ev.ip && (ev.cp.in + ev.cp.out) <= (ev.ip.in + ev.ip.out));
+      if (ev.qualityOK && comparable) return { adopt: false, propose: true, reason: 'equal-or-better at comparable-or-better price vs delisted incumbent (last-known price)' };
+      return { adopt: false, reason: ev.qualityOK ? 'pricier than the delisted incumbent\'s last-known price' : 'quality not clearly ≥ (vs delisted incumbent)' };
+    }
     if (ev.qualityOK && ev.cheaper) return autoAdopt ? { adopt: true, reason: 'equal-or-better and cheaper' } : { adopt: false, reason: 'better+cheaper (auto-adopt off)' };
     return { adopt: false, reason: ev.cheaper ? 'cheaper but quality not clearly ≥' : 'not cheaper' };
   }
@@ -76,7 +86,9 @@ function createApa({ adapters, priceOf, judge, usageHistory, evalPrompts = DEFAU
   //   ctx.log:    ({decision, why, taskRef, costUsd?}) — the decisions audit trail
   //   plus: usLabs[], crossProvider, autoAdopt, module ('summary' default),
   //         resolveId(model, lab) → runnable id|null, providerFor(id, lab) → adapter provider,
-  //         sameFamily(finding) → true if candidate runs on the incumbent's own provider
+  //         sameFamily(finding) → true if candidate runs on the incumbent's own provider,
+  //         incumbentDelisted?(module, incId) → true when the incumbent dropped off the
+  //           host's benchmark board (switches adoptGate to its relaxed, propose-only branch)
   // finding: { kind, lab, model, headline, url, why, priceIn, priceOut }
   async function considerFinding(f, ctx) {
     const notify = ctx.notify, store = ctx.store;
@@ -107,12 +119,20 @@ function createApa({ adapters, priceOf, judge, usageHistory, evalPrompts = DEFAU
     }
     const savings = await projectSavings(module, incId, candId).catch(() => null);
     const savLine = savings != null ? ` Projected ~$${savings}/mo saved on ${module}.` : '';
-    const gate = adoptGate(ev, { autoAdopt: ctx.autoAdopt });
+    // ctx.incumbentDelisted(module, incId) → true when the incumbent has dropped off the
+    // host's benchmark board — switches the gate to its relaxed, propose-only branch.
+    const delisted = ctx.incumbentDelisted ? await Promise.resolve(ctx.incumbentDelisted(module, incId)).catch(() => false) : false;
+    const gate = adoptGate(ev, { autoAdopt: ctx.autoAdopt, delisted });
     if (gate.adopt) {
       store.adopt(module, candId, `${gate.reason}: ${ev.note}`);
       notify.info(`  ↳ **ADOPTED** ${candId} (${f.lab}) for ${module} (${gate.reason}).${savLine} Reversible via the dashboard.`);
       await log({ decision: `auto-adopt ${candId} for ${module}`, why: `${gate.reason}. ${ev.note}`, taskRef: f.url, costUsd: savings != null ? -savings : '' });
       return 'adopted';
+    }
+    if (gate.propose) {
+      notify.propose(`- **APA proposal** (incumbent delisted): swap ${module} ${incId} → ${candId} — ${gate.reason}. ${ev.note}${savLine} <${f.url}>`);
+      await log({ decision: `propose ${candId} for ${module} (incumbent ${incId} delisted)`, why: `${gate.reason}. ${ev.note}`.slice(0, 200), taskRef: f.url });
+      return 'proposed';
     }
     notify.info(`  ↳ tested ${candId}: ${gate.reason}.${savLine} Left on ${incId}.`);
     await log({ decision: `tested ${candId}: ${gate.reason}`, why: ev.note, taskRef: f.url });
