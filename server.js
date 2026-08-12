@@ -5499,13 +5499,14 @@ async function internRun(taskId, trigger = 'drain') {
         `THE TASK: ${task.Task}\n\nTHE THREAD SO FAR (your past attempts + owner replies — owner replies are your directions):\n${md.slice(-14000)}\n\n` +
         `Advance the task CONCRETELY right now per the owner's directions: research with the tools, compute, draft, compare, verify — never merely restate a plan. If blocked on the owner, ask exactly what you need (crisp questions, never ones already answered in the thread).\n` +
         `GUARDRAILS: draft/queue/propose only — NEVER send email, move money, or change settings. No placeholders pretending to be results.\n` +
+        `GMAIL + CALENDAR (owner-granted 2026-08-12, via curl): search threads: curl 'http://localhost:3000/api/gmail/threads?q=<gmail query>&max=10' ; read one: curl 'http://localhost:3000/api/gmail/thread/<id>' ; create a DRAFT (the only write that exists — there is no send endpoint, the never-send guarantee is structural): curl -X POST http://localhost:3000/api/gmail/draft -H 'Content-Type: application/json' -d '{"to":"…","subject":"…","body":"…","threadId":"optional"}' ; calendar: curl http://localhost:3000/api/calendar . If these are unreachable you are not on the owner's Mac — say so instead of guessing.\n` +
         `FORMAT — two parts, both mandatory:\n` +
         `SUMMARY:\n<the dashboard view — ONLY essential findings + questions for guidance, max ~8 short lines. No methodology, no padding.>\n` +
         `DETAILS:\n<everything else — full findings, sources, drafts, workings. This lives in the canonical md only.>\n` +
         `End with EXACTLY these two lines (both mandatory):\nSTATUS: advanced | blocked-on-owner | done-proposed\nOUTCOME: <ONE concrete sentence — what you actually produced, learned, or need; this is the line the owner sees in the collapsed history, so "drafted the MACIF note, needs receipt choice" not "made progress">\n` +
         `Then IF AND ONLY IF warranted, one more line from:\nCONTINUE (you can concretely advance further right now — you get at most one extra pass)\n` +
         `ESCALATE: thoroughbred|secretariat — <one line why a more capable tier would materially help>`,
-        { tools: 'WebSearch,WebFetch', timeoutMs: 300000, module: tier.module, model: tier.model });
+        { tools: 'WebSearch,WebFetch,Bash(curl *)', timeoutMs: 300000, module: tier.module, model: tier.model });
       const reply = String(raw || '').trim();
       if (!reply) break;
       md += `\n\n-------\n**${tier.name} · ${today()} ${new Date().toTimeString().slice(0, 5)} · ${tier.model.replace(/-20\d{6}$/, '')}**\n\n${reply}`;
