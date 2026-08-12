@@ -1258,28 +1258,40 @@ async function openInternModal(id, taskTitle) {
     `<span style="margin-right:14px">model: <b>${esc(m)}</b> · iterations: ${g.iters} · tokens: ${fmtTokK(g.input + g.output)} · <span style="color:${clsColor(g.cls)}" title="${g.cls === 'real' ? 'paid (metered)' : g.cls === 'included' ? 'free tier' : 'subscription'}">cost: $${g.cost.toFixed(2)}</span></span>`).join('');
   const parts = md.split(/\n-------\n/).filter(p => p.trim());
   const head = parts.shift() || '';
-  const body = parts.map((p, i) => {
+  const tot = Object.values(byModel).reduce((a, g) => ({ iters: a.iters + g.iters, tok: a.tok + g.input + g.output, cost: a.cost + g.cost }), { iters: 0, tok: 0, cost: 0 });
+  const totalLine = stats.length ? `<b>total</b>: ${tot.iters} iteration${tot.iters === 1 ? '' : 's'} · ${fmtTokK(tot.tok)} tok · $${tot.cost.toFixed(2)} · ` : '';
+  const runLabel = p => {
+    const who = ((p.trim().split('\n')[0]) || '').replace(/\*\*/g, '');
+    const out = (p.match(/OUTCOME:\s*(.+)/) || [])[1];
+    const sum1 = internSummaryOf(p).split('\n').find(l => l.trim()) || '';
+    const st = (p.match(/STATUS:\s*([a-z-]+)/) || [])[1] || '';
+    return `${who} — ${out || sum1 || st || '…'}`.slice(0, 160);
+  };
+  const renderEntry = (p, open) => {
     const lines = p.trim().split('\n');
     const who = (lines.shift() || '').replace(/\*\*/g, '');
     const isOwner = /^Owner/.test(who);
     const text = isOwner ? lines.join('\n').trim() : internSummaryOf(lines.join('\n'));
-    const st = (p.match(/STATUS:\s*([a-z-]+)/) || [])[1] || '';
     const esca = (p.match(/ESCALATE:\s*(.+)/) || [])[1] || '';
-    return `<details ${i === parts.length - 1 ? 'open' : ''} style="margin:4px 0;border-bottom:1px solid var(--border);padding-bottom:4px">
-      <summary class="tiny" style="cursor:pointer;color:${isOwner ? 'var(--accent)' : 'var(--violet)'}">${esc(who)}${st ? ` <span class="muted">· ${esc(st)}</span>` : ''}</summary>
+    return `<details ${open ? 'open' : ''} style="margin:4px 0;border-bottom:1px solid var(--border);padding-bottom:4px">
+      <summary class="tiny" style="cursor:pointer;color:${isOwner ? 'var(--accent)' : 'var(--violet)'}">${esc(runLabel(p))}</summary>
       <div style="white-space:pre-wrap;font-size:13px;padding:4px 2px">${esc(text)}</div>
       ${esca ? `<div class="tiny" style="color:var(--orange,#e8a33d)">⤴ escalation recommended: ${esc(esca)}</div>` : ''}</details>`;
-  }).join('') || '<div class="tiny muted">no attempts yet — give directions below and it runs once, immediately</div>';
+  };
+  // History: everything but the newest exchange folds into ONE line (owner decree 2026-08-12)
+  const past = parts.slice(0, -1), latest = parts.slice(-1);
+  const body = (past.length ? `<details style="margin:2px 0"><summary class="tiny" style="cursor:pointer;color:var(--text3)">History (${past.length} earlier ${past.length === 1 ? 'entry' : 'entries'})</summary>${past.map(p => renderEntry(p, false)).join('')}</details>` : '')
+    + (latest.length ? renderEntry(latest[0], true) : '<div class="tiny muted">no attempts yet — give directions below and it runs once, immediately</div>');
   ov.innerHTML = `
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;border-bottom:1px solid var(--border);padding-bottom:6px">
       <b>${esc(taskTitle || (head.split('\n')[0] || '').replace(/^#\s*/, ''))}</b>
-      <span class="tiny">${d && d.atId ? '<b>' + esc(d.atId) + '</b> · ' : ''}${meta || 'no runs yet'}</span>
+      <span class="tiny">${d && d.atId ? '<b>' + esc(d.atId) + '</b> · ' : ''}${totalLine}${meta || 'no runs yet'}</span>
       <span style="flex:1"></span>
       <span class="tiny muted">full detail: AgentTasks/${esc(id).slice(0, 8)}….md</span>
       <button class="ib" id="im-close" title="Close">✕</button></div>
     <div id="im-body" style="flex:1;overflow-y:auto;padding:6px 2px">${body}</div>
-    <div style="display:flex;gap:6px;padding-top:6px;border-top:1px solid var(--border)">
-      <input class="q-input" id="im-reply" placeholder="directions / follow-up — the intern runs once, immediately" style="flex:1">
+    <div style="display:flex;gap:6px;padding-top:6px;border-top:1px solid var(--border);align-items:flex-end">
+      <textarea class="q-input" id="im-reply" rows="2" placeholder="directions / follow-up — Enter sends, Shift+Enter for a new line" style="flex:1;resize:none;overflow-y:hidden;line-height:1.35"></textarea>
       <button class="ib" id="im-send" style="min-width:90px">Submit ↩</button></div>`;
   ov.querySelector('#im-close').onclick = () => { ov.style.display = 'none'; clearInterval(internPolls[id]); };
   const inp = ov.querySelector('#im-reply'), send = ov.querySelector('#im-send');
@@ -1294,7 +1306,9 @@ async function openInternModal(id, taskTitle) {
     internPolls[id] = setInterval(() => { if (ov.style.display === 'none' || ++n > 20) return clearInterval(internPolls[id]); openInternModal(id, taskTitle); }, 20000);
   };
   send.onclick = go;
-  inp.onkeydown = e => { if (e.key === 'Enter') go(); e.stopPropagation(); };
+  const grow = () => { inp.style.height = 'auto'; inp.style.height = Math.min(inp.scrollHeight, window.innerHeight * 0.4) + 'px'; };
+  inp.oninput = grow; grow();
+  inp.onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); go(); } e.stopPropagation(); };
   inp.focus();
 }
 function sharedThreadHtml(t) {

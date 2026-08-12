@@ -181,6 +181,12 @@ const cookieOf = (req, n) => { const m = (req.headers.cookie || '').match(new Re
 // the project-number *.region.run.app form); only one callback is registered. Pin it
 // via OAUTH_REDIRECT_BASE so OAuth works no matter which hostname the user hits.
 const OAUTH_REDIRECT_BASE = process.env.OAUTH_REDIRECT_BASE || '';
+// Path prefix this deployment lives under behind the proxy (e.g. '/cha' on dashyng.com/cha).
+// Every app-level redirect MUST carry it: an unprefixed '/auth/login' bounce leaves this
+// service entirely — the proxy routes it to the ROOT service, and the owner's husband found
+// himself staring at HIS OWN dashboard under her URL (2026-08-12).
+const APP_BASE = (() => { try { return OAUTH_REDIRECT_BASE ? new URL(OAUTH_REDIRECT_BASE).pathname.replace(/\/$/, '') : ''; } catch (e) { return ''; } })();
+const appPath = p => APP_BASE + p;
 const redirectUri = req => OAUTH_REDIRECT_BASE
   ? `${OAUTH_REDIRECT_BASE.replace(/\/$/, '')}/auth/callback`
   : `${req.headers['x-forwarded-proto'] || 'http'}://${req.headers.host}/auth/callback`;
@@ -230,7 +236,10 @@ app.get('/auth/callback', asyncRoute(async (req, res) => {
   const secure = (req.headers['x-forwarded-proto'] === 'https') ? '; Secure' : '';
   res.set('Set-Cookie', `dash_session=${encodeURIComponent(signSession(email))}; HttpOnly${secure}; SameSite=Lax; Max-Age=${30 * 24 * 3600}; Path=/${cookieDomain(req)}`);
   const next = safeNext(String(req.query.state || '').startsWith('next:') ? String(req.query.state).slice(5) : '');
-  if (isOwner) return res.redirect(next || '/');
+  // prefix-if-missing: behind a path proxy the stripped originalUrl round-trips unprefixed,
+  // and an unprefixed post-login redirect would bounce to the ROOT service again
+  const dest = next ? (APP_BASE && !next.startsWith(APP_BASE + '/') && next !== APP_BASE ? APP_BASE + next : next) : appPath('/') || '/';
+  if (isOwner) return res.redirect(dest);
   const nextPath = next.split('?')[0];
   if (BIO_GUEST_N.includes(email)) return res.redirect(isBioPath(nextPath) ? next : BIO_ROUTE);
   if (RANMALI_GUEST_N.includes(email)) return res.redirect(isRanmaliPath(nextPath) ? next : RANMALI_ROUTE);
@@ -240,7 +249,7 @@ app.get('/auth/callback', asyncRoute(async (req, res) => {
 app.get('/auth/logout', (req, res) => {
   // clear both scopes — sessions may predate the Domain-scoped cookie
   res.set('Set-Cookie', ['dash_session=; Max-Age=0; Path=/', `dash_session=; Max-Age=0; Path=/${cookieDomain(req)}`]);
-  res.redirect('/auth/login');
+  res.redirect(appPath('/auth/login'));
 });
 
 // ---------- Gmail consent (location-tracking evidence — separate from the login above) ----------
@@ -729,8 +738,8 @@ app.use((req, res, next) => {
       }
       // valid signature but email no longer on any list (e.g. guest removed) → re-login
     }
-    if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'login required', login: '/auth/login' });
-    return res.redirect('/auth/login?next=' + encodeURIComponent(req.originalUrl));
+    if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'login required', login: appPath('/auth/login') });
+    return res.redirect(appPath('/auth/login') + '?next=' + encodeURIComponent(req.originalUrl));
   }
   if (process.env.DASHBOARD_PASSWORD) {
     const b64 = (req.headers.authorization || '').split(' ')[1] || '';
@@ -5496,7 +5505,7 @@ async function internRun(taskId, trigger = 'drain') {
         `FORMAT — two parts, both mandatory:\n` +
         `SUMMARY:\n<the dashboard view — ONLY essential findings + questions for guidance, max ~8 short lines. No methodology, no padding.>\n` +
         `DETAILS:\n<everything else — full findings, sources, drafts, workings. This lives in the canonical md only.>\n` +
-        `End with EXACTLY one status line:\nSTATUS: advanced | blocked-on-owner | done-proposed\n` +
+        `End with EXACTLY these two lines (both mandatory):\nSTATUS: advanced | blocked-on-owner | done-proposed\nOUTCOME: <ONE concrete sentence — what you actually produced, learned, or need; this is the line the owner sees in the collapsed history, so "drafted the MACIF note, needs receipt choice" not "made progress">\n` +
         `Then IF AND ONLY IF warranted, one more line from:\nCONTINUE (you can concretely advance further right now — you get at most one extra pass)\n` +
         `ESCALATE: thoroughbred|secretariat — <one line why a more capable tier would materially help>`,
         { tools: 'WebSearch,WebFetch', timeoutMs: 300000, module: tier.module, model: tier.model });
@@ -5535,17 +5544,25 @@ app.get('/api/intern/thread/:id', asyncRoute(async (req, res) => {
   // per-run stats for the thread header: attribute Usage rows to each recorded run by
   // module + time window (runs are serialized per task, so windows don't overlap)
   const runs = (internStats()[req.params.id] || []);
+  // pre-sidecar runs: reconstruct from the md entry headers ('**Name · date time · model**')
+  const mdText = readInternThread(req.params.id);
+  const mdRuns = [];
+  { const re = /\n\*\*([^·*]+) · (\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}) · ([^*]+)\*\*/g; let m;
+    while ((m = re.exec(mdText))) if (!/^Owner/.test(m[1].trim()))
+      mdRuns.push({ at: `${m[2]}T${m[3]}:00`, startedAt: new Date(Date.parse(`${m[2]}T${m[3]}:00`) - 420000).toISOString(), model: m[4].trim(), module: /^intern/, iters: 1, fromMd: true }); }
+  for (const r of mdRuns) if (!runs.some(x => Math.abs(new Date(x.at) - new Date(r.at)) < 600000)) runs.push(r);
   let stats = [];
   try {
     const urows = await usageRows();
     stats = runs.map(r => {
-      const t0 = new Date(r.startedAt || r.at).getTime(), t1 = new Date(r.at).getTime() + 120000;
-      const mine = urows.filter(u => u.module === r.module && new Date(u.at).getTime() >= t0 && new Date(u.at).getTime() <= t1);
+      const t0 = new Date(r.startedAt || r.at).getTime(), t1 = new Date(r.at).getTime() + 600000;
+      const modMatch = u => r.fromMd ? /^intern/.test(u.module) : u.module === r.module;
+      const mine = urows.filter(u => modMatch(u) && new Date(u.at).getTime() >= t0 && new Date(u.at).getTime() <= t1);
       const input = mine.reduce((n, u) => n + u.input, 0), output = mine.reduce((n, u) => n + u.output, 0);
       let cost = mine.reduce((n, u) => n + u.costUsd, 0);
       const p = priceOf(r.model); if (!cost && p) cost = (input * p.in + output * p.out) / 1e6;
-      return { at: r.at, model: r.model.replace(/-20\d{6}$/, ''), iters: r.iters || 1, input, output,
-        costUsd: Math.round(cost * 1000) / 1000, cls: costClass(r.model, r.module, r.at) };
+      return { at: r.at, model: String(r.model).replace(/-20\d{6}$/, ''), iters: r.iters || 1, input, output,
+        costUsd: Math.round(cost * 1000) / 1000, cls: costClass(r.model, r.fromMd ? 'intern-cheap' : r.module, r.at) };
     });
   } catch (e) {}
   let atId = '';
