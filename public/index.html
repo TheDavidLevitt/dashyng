@@ -3434,7 +3434,7 @@ api('/api/plugins').then(({ plugins }) => {
 }).catch(() => {});
 // Circle membership feed: new members since last look → notice; unreadable circle →
 // "you were removed" with a one-click detach (your pre-circle data is untouched).
-fetch('/api/circles/status').then(r => r.json()).then(({ circles }) => {
+fetch(url('/api/circles/status')).then(r => r.json()).then(({ circles }) => {
   if (!circles || !circles.length) return;
   const seen = JSON.parse(localStorage.getItem('circle-members') || '{}');
   const notes = [];
@@ -3458,7 +3458,7 @@ fetch('/api/circles/status').then(r => r.json()).then(({ circles }) => {
 }).catch(() => {});
 // Credit-cliff warnings: GCP-trial countdown (own stack) and sponsorship countdown (a
 // friend's stack carrying this instance). Quiet until ~2 weeks out, loud at ≤7 days.
-fetch('/api/llm/status').then(r => r.json()).then(s => {
+fetch(url('/api/llm/status')).then(r => r.json()).then(s => {
   const warn = [];
   if (s.trialDaysLeft !== null && s.trialDaysLeft <= 14) warn.push(s.trialDaysLeft <= 0
     ? '⚠️ GCP trial credits have ENDED — Vertex now bills your card; check the budget alerts set at install'

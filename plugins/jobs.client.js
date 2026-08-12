@@ -2,7 +2,7 @@
 // scope via the plugin loader). Moved out of an escaped string (sidecar pattern, 2026-08-02).
 (el, data) => {
     const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
-    fetch('/api/jobs').then(r => r.json()).then(r => {
+    fetch((window.__BASE__ || '') + '/api/jobs').then(r => r.json()).then(r => {
       const open = (r.jobs || []).filter(j => j.status === 'open').sort((a, b) => (a.rank || 1e9) - (b.rank || 1e9));
       const applied = (r.jobs || []).filter(j => j.status === 'applied').length;
       if (!open.length) { el.innerHTML = '<div class="empty">No open roles' + (applied ? ' \u00b7 ' + applied + ' applied' : '') + ' \u2014 the search agent adds new ones daily. <a href="/jobs">board \u2192</a></div>'; return; }

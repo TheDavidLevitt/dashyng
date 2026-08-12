@@ -181,12 +181,12 @@ const cookieOf = (req, n) => { const m = (req.headers.cookie || '').match(new Re
 // the project-number *.region.run.app form); only one callback is registered. Pin it
 // via OAUTH_REDIRECT_BASE so OAuth works no matter which hostname the user hits.
 const OAUTH_REDIRECT_BASE = process.env.OAUTH_REDIRECT_BASE || '';
-// Path prefix this deployment lives under behind the proxy (e.g. '/cha' on dashyng.com/cha).
-// Every app-level redirect MUST carry it: an unprefixed '/auth/login' bounce leaves this
-// service entirely — the proxy routes it to the ROOT service, and the owner's husband found
-// himself staring at HIS OWN dashboard under her URL (2026-08-12).
-const APP_BASE = (() => { try { return OAUTH_REDIRECT_BASE ? new URL(OAUTH_REDIRECT_BASE).pathname.replace(/\/$/, '') : ''; } catch (e) { return ''; } })();
-const appPath = p => APP_BASE + p;
+// NOTE (2026-08-12): do NOT prefix this app's own redirects with a mount path. When this
+// instance is mounted at a path on someone's front proxy (dashyng.com/cha), the proxy
+// strips the prefix inbound and RE-MOUNTS it on Location headers outbound — the app
+// always lives at / from its own point of view. A prefixing attempt here double-mounted
+// to /cha/cha/... . The real 2026-08-12 bug was client-side: plugin fetches that ignored
+// window.__BASE__ and escaped the mount to the front instance's own data.
 const redirectUri = req => OAUTH_REDIRECT_BASE
   ? `${OAUTH_REDIRECT_BASE.replace(/\/$/, '')}/auth/callback`
   : `${req.headers['x-forwarded-proto'] || 'http'}://${req.headers.host}/auth/callback`;
@@ -236,10 +236,7 @@ app.get('/auth/callback', asyncRoute(async (req, res) => {
   const secure = (req.headers['x-forwarded-proto'] === 'https') ? '; Secure' : '';
   res.set('Set-Cookie', `dash_session=${encodeURIComponent(signSession(email))}; HttpOnly${secure}; SameSite=Lax; Max-Age=${30 * 24 * 3600}; Path=/${cookieDomain(req)}`);
   const next = safeNext(String(req.query.state || '').startsWith('next:') ? String(req.query.state).slice(5) : '');
-  // prefix-if-missing: behind a path proxy the stripped originalUrl round-trips unprefixed,
-  // and an unprefixed post-login redirect would bounce to the ROOT service again
-  const dest = next ? (APP_BASE && !next.startsWith(APP_BASE + '/') && next !== APP_BASE ? APP_BASE + next : next) : appPath('/') || '/';
-  if (isOwner) return res.redirect(dest);
+  if (isOwner) return res.redirect(next || '/');
   const nextPath = next.split('?')[0];
   if (BIO_GUEST_N.includes(email)) return res.redirect(isBioPath(nextPath) ? next : BIO_ROUTE);
   if (RANMALI_GUEST_N.includes(email)) return res.redirect(isRanmaliPath(nextPath) ? next : RANMALI_ROUTE);
@@ -249,7 +246,7 @@ app.get('/auth/callback', asyncRoute(async (req, res) => {
 app.get('/auth/logout', (req, res) => {
   // clear both scopes — sessions may predate the Domain-scoped cookie
   res.set('Set-Cookie', ['dash_session=; Max-Age=0; Path=/', `dash_session=; Max-Age=0; Path=/${cookieDomain(req)}`]);
-  res.redirect(appPath('/auth/login'));
+  res.redirect('/auth/login');
 });
 
 // ---------- Gmail consent (location-tracking evidence — separate from the login above) ----------
@@ -738,8 +735,8 @@ app.use((req, res, next) => {
       }
       // valid signature but email no longer on any list (e.g. guest removed) → re-login
     }
-    if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'login required', login: appPath('/auth/login') });
-    return res.redirect(appPath('/auth/login') + '?next=' + encodeURIComponent(req.originalUrl));
+    if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'login required', login: '/auth/login' });
+    return res.redirect('/auth/login?next=' + encodeURIComponent(req.originalUrl));
   }
   if (process.env.DASHBOARD_PASSWORD) {
     const b64 = (req.headers.authorization || '').split(' ')[1] || '';
