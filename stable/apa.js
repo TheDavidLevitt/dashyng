@@ -60,20 +60,26 @@ function createApa({ adapters, priceOf, judge, usageHistory, evalPrompts = DEFAU
   }
 
   // the adopt rule in one place: adopt ⟺ runnable ∧ quality ≥ incumbent ∧ cheaper ∧ autoAdopt.
+  // "Cheaper" is judged on the OWNER'S token mix, not a flat in+out sum: { mix: {wIn,wOut} }
+  // blends each price as in·wIn + out·wOut (no mix → 0.5/0.5 ≡ the old sum's ranking), so an
+  // input-heavy module isn't lured by cheap output tokens it barely buys.
   // { delisted: true } = the incumbent has vanished from the benchmark source, so "cheaper"
   // vs a live price is unsatisfiable and the incumbent would freeze forever. The price test
   // relaxes to comparable-or-better (≤) vs the incumbent's LAST KNOWN price (the host's
   // priceOf must keep that history), and the verdict becomes a PROPOSAL, never an adopt:
   // swapping an incumbent nobody benchmarks anymore is a judgment call for the human.
-  function adoptGate(ev, { autoAdopt = true, delisted = false } = {}) {
+  const { weightedCost } = require('./pricing');
+  function adoptGate(ev, { autoAdopt = true, delisted = false, mix = null } = {}) {
     if (!ev) return { adopt: false, reason: 'not runnable — recommend for review' };
+    const cc = weightedCost(ev.cp, mix), ic = weightedCost(ev.ip, mix);
     if (delisted) {
-      const comparable = !!(ev.cp && ev.ip && (ev.cp.in + ev.cp.out) <= (ev.ip.in + ev.ip.out));
-      if (ev.qualityOK && comparable) return { adopt: false, propose: true, reason: 'equal-or-better at comparable-or-better price vs delisted incumbent (last-known price)' };
-      return { adopt: false, reason: ev.qualityOK ? 'pricier than the delisted incumbent\'s last-known price' : 'quality not clearly ≥ (vs delisted incumbent)' };
+      const comparable = cc != null && ic != null && cc <= ic;
+      if (ev.qualityOK && comparable) return { adopt: false, propose: true, reason: 'equal-or-better at comparable-or-better usage-weighted cost vs delisted incumbent (last-known price)' };
+      return { adopt: false, reason: ev.qualityOK ? 'pricier than the delisted incumbent\'s last-known price (usage-weighted)' : 'quality not clearly ≥ (vs delisted incumbent)' };
     }
-    if (ev.qualityOK && ev.cheaper) return autoAdopt ? { adopt: true, reason: 'equal-or-better and cheaper' } : { adopt: false, reason: 'better+cheaper (auto-adopt off)' };
-    return { adopt: false, reason: ev.cheaper ? 'cheaper but quality not clearly ≥' : 'not cheaper' };
+    const cheaper = cc != null && ic != null ? cc < ic : ev.cheaper;
+    if (ev.qualityOK && cheaper) return autoAdopt ? { adopt: true, reason: 'equal-or-better and cheaper (usage-weighted)' } : { adopt: false, reason: 'better+cheaper (auto-adopt off)' };
+    return { adopt: false, reason: cheaper ? 'cheaper but quality not clearly ≥' : 'not cheaper (usage-weighted)' };
   }
 
   // The full decision flow for one scraped finding, with the host's MEMORY and VOICE injected
@@ -88,7 +94,9 @@ function createApa({ adapters, priceOf, judge, usageHistory, evalPrompts = DEFAU
   //         resolveId(model, lab) → runnable id|null, providerFor(id, lab) → adapter provider,
   //         sameFamily(finding) → true if candidate runs on the incumbent's own provider,
   //         incumbentDelisted?(module, incId) → true when the incumbent dropped off the
-  //           host's benchmark board (switches adoptGate to its relaxed, propose-only branch)
+  //           host's benchmark board (switches adoptGate to its relaxed, propose-only branch),
+  //         usageMix?(module) → {wIn,wOut} — the owner's input/output token mix for the
+  //           module, so price comparisons are usage-weighted (absent → 0.5/0.5 flat sum)
   // finding: { kind, lab, model, headline, url, why, priceIn, priceOut }
   async function considerFinding(f, ctx) {
     const notify = ctx.notify, store = ctx.store;
@@ -121,8 +129,11 @@ function createApa({ adapters, priceOf, judge, usageHistory, evalPrompts = DEFAU
     const savLine = savings != null ? ` Projected ~$${savings}/mo saved on ${module}.` : '';
     // ctx.incumbentDelisted(module, incId) → true when the incumbent has dropped off the
     // host's benchmark board — switches the gate to its relaxed, propose-only branch.
+    // ctx.usageMix(module) → {wIn,wOut} from the owner's actual token traffic on this module,
+    // so "cheaper" means cheaper for THIS workload, not on a flat in+out sum.
     const delisted = ctx.incumbentDelisted ? await Promise.resolve(ctx.incumbentDelisted(module, incId)).catch(() => false) : false;
-    const gate = adoptGate(ev, { autoAdopt: ctx.autoAdopt, delisted });
+    const mix = ctx.usageMix ? await Promise.resolve(ctx.usageMix(module)).catch(() => null) : null;
+    const gate = adoptGate(ev, { autoAdopt: ctx.autoAdopt, delisted, mix });
     if (gate.adopt) {
       store.adopt(module, candId, `${gate.reason}: ${ev.note}`);
       notify.info(`  ↳ **ADOPTED** ${candId} (${f.lab}) for ${module} (${gate.reason}).${savLine} Reversible via the dashboard.`);

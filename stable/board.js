@@ -27,11 +27,11 @@ function createBoard({ roles = { roles: {}, all_benchmarks: [], track_non_us_os:
   function fromRows(rows) {
     const tiers = Object.entries(roles.roles || {});
     return (Array.isArray(rows) ? rows : []).filter(r => r && r.model).map(r => {
-      let role = '';
-      for (const [key, rc] of tiers) {
+      let role = '', roleMin = -Infinity; // highest cleared bar wins, not iteration order —
+      for (const [key, rc] of tiers) {    // else a low-bar tier added later claims every model
         if (!rc || !rc.primary || rc.min == null) continue;
         const hit = Object.entries(r.benchmarks || {}).find(([b]) => sameBench(b, rc.primary));
-        if (hit && +hit[1] >= +rc.min) role = key;
+        if (hit && +hit[1] >= +rc.min && +rc.min > roleMin) { role = key; roleMin = +rc.min; }
       }
       return { model: String(r.model), lab: r.lab || '', country: r.country || '', os: !!r.os,
         role, priceIn: r.priceIn ?? null, priceOut: r.priceOut ?? null, benchmarks: r.benchmarks || {} };
@@ -73,25 +73,53 @@ function createBoard({ roles = { roles: {}, all_benchmarks: [], track_non_us_os:
     return { winner: rc.winner, present: true, score: b ? +b[1] : null };
   }
 
-  function bestReplacement(rows, roleKey, { minScore = null, maxPriceTotal = null } = {}) {
+  // Cost is USAGE-WEIGHTED (owner's {wIn,wOut} token mix; absent → 0.5/0.5 flat blend). The
+  // search is a PARETO VALUE WALK, not a bare cheapest-adequate pick: a hard min-score bar is
+  // somewhat arbitrary, and what the owner actually wants is the (cost, score) frontier and
+  // the cheap jumps along it. Entry = cheapest frontier model clearing the bar; then upgrade
+  // to any later frontier point while the jump is steep, measured in POINTS PER COST-DOUBLING
+  // (Δscore / log2(costRatio) — the natural slope on a log-price axis). So +14 points for
+  // 1.5× the price (+24 pts/dbl) is taken, +3 points for 14× (+0.8) is not — and the exact
+  // placement of the min bar stops deciding the outcome. valueBar tunes greed (default 8
+  // pts/dbl; Infinity ⇒ pure cheapest-adequate). maxCost still caps everything: arbitrage
+  // never exceeds the incumbent's budget.
+  const { weightedCost } = require('./pricing');
+  const effCost = c => Math.max(0.01, c); // log math floor — free models plot/compare at 1¢
+  const ptsPerDoubling = (a, b) => b.cost <= a.cost ? Infinity : (b.score - a.score) / Math.log2(effCost(b.cost) / effCost(a.cost));
+  function paretoFrontier(rows, roleKey, { mix = null } = {}) {
     const rc = (roles.roles || {})[roleKey] || {};
-    if (!rc.primary) return null;
-    const cands = [];
+    if (!rc.primary) return [];
+    const pts = [];
     for (const m of rows || []) {
       if (!m || normModel(m.model) === normModel(rc.winner || '')) continue;
       const b = Object.entries(m.benchmarks || {}).find(([k, v]) => v != null && !isNaN(+v) && sameBench(k, rc.primary));
       if (!b) continue;
-      const score = +b[1];
-      if (minScore != null && score < +minScore) continue;
-      const total = (m.priceIn != null && m.priceOut != null) ? +m.priceIn + +m.priceOut : null;
-      if (maxPriceTotal != null && (total == null || total > maxPriceTotal)) continue;
-      cands.push({ model: m.model, lab: m.lab || '', score, priceIn: m.priceIn ?? null, priceOut: m.priceOut ?? null, total });
+      const cost = weightedCost({ in: m.priceIn != null ? +m.priceIn : null, out: m.priceOut != null ? +m.priceOut : null }, mix);
+      if (cost == null) continue;
+      pts.push({ model: m.model, lab: m.lab || '', score: +b[1], priceIn: m.priceIn ?? null, priceOut: m.priceOut ?? null, cost });
     }
-    cands.sort((a, b) => (b.score - a.score) || ((a.total ?? Infinity) - (b.total ?? Infinity)));
-    return cands[0] || null;
+    pts.sort((a, b) => (a.cost - b.cost) || (b.score - a.score));
+    const front = []; let best = -Infinity;
+    for (const p of pts) if (p.score > best) { front.push(p); best = p.score; }
+    return front; // cost-ascending AND score-ascending: the efficient set
+  }
+  function bestReplacement(rows, roleKey, { minScore = null, maxCost = null, mix = null, valueBar = 8 } = {}) {
+    const front = paretoFrontier(rows, roleKey, { mix }).filter(p => maxCost == null || p.cost <= maxCost);
+    let i = front.findIndex(p => minScore == null || p.score >= +minScore);
+    if (i < 0) return null;
+    for (;;) { // value walk — jumps may skip weak intermediate points to reach a steep one
+      let bestJ = -1, bestV = valueBar;
+      for (let j = i + 1; j < front.length; j++) {
+        const v = ptsPerDoubling(front[i], front[j]);
+        if (v >= bestV) { bestV = v; bestJ = j; }
+      }
+      if (bestJ < 0) break;
+      i = bestJ;
+    }
+    return { ...front[i] };
   }
 
-  return { fromRows, thresholdFor, sameBench, benchPrompt, parseBench, winnerOnBoard, bestReplacement };
+  return { fromRows, thresholdFor, sameBench, benchPrompt, parseBench, winnerOnBoard, bestReplacement, paretoFrontier, ptsPerDoubling };
 }
 
 module.exports = { createBoard, normModel };

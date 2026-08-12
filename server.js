@@ -4392,7 +4392,7 @@ async function scanActivities() {
             .replace(/\[currentlocation\]/gi, locationOnDate(today()) || 'the user\'s current city')
             .replace(/\[projectedlocation\]/gi, projLoc || locationOnDate(today()) || 'the user\'s current city')}\n` +
           `Use WebSearch/WebFetch. Find CONCRETE, DATED events in the NEXT 21 DAYS. Only real events with a source — NEVER invent; an empty list is a fine answer.\n` +
-          `NEVER return a physical event in a city the owner will NOT be in on that date (per the projection above). Location-independent events (TV/streamed broadcasts, online) are fine anywhere — mark them "local": false.\n` +
+          `NEVER return a physical event in a city the owner will NOT be in on that date (per the projection above), and SKIP cities where the stay is under one full day (an airport stopover or a few hours in transit gets ZERO proposals). Location-independent events (TV/streamed broadcasts, online) are fine anywhere — mark them "local": false.\n` +
           (known ? `ALREADY KNOWN (do NOT return these again, even reworded — only genuinely NEW events):\n${known}\n` : '') +
           `At most 8 new events. ONE entry per real-world event — use a canonical title (e.g. "Australia v France — Nations Championship R2"), never multiple phrasings.\n` +
           `For TELEVISED matches/tournaments, "note" MUST name the TV channel or streamer carrying it${projLoc ? " in the owner's projected location on that date (per the projection above)" : ''} — e.g. "beIN Sports 1 (QA)", "Canal+ (FR)"; fall back to the primary international broadcaster if the local carrier is unclear.\n` +
@@ -4543,6 +4543,17 @@ app.get('/api/activities', asyncRoute(async (req, res) => {
     return out;
   });
   const events = expanded.filter(r => r.Date >= t0 && r.Date <= horizon).filter(stillOn)
+    .filter(r => { // stopover guard (owner, 2026-08-11: "4 hours in Paris and I've had 100
+      // proposals"): never propose location-bound events for stays under a full day —
+      // require the projected stay containing the event date to span >= 2 consecutive days
+      if (r._multi || !String(r.ScanLoc || '').trim()) return true;
+      const here = locationOnDate(r.Date); if (!here) return true;
+      const shiftD = (d, k) => new Date(Date.parse(d) + k * 864e5).toISOString().slice(0, 10);
+      let run = 1;
+      for (let k = 1; k < 14 && locationOnDate(shiftD(r.Date, -k)) === here; k++) run++;
+      for (let k = 1; k < 14 && locationOnDate(shiftD(r.Date, k)) === here; k++) run++;
+      return run >= 2;
+    })
     .filter(r => { // projected-location gate (see ScanLoc column); selected multi-day runs
       // bypass it — they are planning-relevant wherever the owner is, and the (location)
       // suffix in the label makes the geography explicit
@@ -5394,22 +5405,25 @@ async function sharedListView(slug, cfg) {
     items: items.map(i => ({ text: disp(i.text), orig: tr[i.text] ? i.text : undefined, done: i.mark === 'Y', doer: i.mark === 'D',
       comments: comments.filter(c => c.Item === i.text || !c.Item).map(c => ({ from: c.From, text: disp(c.Text), at: c.At })) })) };
 }
-// ---------- Q3 intern engine (owner decree 2026-08-10) ----------
-// Q3 = "Delegated to Agent". Open Q3 rows are ATTEMPTED AUTONOMOUSLY: a tiered intern
-// (tag agent:steeldust|thoroughbred|secretariat -> cheap|mid|super, models from the roster
-// when present) advances each task conversationally. The full back-and-forth persists as
-// one .md per task (CFG.internTasksDir) AND mirrors to the 'Agent Threads' tab so every
-// tier can read it. Owner replies (dashboard thread box) trigger an IMMEDIATE re-run —
-// recursion on response, not next-heartbeat. Each run ends with a self-check ("could I
-// advance further? would a higher tier?"): one extra same-run iteration is allowed, and
-// escalation is RECOMMENDED, never self-granted. Guardrails identical to the heartbeat:
-// draft/queue/propose — never send, never move money, never change settings.
+// ---------- Q3 intern engine (owner decree 2026-08-10; workflow rev 2026-08-11) ----------
+// Q3 = "Delegated to Agent" — but attempts are SPEC-GATED (rev): a row added without
+// explicit go-words is NOT run; it gets an AT number, an orange [awaiting spec] badge at
+// the bottom of Q3, and a morning Agent Feedback line asking for directions. Once
+// directions arrive (AF reply or the dashboard thread) the task is attempted ONCE per
+// direction — there is NO interval auto-retry (removed 2026-08-11: retries just re-tried
+// the same thing). The dashboard thread shows only each run's SUMMARY (essential findings
+// + guidance questions); full detail lives in the canonical .md. Per-task stats (runs,
+// tokens, cost by model, funding class) ride the thread header. Escalation is recommended,
+// never self-granted. Guardrails identical to the heartbeat.
 const INTERN_DIR = CFG.internTasksDir || path.join(__dirname, 'data', 'agent-threads');
 const ITHREADS_TAB = 'Agent Threads';
 const ITHREADS_HEADERS = ['ID', 'Task', 'Thread', 'Status', 'Updated'];
+const INTERN_STATS_FILE = path.join(__dirname, 'data', 'intern-stats.json');
 const INTERN_TIER_DEFAULTS = {
   'intern-cheap': 'claude-haiku-4-5-20251001', intern: 'claude-sonnet-5', 'intern-super': 'claude-opus-5',
 };
+// "explicit instructions to go/launch/start/search/etc" — the spec gate
+const INTERN_GO_WORDS = /\b(go|launch|start|search|research|investigate|find|draft|write|compile|compare|analy[sz]e|book|prepare|build|fix|create|estimate|summari[sz]e|review|plan|check|propose|look\s*up|get\b)/i;
 function internTierFor(task) {
   const tags = String(task.Tags || '').toLowerCase();
   const mod = /agent:secretariat/.test(tags) ? 'intern-super' : /agent:thoroughbred/.test(tags) ? 'intern' : 'intern-cheap';
@@ -5418,6 +5432,14 @@ function internTierFor(task) {
 }
 const internThreadPath = id => path.join(INTERN_DIR, id + '.md');
 function readInternThread(id) { try { return fs.readFileSync(internThreadPath(id), 'utf8'); } catch (e) { return ''; } }
+function internStats() { try { return JSON.parse(fs.readFileSync(INTERN_STATS_FILE, 'utf8')); } catch (e) { return {}; } }
+function recordInternRun(taskId, entry) {
+  const all = internStats();
+  (all[taskId] = all[taskId] || []).push(entry);
+  try { fs.writeFileSync(INTERN_STATS_FILE, JSON.stringify(all)); } catch (e) {}
+}
+const internSpecd = (task, md) => INTERN_GO_WORDS.test(String(task.Task || '') + ' ' + String(task.Notes || '')) || /\*\*Owner ·/.test(md);
+const internAttempts = md => (md.match(/\n-------\n\*\*(?!Owner)/g) || []).length;
 async function writeInternThread(id, taskTitle, md, status) {
   fs.mkdirSync(INTERN_DIR, { recursive: true });
   fs.writeFileSync(internThreadPath(id), md);
@@ -5432,40 +5454,60 @@ async function writeInternThread(id, taskTitle, md, status) {
     _tabCache.delete(TODO_SHEET_ID + '|' + ITHREADS_TAB);
   } catch (e) { console.error('intern thread mirror:', e.message); }
 }
+// awaiting-spec bookkeeping: tag the row (orange badge + bottom-sort in the UI), mint the
+// AT number once (linked, so checking the todo off auto-closes it)
+async function internMarkAwaiting(task) {
+  if (/awaiting-spec/.test(String(task.Tags || ''))) return;
+  await updateTaskById(task.ID, { Tags: [String(task.Tags || ''), 'awaiting-spec'].filter(Boolean).join(',') }).catch(() => {});
+  if (!String(task.AgentTask || '').trim()) {
+    await createAgentTask({ task: 'Q3 delegated, awaiting spec: ' + String(task.Task).slice(0, 100) + ' — give directions in AF or the dashboard thread',
+      source: 'intern', tags: 'awaiting-spec', linkedTodoId: task.ID }).catch(() => {});
+  }
+}
+async function internClearAwaiting(task) {
+  if (!/awaiting-spec/.test(String(task.Tags || ''))) return;
+  await updateTaskById(task.ID, { Tags: String(task.Tags).split(',').map(x => x.trim()).filter(x => x && x !== 'awaiting-spec').join(',') }).catch(() => {});
+}
 const internBusy = new Set();
-async function internRun(taskId, trigger = 'interval') {
+async function internRun(taskId, trigger = 'drain') {
   if (!HAS_CLAUDE && !(CFG.llmRelayUrl && CFG.llmRelayKey)) return { error: 'no llm on this tier' };
   if (internBusy.has(taskId)) return { busy: true };
   internBusy.add(taskId);
   try {
     const { rows } = await readTodoTab();
     const task = rows.find(r => r.ID === taskId);
-    if (!task || String(task.Status).trim().toLowerCase() !== 'open' || String(task.Quadrant).trim() !== 'Q3') return { skipped: 'not an open Q3 task' }; // case-insensitive: the heartbeat once wrote 'Open' and the rows went invisible
+    if (!task || String(task.Status).trim().toLowerCase() !== 'open' || String(task.Quadrant).trim() !== 'Q3') return { skipped: 'not an open Q3 task' };
     const tier = internTierFor(task);
     let md = readInternThread(taskId);
     if (!md) md = `# ${task.Task}\n\ntask ${taskId} · opened ${task.Created || '?'} · tags: ${task.Tags || '-'}\n${task.Notes ? '\nOwner notes at delegation:\n' + task.Notes + '\n' : ''}`;
-    const runsToday = (md.match(new RegExp('\\*\\*' + tier.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ' · ' + today(), 'g')) || []).length;
-    if (trigger === 'interval' && runsToday >= 3) return { skipped: 'daily attempt cap' };
+    if (!internSpecd(task, md)) { await internMarkAwaiting(task); await writeInternThread(taskId, task.Task, md, 'awaiting-spec'); return { awaitingSpec: true }; }
+    await internClearAwaiting(task);
+    // ONE attempt per direction: the drain never re-runs a task that already has an
+    // attempt — only a fresh owner reply (or explicit /run) does.
+    if (trigger === 'drain' && internAttempts(md) > 0) return { skipped: 'already attempted — waiting on owner' };
+    const t0run = Date.now();
     let extraUsed = false;
     for (let iter = 0; iter < 2; iter++) {
       const raw = await runClaude(
-        `You are "${tier.name}", an autonomous intern advancing ONE delegated task for your owner. Work conversationally — this thread reads like a dialogue with the owner (same style as a human assistant's task thread).\n` +
-        `THE TASK: ${task.Task}\n\nTHE THREAD SO FAR (your past attempts + owner replies):\n${md.slice(-14000)}\n\n` +
-        `Advance the task CONCRETELY right now: research with the tools, compute, draft, compare options, verify facts, produce the artifact — do not merely restate a plan. If truly blocked on the owner, say exactly what you need (ONE crisp question max — never repeat a question already answered or asked in the thread).\n` +
+        `You are "${tier.name}", an autonomous intern advancing ONE delegated task for your owner, conversationally (a dialogue thread, like a human assistant's task thread).\n` +
+        `THE TASK: ${task.Task}\n\nTHE THREAD SO FAR (your past attempts + owner replies — owner replies are your directions):\n${md.slice(-14000)}\n\n` +
+        `Advance the task CONCRETELY right now per the owner's directions: research with the tools, compute, draft, compare, verify — never merely restate a plan. If blocked on the owner, ask exactly what you need (crisp questions, never ones already answered in the thread).\n` +
         `GUARDRAILS: draft/queue/propose only — NEVER send email, move money, or change settings. No placeholders pretending to be results.\n` +
-        `Write your reply as thread markdown (concise, deliverable-first). End with EXACTLY one status line:\n` +
-        `STATUS: advanced | blocked-on-owner | done-proposed\n` +
-        `Then IF AND ONLY IF warranted add one more line from these:\n` +
-        `CONTINUE (you can concretely advance further in a second pass right now — you get at most one)\n` +
+        `FORMAT — two parts, both mandatory:\n` +
+        `SUMMARY:\n<the dashboard view — ONLY essential findings + questions for guidance, max ~8 short lines. No methodology, no padding.>\n` +
+        `DETAILS:\n<everything else — full findings, sources, drafts, workings. This lives in the canonical md only.>\n` +
+        `End with EXACTLY one status line:\nSTATUS: advanced | blocked-on-owner | done-proposed\n` +
+        `Then IF AND ONLY IF warranted, one more line from:\nCONTINUE (you can concretely advance further right now — you get at most one extra pass)\n` +
         `ESCALATE: thoroughbred|secretariat — <one line why a more capable tier would materially help>`,
         { tools: 'WebSearch,WebFetch', timeoutMs: 300000, module: tier.module, model: tier.model });
       const reply = String(raw || '').trim();
       if (!reply) break;
       md += `\n\n-------\n**${tier.name} · ${today()} ${new Date().toTimeString().slice(0, 5)} · ${tier.model.replace(/-20\d{6}$/, '')}**\n\n${reply}`;
-      const wantsMore = /\nCONTINUE\s*$/m.test(reply) || /\nCONTINUE\n/.test(reply);
+      const wantsMore = /\nCONTINUE\s*$/m.test(reply);
       if (!wantsMore || extraUsed) break;
-      extraUsed = true; // the single self-granted extra iteration
+      extraUsed = true; // the single self-granted extra iteration (in-run, owner-approved 2026-08-10)
     }
+    recordInternRun(taskId, { at: nowIso(), startedAt: new Date(t0run).toISOString(), model: tier.model, module: tier.module, iters: extraUsed ? 2 : 1, trigger });
     const status = (md.match(/STATUS:\s*(advanced|blocked-on-owner|done-proposed)/g) || []).pop() || '';
     await writeInternThread(taskId, task.Task, md, status.replace('STATUS:', '').trim());
     await updateTaskById(taskId, { Updated: nowIso() }).catch(() => {});
@@ -5473,23 +5515,43 @@ async function internRun(taskId, trigger = 'interval') {
   } finally { internBusy.delete(taskId); }
 }
 async function internDrain() {
+  // catch-up only: tag/AT-mint new unspec'd rows, and give spec'd-but-never-attempted rows
+  // their single attempt (e.g. created while the server was down). NEVER a retry loop.
   try {
     const { rows } = await readTodoTab();
     const q3 = rows.filter(r => String(r.Status).trim().toLowerCase() === 'open' && String(r.Quadrant).trim() === 'Q3');
     for (const t of q3) {
-      let mtime = 0; try { mtime = fs.statSync(internThreadPath(t.ID)).mtimeMs; } catch (e) {}
-      if (Date.now() - mtime < 4 * 3600e3) continue; // attempted recently
-      await internRun(t.ID, 'interval').catch(e => console.error('internRun', t.ID, e.message));
+      const md = readInternThread(t.ID);
+      if (!internSpecd(t, md)) { if (!/awaiting-spec/.test(String(t.Tags || ''))) await internRun(t.ID, 'drain').catch(() => {}); continue; }
+      if (internAttempts(md) === 0) await internRun(t.ID, 'drain').catch(e => console.error('internRun', t.ID, e.message));
     }
   } catch (e) { console.error('internDrain:', e.message); }
 }
 if ((HAS_CLAUDE || (CFG.llmRelayUrl && CFG.llmRelayKey)) && !process.env.DASHBOARD_NO_JOBS) {
   setTimeout(() => internDrain().catch(() => {}), 4 * 60000);
-  setInterval(() => internDrain().catch(() => {}), 45 * 60000); // "within a few hours" with margin
+  setInterval(() => internDrain().catch(() => {}), 45 * 60000);
 }
 app.get('/api/intern/thread/:id', asyncRoute(async (req, res) => {
+  // per-run stats for the thread header: attribute Usage rows to each recorded run by
+  // module + time window (runs are serialized per task, so windows don't overlap)
+  const runs = (internStats()[req.params.id] || []);
+  let stats = [];
+  try {
+    const urows = await usageRows();
+    stats = runs.map(r => {
+      const t0 = new Date(r.startedAt || r.at).getTime(), t1 = new Date(r.at).getTime() + 120000;
+      const mine = urows.filter(u => u.module === r.module && new Date(u.at).getTime() >= t0 && new Date(u.at).getTime() <= t1);
+      const input = mine.reduce((n, u) => n + u.input, 0), output = mine.reduce((n, u) => n + u.output, 0);
+      let cost = mine.reduce((n, u) => n + u.costUsd, 0);
+      const p = priceOf(r.model); if (!cost && p) cost = (input * p.in + output * p.out) / 1e6;
+      return { at: r.at, model: r.model.replace(/-20\d{6}$/, ''), iters: r.iters || 1, input, output,
+        costUsd: Math.round(cost * 1000) / 1000, cls: costClass(r.model, r.module, r.at) };
+    });
+  } catch (e) {}
+  let atId = '';
+  try { const { rows } = await readTodoTab(); atId = String((rows.find(t => t.ID === req.params.id) || {}).AgentTask || '').replace(/^.*"(AT\d+)".*$/, '$1'); } catch (e) {}
   const local = readInternThread(req.params.id);
-  if (local) return res.json({ id: req.params.id, md: local, source: 'file' });
+  if (local) return res.json({ id: req.params.id, md: local, source: 'file', stats, atId });
   try { // cross-tier: the sheet mirror
     const { rows } = await readTabCached(TODO_SHEET_ID, ITHREADS_TAB, ITHREADS_HEADERS, 20000);
     const hit = rows.find(r => r.ID === req.params.id);
@@ -7206,6 +7268,8 @@ const apaHostDeps = {
   log: (e) => logDecision({ module: 'apa', actor: 'apa', ...e }),
   // incumbent off the AA board (per the winner watch's miss counter) → relaxed propose-only gate
   incumbentDelisted: (module, incId) => apaModelDelisted(incId),
+  // the module's trailing-30d input/output token mix → usage-weighted "cheaper" in adoptGate
+  usageMix: (module) => apaMixFor(module),
   resolveId: apaModelId,
   providerFor: (id, lab) => require('./providers').apaProviderFor(id, lab || id), // lab||id so a non-claude incumbent still resolves
   sameFamily: f => /anthropic|claude/.test(String(f.lab || '').toLowerCase()) || /^claude/.test(String(f.model || '').toLowerCase()),
@@ -7488,6 +7552,32 @@ app.post('/api/credits', asyncRoute(async (req, res) => {
 const APA_MODELS_TAB = 'APA Models';
 const APA_MODELS_HEADERS = ['Model', 'Lab', 'Country', 'OS', 'Role', 'PriceIn', 'PriceOut', 'Benchmarks', 'Updated', 'Source'];
 const APA_CUTOFF_CELL = "'Heartbeat'!J1";
+// ---- usage-weighted cost mix (2026-08-11) ----
+// "Cheaper" is judged on the OWNER'S token mix, refreshed weekly from the trailing 30d of the
+// Usage tab and cached in apa-state (per module, per role = the role's modules aggregated, plus
+// a global fallback). A flat in+out sum mis-ranks lopsided workloads — bulk-tier traffic runs
+// ~97% input tokens, where a model $0.25/1M pricier on input is a worse deal no matter how
+// cheap its output is. Everything price-gated (adoptGate via ctx.usageMix, the winner watch's
+// relaxed search) blends $/1M as in·wIn + out·wOut; no data → 0.5/0.5 ≡ the old flat sum.
+const APA_MIX_WINDOW_DAYS = 30, APA_MIX_TTL_DAYS = 7;
+async function apaRefreshUsageMix(st) { // mutates st.usageMix when stale; caller persists
+  if (st.usageMix && st.usageMix.at && Date.now() - new Date(st.usageMix.at).getTime() < APA_MIX_TTL_DAYS * 86400000) return st.usageMix;
+  const { usageMixOf } = require('./stable/pricing');
+  const cutoff = Date.now() - APA_MIX_WINDOW_DAYS * 86400000;
+  const rows = (await usageRows()).filter(r => new Date(r.at).getTime() >= cutoff);
+  const byModule = {};
+  for (const r of rows) (byModule[r.module || 'unknown'] = byModule[r.module || 'unknown'] || []).push(r);
+  const modules = {}; for (const [m, rs] of Object.entries(byModule)) modules[m] = usageMixOf(rs);
+  const roleMix = {};
+  for (const [k, rc] of Object.entries(loadApaRoles().roles || {})) {
+    const rs = rows.filter(r => (rc.modules || []).includes(r.module));
+    roleMix[k] = rs.length ? usageMixOf(rs) : null; // null → global fallback at read time
+  }
+  st.usageMix = { at: nowIso(), windowDays: APA_MIX_WINDOW_DAYS, global: usageMixOf(rows), modules, roles: roleMix };
+  return st.usageMix;
+}
+function apaMixFor(module) { const um = apaState().usageMix || {}; return (um.modules || {})[module] || um.global || null; }
+function apaMixForRole(role) { const um = apaState().usageMix || {}; return (um.roles || {})[role] || um.global || null; }
 // ---- delisted-winner watch (2026-08-11) ----
 // A role winner absent from the AA board has no live price or score, so the strict
 // "equal-or-better AND cheaper" adopt gate can never replace it — the winner freezes forever
@@ -7518,35 +7608,76 @@ async function apaWinnerWatch(bd, models, st) {
   for (const [k, rc] of Object.entries(roles.roles || {})) {
     const s = bd.winnerOnBoard(models, k);
     if (!s) { delete wb[k]; continue; } // no winner configured for this role
-    if (s.present) { wb[k] = { winner: rc.winner, misses: 0, lastScore: s.score, lastSeenAt: nowIso() }; continue; }
+    if (s.present) {
+      wb[k] = { winner: rc.winner, misses: 0, lastScore: s.score, lastSeenAt: nowIso() };
+      // cutoff refinement, path 1 (auto-anchor): while the adopted winner is ON the board, keep
+      // the role's hypothesised min anchored to its LIVE primary score (floored, so daily jitter
+      // never fails the winner against its own bar). Written only when the floor moves; a
+      // manually-set rc.min always wins at read time, and manually-authored hypotheses are
+      // only replaced, never edited. Refinement paths 2/3 (outcome grading, boundary probes)
+      // stay with the nightly CI / future Form Guide outcome posting.
+      if (s.score != null) {
+        const cuts = st.cutoffs = st.cutoffs || {};
+        const want = Math.floor(s.score);
+        if (!cuts[k] || cuts[k].min !== want) {
+          cuts[k] = { min: want, why: `Auto-anchored to the adopted ${k} winner ${rc.winner}'s live ${rc.primary} score (${s.score}) — a candidate must at least match the model already judged adequate. Floored so the winner's own daily jitter never fails its bar. Manual min overrides.`, method: 'anchor:winner-live', at: nowIso().slice(0, 10) };
+        }
+      }
+      // value arbitrage while the winner is PRESENT: the news-driven gate only sees announced
+      // findings, never board drift — so each compile also walks the Pareto frontier for a
+      // point at ≤ the winner's live blended cost with a meaningful score jump (≥2 points,
+      // above the floor-jitter noise). Proposal only, same 10-day dedup; capability roles skip.
+      if (!rc.special && s.score != null) {
+        const { weightedCost } = require('./stable/pricing');
+        const mixP = apaMixForRole(k);
+        const wRow = models.find(m => require('./stable/board').normModel(m.model) === require('./stable/board').normModel(rc.winner));
+        const wCost = wRow ? weightedCost({ in: wRow.priceIn != null ? +wRow.priceIn : null, out: wRow.priceOut != null ? +wRow.priceOut : null }, mixP) : null;
+        const up = wCost != null ? bd.bestReplacement(models, k, { minScore: s.score + 2, maxCost: wCost, mix: mixP }) : null;
+        if (up && !(e2 => e2 && e2.cand === up.model && Date.now() - new Date(e2.at).getTime() < 10 * 86400000)(wb[k].arbProposed)) {
+          wb[k].arbProposed = { cand: up.model, at: nowIso() };
+          const r2b = v => Math.round(v * 100) / 100;
+          const h = `value arbitrage: ${up.model} beats ${k} winner ${rc.winner} by ${r2b(up.score - s.score)} pts on ${rc.primary} at no extra cost (~$${r2b(up.cost)} vs ~$${r2b(wCost)}/1M blended on the role's mix)`;
+          try {
+            await appendTabRow(APA_TAB, APA_HEADERS, [crypto.randomUUID(), nowIso(), 'arbitrage', up.lab || '', up.model, h.slice(0, 200), 'https://artificialanalysis.ai/models', '0.6', 'proposal', 'new', '1', `Pareto-frontier sweep vs the live winner (equal-or-cheaper usage-weighted cost, ≥2-point jump). Proposal only — edit the winner on /agents.html use-cases to act.`], STABLE_SHEET_ID);
+          } catch (err) { console.error('winner arb feed:', err.message); }
+          appendToJournal(`- **APA proposal**: ${h}`);
+          await logDecision({ module: 'apa', actor: 'apa', decision: `value-arbitrage proposal: ${k} ${rc.winner} → ${up.model}`, why: `+${r2b(up.score - s.score)} pts at ~$${r2b(up.cost)} ≤ winner ~$${r2b(wCost)}/1M blended`.slice(0, 200) }).catch(() => {});
+        }
+      }
+      continue;
+    }
     const e = (wb[k] && wb[k].winner === rc.winner) ? wb[k] : { winner: rc.winner, misses: 0 };
     if (e.lastMissDay !== today) { e.misses = (e.misses || 0) + 1; e.lastMissDay = today; e.firstMissAt = e.firstMissAt || nowIso(); }
     wb[k] = e;
     if (e.misses < n) continue;
     const lastP = apaPriceOf(rc.winner);
+    const mix = apaMixForRole(k);
+    const { weightedCost } = require('./stable/pricing');
+    const lastCost = lastP ? weightedCost(lastP, mix) : null;
+    const r2 = v => v == null ? null : Math.round(v * 100) / 100;
+    const mixStr = mix ? `${Math.round(mix.wIn * 100)}/${Math.round(mix.wOut * 100)} in/out mix` : '50/50 default mix';
     const minScore = e.lastScore ?? rc.min ?? (cutoffs[k] || {}).min ?? null;
     // capability stand-in roles (rc.special — e.g. x-access, where grok's x_search is the point
     // and "no public benchmark measures this") get the delisting FLAGGED but never a
     // benchmark-picked nominee: scores don't measure the capability the role exists for.
     const special = !!rc.special;
-    const cand = special ? null : bd.bestReplacement(models, k, { minScore, maxPriceTotal: lastP ? lastP.in + lastP.out : null });
+    const cand = special ? null : bd.bestReplacement(models, k, { minScore, maxCost: lastCost, mix });
     const cKey = cand ? cand.model : (special ? '(capability role)' : '(none)');
     // one proposal per candidate per 10 days (mirrors the feed's re-surface window), not one per compile
     if (e.proposed && e.proposed.cand === cKey && Date.now() - new Date(e.proposed.at).getTime() < 10 * 86400000) continue;
     e.proposed = { cand: cKey, at: nowIso() };
-    const priceStr = lastP ? `$${lastP.in}/$${lastP.out}` : 'unknown';
     const bar = minScore != null ? `${rc.primary} ≥ ${minScore}${e.lastScore != null ? ' (winner\'s last-seen score)' : ' (role min)'}` : `any ${rc.primary} score`;
     const headline = cand
-      ? `winner delisted: ${rc.winner} (${k}) off the AA board ${e.misses} compiles — ${cand.model} passes the relaxed gate (${rc.primary} ${cand.score}, $${cand.priceIn}/$${cand.priceOut} vs last-known ${priceStr})`
+      ? `winner delisted: ${rc.winner} (${k}) off the AA board ${e.misses} compiles — ${cand.model} is cheapest adequate (${rc.primary} ${cand.score}, ~$${r2(cand.cost)}/1M vs last-known ~$${r2(lastCost)}/1M on the role's ${mixStr})`
       : special
         ? `winner delisted: ${rc.winner} (${k}) off the AA board ${e.misses} compiles — capability stand-in role, so no benchmark can nominate a stand-in; review whether the capability still works or a successor exists`
-        : `winner delisted: ${rc.winner} (${k}) off the AA board ${e.misses} compiles — no model passes the relaxed gate (${bar} at ≤ last-known ${priceStr})`;
-    const detail = `Relaxed gate for delisted incumbents: equal-or-better on the role's primary benchmark at comparable-or-better price vs the winner's last-known price. Proposal only — edit the winner on /agents.html use-cases to act${rc.setBy ? ` (last edited by ${rc.setBy}; manual edits win)` : ''}.`;
+        : `winner delisted: ${rc.winner} (${k}) off the AA board ${e.misses} compiles — no model passes the relaxed gate (${bar} at ≤ last-known ~$${r2(lastCost) ?? '?'}/1M, ${mixStr})`;
+    const detail = `Relaxed gate for delisted incumbents: cheapest model at equal-or-better on the role's primary benchmark, cost usage-weighted (in·wIn+out·wOut on the role's trailing-30d token mix) vs the winner's last-known price. Proposal only — edit the winner on /agents.html use-cases to act${rc.setBy ? ` (last edited by ${rc.setBy}; manual edits win)` : ''}.`;
     try {
       await appendTabRow(APA_TAB, APA_HEADERS, [crypto.randomUUID(), nowIso(), 'delisted', cand ? cand.lab : '', cand ? cand.model : rc.winner, headline.slice(0, 200), 'https://artificialanalysis.ai/models', '0.7', 'proposal', 'new', '1', detail.slice(0, 300)], STABLE_SHEET_ID);
     } catch (err) { console.error('winner watch feed:', err.message); }
     appendToJournal(`- **APA proposal**: ${headline}`);
-    await logDecision({ module: 'apa', actor: 'apa', decision: `winner-delisted proposal: ${k} ${rc.winner} → ${cKey}`, why: `absent ${e.misses} compiles; relaxed gate: ${bar} at ≤ last-known ${priceStr}`.slice(0, 200) }).catch(() => {});
+    await logDecision({ module: 'apa', actor: 'apa', decision: `winner-delisted proposal: ${k} ${rc.winner} → ${cKey}`, why: `absent ${e.misses} compiles; relaxed gate: ${bar} at ≤ last-known ~$${r2(lastCost) ?? '?'}/1M (${mixStr})`.slice(0, 200) }).catch(() => {});
   }
 }
 let apaBoardBusy = false;
@@ -7571,6 +7702,7 @@ async function runApaBoard() {
     const st = apaState(); st.prices = st.prices || {};
     for (const m of models) if (m.priceIn != null && m.priceOut != null) st.prices[String(m.model).toLowerCase()] = { in: +m.priceIn, out: +m.priceOut, src: 'aa' };
     st.boardAt = nowIso();
+    try { await apaRefreshUsageMix(st); } catch (e) { console.error('usage mix:', e.message); } // weekly TTL; the watch prices on it
     saveApaState(st); // save prices first — the watch reads last-known prices via apaPriceOf (disk)
     try { await apaWinnerWatch(bd, models, st); } catch (e) { console.error('winner watch:', e.message); }
     saveApaState(st); // watch mutates st.winnerBoard
@@ -7609,7 +7741,7 @@ app.get('/api/apa/models', asyncRoute(async (req, res) => {
   for (const [k, e] of Object.entries(apaState().winnerBoard || {})) {
     if (e && (e.misses || 0) >= wn) warnings.push({ role: k, kind: 'winner-delisted', text: `${((roles.roles || {})[k] || {}).label || k}: winner ${e.winner} has been off the board ${e.misses} compiles — relaxed-gate proposal in the APA feed; the winner stays until edited here.` });
   }
-  res.json({ roles: roles.roles || {}, models, cutoffs, warnings, selfHost: { ...roles.selfHost, perMTokOut: selfHostPerMTok(roles.selfHost) }, osCostBasis: roles.osCostBasis, updated: models.length ? models[0].updated : null });
+  res.json({ roles: roles.roles || {}, models, cutoffs, warnings, usageMix: apaState().usageMix || null, selfHost: { ...roles.selfHost, perMTokOut: selfHostPerMTok(roles.selfHost) }, osCostBasis: roles.osCostBasis, updated: models.length ? models[0].updated : null });
 }));
 app.post('/api/apa/board', asyncRoute(async (req, res) => {
   if (!HAS_CLAUDE) return res.status(503).json({ error: 'board compile runs on the Mac/VM agent tier' });

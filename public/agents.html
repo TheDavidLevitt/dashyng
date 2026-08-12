@@ -168,7 +168,13 @@ function loadBoard(){api('/api/apa/models').then(d=>{BOARD=d;renderBoard();rende
 // Self-hosting is a single reference point on the x-axis (^ + dotted line), NOT a per-model
 // reposition — the electricity estimate uses one fixed rig assumption, and per-token energy
 // really varies with model size/throughput, so pretending it prices each model would be false.
-function osPrice(m,d){return m.priceOut;}
+// Cost axis = the owner's TYPICAL cost: $/1M blended as in·wIn + out·wOut on the trailing-30d
+// all-tier token mix (usageMix.global from /api/apa/models). Mix unavailable → 0.5/0.5 flat
+// blend. A one-sided price (rare) stands in for both, ≈ its own value.
+function blendMix(d){const g=(d.usageMix||{}).global;return g&&g.wIn!=null?g:{wIn:.5,wOut:.5};}
+function osPrice(m,d){if(m.priceIn==null&&m.priceOut==null)return null;const g=blendMix(d);return (m.priceIn??m.priceOut)*g.wIn+(m.priceOut??m.priceIn)*g.wOut;}
+const mixLabel=d=>{const g=blendMix(d);return `${Math.round(g.wIn*100)}/${Math.round(g.wOut*100)} in/out`;};
+const rB=v=>v==null?null:Math.round(v*100)/100;
 function renderBoard(){
   const d=BOARD;if(!d)return;const models=d.models||[];
   if(!models.length){$('board').innerHTML='<div class="empty">empty — <a href="#" onclick="apaBoardCompile();return false">compile now</a> (Mac/VM)</div>';return;}
@@ -179,8 +185,8 @@ function renderBoard(){
   const assume=`<div class="tiny" style="margin-top:4px">⚑ open-weight, plotted at cheapest major host's price (host named per model). ^ marks the <b>self-host reference</b>: <b>${d.selfHost.watts}W</b> rig @ <b>${d.selfHost.tokPerSec}</b> tok/s × <b>$${d.selfHost.kwhPrice}/kWh</b> ⇒ <b>$${d.selfHost.perMTokOut}/1M out</b> — a single-rig electricity-only estimate (per-token energy varies with model size/throughput, so it's an axis marker, not a per-model price) — <a href="#" onclick="editSelfHost();return false">edit assumptions</a></div>`;
   if(boardMode==='table'){
     const benches=[...new Set(uniq.flatMap(m=>Object.keys(m.benchmarks||{})))].slice(0,6);
-    $('board').innerHTML=head+`<table><tr><th>Model</th><th>Lab</th><th class="n">$/1M in/out</th><th>host</th><th>role</th>${benches.map(b=>`<th class="n" title="${esc(b)}">${esc(b.split(' ')[0].slice(0,8))}</th>`).join('')}</tr>`+
-      uniq.sort((a,b)=>(b.priceOut||0)-(a.priceOut||0)).map(m=>`<tr><td>${m.os?'⚑ ':''}${esc(m.model)}</td><td class="muted">${esc(m.lab||'')}</td><td class="n">${m.priceIn!=null?'$'+m.priceIn+' / '+m.priceOut:'—'}</td><td class="muted">${esc(m.os?(m.host||'?'):'API')}</td><td class="muted">${esc(m.role)}</td>${benches.map(b=>`<td class="n">${m.benchmarks&&m.benchmarks[b]!=null?esc(m.benchmarks[b]):'·'}</td>`).join('')}</tr>`).join('')+`</table>`+assume;
+    $('board').innerHTML=head+`<table><tr><th>Model</th><th>Lab</th><th class="n">$/1M in/out</th><th class="n" title="in·wIn+out·wOut on your ${mixLabel(d)} mix (30d, all tiers)">$/1M blend</th><th>host</th><th>role</th>${benches.map(b=>`<th class="n" title="${esc(b)}">${esc(b.split(' ')[0].slice(0,8))}</th>`).join('')}</tr>`+
+      uniq.sort((a,b)=>(osPrice(b,d)||0)-(osPrice(a,d)||0)).map(m=>`<tr><td>${m.os?'⚑ ':''}${esc(m.model)}</td><td class="muted">${esc(m.lab||'')}</td><td class="n">${m.priceIn!=null?'$'+m.priceIn+' / '+m.priceOut:'—'}</td><td class="n">${osPrice(m,d)!=null?'$'+rB(osPrice(m,d)):'—'}</td><td class="muted">${esc(m.os?(m.host||'?'):'API')}</td><td class="muted">${esc(m.role)}</td>${benches.map(b=>`<td class="n">${m.benchmarks&&m.benchmarks[b]!=null?esc(m.benchmarks[b]):'·'}</td>`).join('')}</tr>`).join('')+`</table>`+assume;
     return;
   }
   // group roles by their primary benchmark → one plot per benchmark, with that group's thresholds
@@ -190,7 +196,7 @@ function renderBoard(){
   $('board').innerHTML=head+Object.entries(groups).map(([primary,rs])=>{
     const cuts=rs.map((r,i)=>({role:r,min:(d.roles[r]||{}).min??((d.cutoffs||{})[r]||{}).min,by:(d.roles[r]||{}).min!=null?'you':'APA',color:cutColor(r,i)})).filter(c=>c.min!=null);
     return `<div style="margin-top:6px"><div class="tiny" style="font-weight:650;color:var(--text2);font-size:11px">${esc(primary)} <span style="font-weight:400">— tasks: ${rs.map(r=>esc((d.roles[r]||{}).label||r)).join(' · ')}</span></div>${scatter(uniq,primary,cuts,d)}</div>`;
-  }).join('')+`<div class="tiny" style="margin-top:3px">dashed = task minimum (labeled who set it: you vs APA's hypothesis) · dots colored by lab · ⚑ = open-weight</div>`+assume
+  }).join('')+`<div class="tiny" style="margin-top:3px">dashed = task minimum (labeled who set it: you vs APA's hypothesis) · dots colored by lab · ⚑ = open-weight · cost axis = $/1M <b>blended on your ${mixLabel(d)} token mix</b> (30d, all tiers) — not list out-price</div>`+assume
     +Object.entries(d.cutoffs||{}).map(([r,c])=>c&&c.why?`<div class="tiny" style="margin-top:1px"><b style="color:${cutColor(r,0)}">${esc(r)}</b> — APA: ${esc(c.why)}</div>`:'').join('');
 }
 function scatter(models,primary,cuts,d){
@@ -206,13 +212,13 @@ function scatter(models,primary,cuts,d){
   let s=`<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;background:var(--card2);border-radius:6px;margin-top:2px">`;
   for(const yv of [0,25,50,75,100]){const y=py(yv).toFixed(1);s+=`<line x1="${L}" y1="${y}" x2="${W-R}" y2="${y}" stroke="var(--border)" stroke-width="0.5"/><text x="${L-4}" y="${(+y+3).toFixed(1)}" text-anchor="end" font-size="9" fill="var(--text3)">${yv}</text>`;}
   for(const xv of [0.01,0.03,0.1,0.3,1,3,10,30,100]){if(lx(xv)<xmin-0.02||lx(xv)>xmax+0.02)continue;const x=px(xv).toFixed(1);s+=`<line x1="${x}" y1="${T}" x2="${x}" y2="${H-B}" stroke="var(--border)" stroke-width="0.4"/><text x="${x}" y="${H-B+12}" text-anchor="middle" font-size="9" fill="var(--text3)">$${xv<1?xv:Math.round(xv)}</text>`;}
-  s+=`<text x="${L-2}" y="${T-4}" font-size="9" fill="var(--text2)">${esc(primary)} ↑</text><text x="${W-R}" y="${H-2}" text-anchor="end" font-size="9" fill="var(--text2)">$/1M out (log) →</text>`;
-  if(sh){const x=px(sh).toFixed(1); // self-host electricity reference: ^ on the axis + light dotted line
+  s+=`<text x="${L-2}" y="${T-4}" font-size="9" fill="var(--text2)">${esc(primary)} ↑</text><text x="${W-R}" y="${H-2}" text-anchor="end" font-size="9" fill="var(--text2)">$/1M blended (log) →</text>`;
+  if(sh){const x=px(sh).toFixed(1); // self-host electricity reference: ^ on the axis + light dotted line (OUTPUT-token estimate — conservative vs blended API prices on an input-heavy mix)
     s+=`<line x1="${x}" y1="${T}" x2="${x}" y2="${H-B}" stroke="var(--text3)" stroke-dasharray="1.5 3" stroke-width="0.8" opacity="0.7"/>`;
-    s+=`<text x="${x}" y="${H-B+11}" text-anchor="middle" font-size="10" fill="var(--text2)">^</text><text x="${x}" y="${H-B+20}" text-anchor="middle" font-size="7" fill="var(--text3)">self-host $${sh}</text>`;}
+    s+=`<text x="${x}" y="${H-B+11}" text-anchor="middle" font-size="10" fill="var(--text2)">^</text><text x="${x}" y="${H-B+20}" text-anchor="middle" font-size="7" fill="var(--text3)">self-host $${sh}/1M out</text>`;}
   for(const c of cuts){const y=py(c.min).toFixed(1);s+=`<line x1="${L}" y1="${y}" x2="${W-R}" y2="${y}" stroke="${c.color}" stroke-dasharray="4 2" stroke-width="1"/><text x="${W-R-2}" y="${(+y-2).toFixed(1)}" text-anchor="end" font-size="8" fill="${c.color}">${esc(c.role)} ≥${c.min} (${c.by})</text>`;}
   for(const p of pts){const cx=px(p.x),cy=py(p.y),right=cx>W-90;
-    s+=`<circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="2.8" fill="${p.m.os?'var(--text3)':labColor(p.m.lab)}"><title>${esc(p.m.model)} (${esc(p.m.lab||'')}${p.m.os?' · hosted @ '+esc(p.m.host||'cheapest host'):''}) — $${p.x}/1M out · ${esc(primary)} ${p.y}</title></circle>`;
+    s+=`<circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="2.8" fill="${p.m.os?'var(--text3)':labColor(p.m.lab)}"><title>${esc(p.m.model)} (${esc(p.m.lab||'')}${p.m.os?' · hosted @ '+esc(p.m.host||'cheapest host'):''}) — $${rB(p.x)}/1M blended (list $${p.m.priceIn??'?'}/$${p.m.priceOut??'?'}) · ${esc(primary)} ${p.y}</title></circle>`;
     s+=`<text x="${(right?cx-4:cx+4).toFixed(1)}" y="${(cy+2.4).toFixed(1)}" ${right?'text-anchor="end"':''} font-size="5.5" fill="var(--text3)">${esc((p.m.os?'⚑':'')+shortName(p.m.model))}</text>`;}
   return s+'</svg>';
 }

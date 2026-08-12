@@ -1214,7 +1214,7 @@ function taskHtml(t, opts) {
   const star = opts.mon ? `<button class="q-btn sal-toggle${sal ? ' on' : ''}" title="${sal ? 'High salience — changes push to your journal' : 'Mark high-salience (push changes to your journal)'}">${sal ? '★' : '☆'}</button>` : '';
   return `<div class="q-task ${opts.child ? 'child' : ''}${sal ? ' q-salient' : ''}${isSettled(t) ? ' q-settled' : ''}" draggable="true" data-id="${esc(t.ID)}" data-q="${esc(normQ(t.Quadrant))}" data-parent="${esc(opts.child ? t.Parent : '')}">
     ${toggle}${bullet}
-    <span class="q-body">${taskBodyHtml(t.Task)}${cnt}${srcBadge(t.Source)}${dueHtml(t)}${(() => { const rc = recurOf(t); return rc ? ` <span class="q-recur" title="${esc(explainRecur(rc))}">🔁</span>` : ''; })()}${
+    <span class="q-body">${/awaiting-spec/.test(String(t.Tags || '')) ? '<span style="color:var(--orange,#e8a33d);font-weight:700" title="Delegated without directions — give the spec in Agent Feedback or the 🤖 thread; it runs once directions arrive">[awaiting spec]</span> ' : ''}${taskBodyHtml(t.Task)}${cnt}${srcBadge(t.Source)}${dueHtml(t)}${(() => { const rc = recurOf(t); return rc ? ` <span class="q-recur" title="${esc(explainRecur(rc))}">🔁</span>` : ''; })()}${
     // shared-tab lists: the doer's "reported done" flag and their comments ride along
     t.doerDone ? ' <span class="q-doer" title="Reported done by the doer — check it off yourself to close it">✋</span>' : ''}${
     (t.comments || []).length ? ` <span class="q-cmt" title="${esc(t.comments.map(c => `${c.from}: ${c.text}`).join('\n'))}">💬${t.comments.length}</span>` : ''}${reportedHtml(t)}${note}</span>
@@ -1223,42 +1223,79 @@ function taskHtml(t, opts) {
     ${normQ(t.Quadrant) === 'Q3' && !opts.child ? '<button class="q-btn q-ithread" title="Agent thread — the intern attempts this task autonomously; reply here to steer it">🤖</button>' : ''}
     <button class="q-btn move" title="Move / group">⇄</button>
     <button class="q-btn done" title="Mark done">✓</button>
-  </div>${sharedThreadHtml(t)}${normQ(t.Quadrant) === 'Q3' && !opts.child ? `<div class="q-ithreadbox" data-for="${esc(t.ID)}" style="display:none"></div>` : ''}`;
+  </div>${sharedThreadHtml(t)}`;
 }
 // Shared rows carry a conversation: the helper's questions with my replies inline under
 // them (one thread per occurrence), a reply box, and a 🕓-expanded history of past
 // occurrences — each with its conversation and the dates the round was completed.
-// Q3 intern threads (owner decree 2026-08-10): mirrors the shared-row conversation UX.
-// The whole thread is auto-collapsed behind the row's 🤖; exchanges are '-------'-separated
-// sections, all but the newest folded. Replying re-runs the intern IMMEDIATELY.
+// Q3 intern threads (rev 2026-08-11): 🤖 opens a FULL-SCREEN modal (a visible edge shows
+// the dashboard behind it). The modal shows only each run's SUMMARY — full detail lives in
+// the canonical md — under a metadata header: AT# · iterations · model · tokens · cost,
+// totals per model, color-coded by funding class; escalated runs show both models' stats.
 const internPolls = {};
-async function openInternThread(id, box) {
+function fmtTokK(n) { return n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? Math.round(n / 1e3) + 'k' : String(n || 0); }
+function internSummaryOf(text) {
+  const m = text.match(/SUMMARY:\s*\n([\s\S]*?)(?=\nDETAILS:|\nSTATUS:|$)/);
+  if (m) return m[1].trim();
+  return text.split('\n').slice(0, 10).join('\n').trim(); // legacy entries: first lines
+}
+async function openInternModal(id, taskTitle) {
+  let ov = document.getElementById('intern-modal');
+  if (!ov) {
+    ov = document.createElement('div'); ov.id = 'intern-modal';
+    ov.style.cssText = 'position:fixed;inset:14px;z-index:900;background:var(--card,#15181e);border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 40px rgba(0,0,0,.55);display:flex;flex-direction:column;padding:10px;overflow:hidden';
+    document.body.appendChild(ov);
+  }
+  ov.style.display = 'flex';
+  ov.innerHTML = '<div class="tiny muted">loading thread…</div>';
   const d = await api('/api/intern/thread/' + encodeURIComponent(id)).catch(() => null);
   const md = (d && d.md) || '';
+  const stats = (d && d.stats) || [];
+  const byModel = {};
+  for (const r of stats) { const g = byModel[r.model] = byModel[r.model] || { iters: 0, input: 0, output: 0, cost: 0, cls: r.cls }; g.iters += r.iters; g.input += r.input; g.output += r.output; g.cost += r.costUsd; }
+  const clsColor = c => c === 'real' ? 'var(--red)' : c === 'included' ? 'var(--green)' : 'var(--text2)';
+  const meta = Object.entries(byModel).map(([m, g]) =>
+    `<span style="margin-right:14px">model: <b>${esc(m)}</b> · iterations: ${g.iters} · tokens: ${fmtTokK(g.input + g.output)} · <span style="color:${clsColor(g.cls)}" title="${g.cls === 'real' ? 'paid (metered)' : g.cls === 'included' ? 'free tier' : 'subscription'}">cost: $${g.cost.toFixed(2)}</span></span>`).join('');
   const parts = md.split(/\n-------\n/).filter(p => p.trim());
   const head = parts.shift() || '';
-  box.innerHTML = `<div class="q-cline tiny muted">${esc(head.split('\n')[0].replace(/^#\s*/, ''))}</div>`
-    + (parts.length ? parts.map((p, i) => {
-        const lines = p.trim().split('\n');
-        const who = lines.shift() || '';
-        return `<details ${i === parts.length - 1 ? 'open' : ''} style="margin:2px 0"><summary class="tiny" style="cursor:pointer">${esc(who.replace(/\*\*/g, ''))}</summary><div class="q-cline" style="white-space:pre-wrap;font-size:12px">${esc(lines.join('\n').trim())}</div></details>`;
-      }).join('') : '<div class="q-cline tiny muted">no attempts yet — the intern picks this up within the hour, or reply below to start it now</div>')
-    + `<div style="display:flex;gap:4px;margin-top:3px"><input class="q-input q-ireply" placeholder="reply to the intern — it re-runs immediately" style="flex:1">
-       <button class="ib q-isend">↩</button></div>`;
-  const inp = box.querySelector('.q-ireply'), send = box.querySelector('.q-isend');
+  const body = parts.map((p, i) => {
+    const lines = p.trim().split('\n');
+    const who = (lines.shift() || '').replace(/\*\*/g, '');
+    const isOwner = /^Owner/.test(who);
+    const text = isOwner ? lines.join('\n').trim() : internSummaryOf(lines.join('\n'));
+    const st = (p.match(/STATUS:\s*([a-z-]+)/) || [])[1] || '';
+    const esca = (p.match(/ESCALATE:\s*(.+)/) || [])[1] || '';
+    return `<details ${i === parts.length - 1 ? 'open' : ''} style="margin:4px 0;border-bottom:1px solid var(--border);padding-bottom:4px">
+      <summary class="tiny" style="cursor:pointer;color:${isOwner ? 'var(--accent)' : 'var(--violet)'}">${esc(who)}${st ? ` <span class="muted">· ${esc(st)}</span>` : ''}</summary>
+      <div style="white-space:pre-wrap;font-size:13px;padding:4px 2px">${esc(text)}</div>
+      ${esca ? `<div class="tiny" style="color:var(--orange,#e8a33d)">⤴ escalation recommended: ${esc(esca)}</div>` : ''}</details>`;
+  }).join('') || '<div class="tiny muted">no attempts yet — give directions below and it runs once, immediately</div>';
+  ov.innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;border-bottom:1px solid var(--border);padding-bottom:6px">
+      <b>${esc(taskTitle || (head.split('\n')[0] || '').replace(/^#\s*/, ''))}</b>
+      <span class="tiny">${d && d.atId ? '<b>' + esc(d.atId) + '</b> · ' : ''}${meta || 'no runs yet'}</span>
+      <span style="flex:1"></span>
+      <span class="tiny muted">full detail: AgentTasks/${esc(id).slice(0, 8)}….md</span>
+      <button class="ib" id="im-close" title="Close">✕</button></div>
+    <div id="im-body" style="flex:1;overflow-y:auto;padding:6px 2px">${body}</div>
+    <div style="display:flex;gap:6px;padding-top:6px;border-top:1px solid var(--border)">
+      <input class="q-input" id="im-reply" placeholder="directions / follow-up — the intern runs once, immediately" style="flex:1">
+      <button class="ib" id="im-send" style="min-width:90px">Submit ↩</button></div>`;
+  ov.querySelector('#im-close').onclick = () => { ov.style.display = 'none'; clearInterval(internPolls[id]); };
+  const inp = ov.querySelector('#im-reply'), send = ov.querySelector('#im-send');
   const go = async () => {
     const text = inp.value.trim(); if (!text) return;
     send.textContent = '…';
     const r = await api('/api/intern/reply/' + encodeURIComponent(id), { method: 'POST', body: JSON.stringify({ text }) }).catch(() => null);
-    if (!r || r.error) { showErr((r && r.error) || 'reply failed'); send.textContent = '↩'; return; }
-    inp.value = '';
-    openInternThread(id, box); // shows the owner line; the agent's reply lands on the next polls
+    if (!r || r.error) { showErr((r && r.error) || 'reply failed'); send.textContent = 'Submit ↩'; return; }
+    openInternModal(id, taskTitle);
     clearInterval(internPolls[id]);
     let n = 0;
-    internPolls[id] = setInterval(() => { if (box.style.display === 'none' || ++n > 20) return clearInterval(internPolls[id]); openInternThread(id, box); }, 20000);
+    internPolls[id] = setInterval(() => { if (ov.style.display === 'none' || ++n > 20) return clearInterval(internPolls[id]); openInternModal(id, taskTitle); }, 20000);
   };
   send.onclick = go;
   inp.onkeydown = e => { if (e.key === 'Enter') go(); e.stopPropagation(); };
+  inp.focus();
 }
 function sharedThreadHtml(t) {
   if (!String(t.ID || '').startsWith('sh:')) return '';
@@ -1338,6 +1375,7 @@ function renderMatrix() {
 
   $('eisen').innerHTML = '<div class="eisenhower">' + lists.map((qd, li) => {
     const roots = buckets[qd.key].sort((a, b) => ordOf(a) - ordOf(b));
+    if (qd.key === 'Q3') roots.sort((a, b) => (/awaiting-spec/.test(String(a.Tags || '')) ? 1 : 0) - (/awaiting-spec/.test(String(b.Tags || '')) ? 1 : 0));
     const qc = (appSettings.quadrants || {})[qd.key] || {};
     const ranked = (qc.style || 'bullets') === 'ranked';
     const folded = !!qc.collapsed && !qExpanded.has(qd.key); // collapse-by-default (⚙), expand per session
@@ -1374,12 +1412,9 @@ function renderMatrix() {
   attachHandlers();
   $('eisen').querySelectorAll('.q-ithread').forEach(b => b.onclick = e => {
     e.stopPropagation();
-    const row = b.closest('.q-task'); const id = row.dataset.id;
-    const box = $('eisen').querySelector(`.q-ithreadbox[data-for="${CSS.escape(id)}"]`);
-    if (!box) return;
-    const opening = box.style.display === 'none';
-    box.style.display = opening ? '' : 'none';
-    if (opening) openInternThread(id, box); else clearInterval(internPolls[id]);
+    const row = b.closest('.q-task');
+    const t = allTasks.find(x => x.ID === row.dataset.id);
+    openInternModal(row.dataset.id, t ? t.Task : '');
   });
   $('eisen').querySelectorAll('.q-fold').forEach(b => b.onclick = e => {
     e.stopPropagation();

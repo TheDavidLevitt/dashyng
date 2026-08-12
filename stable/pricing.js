@@ -51,4 +51,23 @@ function selfHostPerMTok(a = {}) {
   return Math.round(kwh * kwhPrice * 100) / 100;
 }
 
-module.exports = { MODEL_PRICES, priceOf, costClass, CREDIT_SPLIT_DAY, SELF_HOST_DEFAULTS, selfHostPerMTok };
+// ---- usage-weighted cost (2026-08-11) ----
+// A flat in+out sum mis-ranks models on lopsided workloads: bulk-extraction traffic can be
+// ~97% input tokens, where a model $0.25 pricier on input but $0.75 cheaper on output is a
+// WORSE deal despite a lower sum. weightedCost prices a model against the owner's actual
+// token mix: $/1M blended = in·wIn + out·wOut. usageMixOf derives {wIn,wOut} from usage
+// rows; no rows → 0.5/0.5, which reproduces the old sum's ranking exactly (sum = 2×blend).
+function usageMixOf(rows) {
+  let inTok = 0, outTok = 0;
+  for (const r of rows || []) { inTok += +r.input || 0; outTok += +r.output || 0; }
+  const t = inTok + outTok;
+  if (!t) return { wIn: 0.5, wOut: 0.5, inTok: 0, outTok: 0 };
+  return { wIn: inTok / t, wOut: outTok / t, inTok, outTok };
+}
+function weightedCost(price, mix) {
+  if (!price || price.in == null || price.out == null) return null;
+  const wIn = mix && mix.wIn != null ? mix.wIn : 0.5, wOut = mix && mix.wOut != null ? mix.wOut : 0.5;
+  return price.in * wIn + price.out * wOut;
+}
+
+module.exports = { MODEL_PRICES, priceOf, costClass, CREDIT_SPLIT_DAY, SELF_HOST_DEFAULTS, selfHostPerMTok, usageMixOf, weightedCost };
