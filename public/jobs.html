@@ -62,13 +62,13 @@ a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
 <div id="applied-wrap" style="display:none" class="cat"><h2 style="cursor:default">Applications submitted <span class="n" id="applied-n"></span></h2><div id="applied-list"></div></div>
 <div id="maybe-wrap" style="display:none" class="cat closed"><h2 id="maybe-h2">▸ Maybe</h2><div id="maybe-list" class="jobs"></div></div>
 <div id="removed-wrap" style="display:none" class="cat"><h2 style="cursor:default">Removed</h2><div id="removed-list"></div></div>
-<div class="cat" style="margin-top:22px"><h2 style="cursor:default">Note to the search agent / CI</h2>
+<div class="cat" style="margin-top:22px"><h2 style="cursor:default">Request Improvement (search agent)</h2>
 <div style="display:flex;gap:6px;align-items:flex-start">
   <textarea id="ci-in" rows="2" placeholder="Feedback, a job to add (paste the link), a new category to search, applied-elsewhere notes…"
     style="flex:1;resize:vertical;min-height:38px;font:inherit;font-size:13px;background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 8px"></textarea>
   <button id="ci-send" class="ib" style="padding:8px 14px;font-size:13px">Send</button>
 </div>
-<div class="tiny" id="ci-status" style="margin-top:3px">read by the daily search agent (09:00) and the nightly CI — job links get added, categories get searched, feedback reshapes the ranking</div>
+<div class="tiny" id="ci-status" style="margin-top:3px">read by the daily search agent (09:00) and the nightly improvement loop — job links get added, categories get searched, feedback reshapes the ranking</div>
 </div>
 <div class="legend tiny">
   drag ≡ to re-rank (higher = more like this) · swipe ← or ✕ = remove (not interested, −1 signal) · ★ / ★★ = favorite / favorite-favorite (★★ top; ★ in click order) · 🤔 = park in Maybe · ∅ = job closed / link dead (retires with NO signal) · ☑ = application completed → moves to the log below<br>
@@ -342,7 +342,7 @@ $('ci-send').onclick = async () => {
   $('ci-send').disabled = true;
   const r = await api('/api/feedback', { body: { kind: 'job_comment', source: 'jobs', context: text } }).catch(() => ({ error: 'unreachable' }));
   $('ci-send').disabled = false;
-  if (r && r.ok) { $('ci-in').value = ''; $('ci-status').textContent = '✓ sent — the search agent acts on it at its next run (daily 09:00); the nightly CI reads it too'; }
+  if (r && r.ok) { $('ci-in').value = ''; $('ci-status').textContent = '✓ sent — the search agent acts on it at its next run (daily 09:00); the nightly improvement loop reads it too'; }
   else $('ci-status').textContent = 'send failed: ' + (r?.error || 'unknown') + ' — try again';
 };
 

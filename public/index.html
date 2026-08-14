@@ -485,9 +485,9 @@ details summary { cursor: pointer; color: var(--text2); font-size: 12.5px; paddi
 </section>
 
 <section data-sec="cinote">
-<h2><span data-sec-title>Note to CI</span></h2>
+<h2><span data-sec-title>Request Improvement</span></h2>
 <div class="card" style="display:flex;gap:6px;align-items:flex-start">
-  <textarea id="cinote-in" rows="1" placeholder="a comment for the CI to read…" style="flex:1;resize:vertical;min-height:22px;font:inherit;background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:5px;padding:4px 6px"></textarea>
+  <textarea id="cinote-in" rows="1" placeholder="describe the improvement you want…" style="flex:1;resize:vertical;min-height:22px;font:inherit;background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:5px;padding:4px 6px"></textarea>
   <button id="cinote-send" class="q-btn" style="white-space:nowrap">Send</button>
   <span id="cinote-status" class="tiny muted" style="align-self:center"></span>
 </div>
@@ -639,7 +639,7 @@ async function saveLinks() {
     box.querySelector('.lk-url').focus();
   };
 })();
-const SEC_DEFS = { links: 'Links', habits: 'Habits', brief: 'Agent brief', acts: 'Activity Preview', today: 'Today', todo: 'Persistent lists', jlists: 'Ephemeral notes', journal: 'Journal', cinote: 'Note to CI', agents: 'Agent Stable', files: 'File manager', completed: 'Completed', signals: 'Market signals', news: 'News', week: 'Week ahead' };
+const SEC_DEFS = { links: 'Links', habits: 'Habits', brief: 'Agent brief', acts: 'Activity Preview', today: 'Today', todo: 'Persistent lists', jlists: 'Ephemeral notes', journal: 'Journal', cinote: 'Request Improvement', agents: 'Agent Stable', files: 'File manager', completed: 'Completed', signals: 'Market signals', news: 'News', week: 'Week ahead' };
 let appSettings = { sections: {}, quadrants: {}, calendars: [] };
 const secExpanded = new Set(); // session-local expansions of collapsed-by-default sections
 function setSecTitle(el, title) { // replace only the text node — keep the ＋/meta spans inside headings
@@ -1170,13 +1170,13 @@ const I18N_PACKS = { fr: {
   'conversation & completion history': 'historique de la conversation et des tâches',
   'reply…': 'répondre…',
   'Persistent lists': 'Listes persistantes', 'Ephemeral notes': 'Notes éphémères',
-  'Note to CI': 'Comment veux-tu changer ce tableau de bord ?',
+  'Request Improvement': 'Comment veux-tu changer ce tableau de bord ?',
   'How would you like to change this dashboard?': 'Comment veux-tu changer ce tableau de bord ?',
   'Task Lists': 'Listes persistantes',
   'Links': 'Liens', 'Habits': 'Habitudes', 'Agent brief': 'Brief', 'Today': "Aujourd'hui",
   'Reading queue': 'À lire', 'Markets': 'Marchés', 'News': 'Actus', 'Week ahead': 'La semaine',
   'Wind & waves': 'Vent & vagues', 'Completed': 'Terminées', 'File manager': 'Fichiers',
-  'a comment for the CI to read…': 'écris ce que tu veux changer…',
+  'describe the improvement you want…': 'écris ce que tu veux changer…',
   'Send': 'Envoyer', '＋ add item…': '＋ ajouter…',
   'New task — Enter saves, Esc cancels': 'Nouvelle tâche — Entrée valide, Échap annule',
   'Mark done': 'Marquer fait', 'Move / group': 'Déplacer / grouper',

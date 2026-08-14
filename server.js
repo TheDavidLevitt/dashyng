@@ -674,6 +674,8 @@ app.use((req, res, next) => {
     // friend instances deliver invites directly (they don't hold the proxy key);
     // receipts only PARK — the owner approves in ⚙ before anything applies
     if (req.method === 'POST' && req.path === '/api/share/receive') return next();
+    // bare liveness for warm-up pings (Cloud Scheduler): no data, keeps the instance hot
+    if (req.method === 'GET' && req.path === '/healthz') return res.send('ok');
     return res.status(403).send('proxy only');
   }
   // one canonical host: www → apex, so the session cookie has a single home
@@ -5383,11 +5385,22 @@ let transCache = null;
 function transLoad() { if (!transCache) { try { transCache = JSON.parse(fs.readFileSync(TRANS_FILE, 'utf8')); } catch (e) { transCache = {}; } } return transCache; }
 function transSave() { try { fs.writeFileSync(TRANS_FILE, JSON.stringify(transCache)); } catch (e) {} }
 const transKey = (t, lang) => lang + ':' + crypto.createHash('sha1').update(String(t)).digest('hex').slice(0, 16);
-async function translateForDisplay(texts) {
-  const target = (CFG.languages || [])[0];
+// `target` lets a surface ask for a language that is NOT the owner's first:
+// the helper's list page renders her own language; owner/guest pages keep theirs.
+// Everything else (script gate, disk cache, one-call-ever) is unchanged.
+async function translateForDisplay(texts, target = (CFG.languages || [])[0]) {
   if (!target) return {};
   const cache = transLoad();
-  const need = [...new Set(texts.filter(t => t && foreignLangOf(t) && !(CFG.languages || []).includes(foreignLangOf(t))))];
+  const onList = (CFG.languages || []).includes(target)
+    ? (CFG.languages || [])            // owner surface: en/fr pass through untouched
+    : [target];                        // guest surface: only the target passes through
+  const need = [...new Set(texts.filter((t) => {
+    if (!t) return false;
+    const script = foreignLangOf(t);
+    // script proves the language only when it is non-Latin; Latin text is assumed
+    // to be on-list for the owner surface, and to need translating for a guest one
+    return script ? !onList.includes(script) : !onList.includes('en');
+  }))];
   const out = {};
   const miss = [];
   for (const t of need) { const k = transKey(t, target); if (cache[k]) out[t] = cache[k]; else miss.push(t); }
@@ -5794,7 +5807,7 @@ async function sharedListRead(sheetId, tab) {
   for (let i = 1; i < grid.length; i++) {
     const row = grid[i] || [];
     const text = String(row[0] || '').trim();
-    if (text) items.push({ row: i + 1, text, mark: String(row[1] || '').trim().toUpperCase(),
+    if (text) items.push({ row: i + 1, text, mark: String(row[1] || '').trim().toUpperCase(), photo: String(row[2] || '').trim(),
       due: String(row[7] || '').trim(), tags: String(row[8] || '').trim(), uid: String(row[9] || '').trim(),
       reportedOn: String(row[10] || '').trim(), occFrom: String(row[11] || '').trim(),
       doneLog: String(row[12] || '').trim() });
@@ -6108,9 +6121,14 @@ app.get('/api/ranmali/tasks', asyncRoute(async (req, res) => {
         const past = i.occFrom ? mine.filter(c => String(c.at || '').slice(0, 10) < i.occFrom) : [];
         const now = i.occFrom ? mine.filter(c => !(String(c.at || '').slice(0, 10) < i.occFrom)) : mine;
         const doneLog = (i.doneLog || '').split(',').map(s => s.trim()).filter(Boolean);
-        shown.push({ text: i.text, due: i.due || '', ...v, comments: now,
+        shown.push({ text: i.text, si: '', photo: i.photo || '', due: i.due || '', ...v, comments: now,
           history: (past.length || doneLog.length) ? { comments: past, done: doneLog } : null });
       }
+      // translated on the helper's page only — owner/guest pages keep the text as typed
+      // (their surface translates to en/fr, and en↔fr never cross). Rendered
+      // Sinhala-first with the original beneath, the shape she already knows.
+      const si = await translateForDisplay(shown.map(x => x.text), 'si');
+      for (const x of shown) x.si = si[x.text] || '';
       lists.push({ id: slug, heading: cfg.label || (cfg.name ? cfg.name + ' tasks' : slug), items: shown });
     } else {
       if (!elists) elists = await elistsPayload();

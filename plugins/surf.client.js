@@ -28,7 +28,7 @@
     };
     const load = () => {
       const cur = localStorage.getItem('surfSpot') || 'auto';
-      const go = q => fetch('/api/surf' + q).then(r => r.json()).then(render).catch(() => { el.innerHTML = '<div class="empty">forecast unreachable</div>'; });
+      const go = q => fetch((window.__BASE__ || '') + '/api/surf' + q).then(r => r.json()).then(render).catch(() => { el.innerHTML = '<div class="empty">forecast unreachable</div>'; });
       if (cur !== 'auto') return go('?spot=' + encodeURIComponent(cur));
       if (!navigator.geolocation) return go('');
       navigator.geolocation.getCurrentPosition(
