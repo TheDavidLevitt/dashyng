@@ -156,8 +156,10 @@ async function louetFlowRefresh() {
       const merged = [...map.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([date, m3s]) => ({ date, m3s }));
       const cutoff = new Date(Date.now() - 420 * 864e5).toISOString().slice(0, 10);
       fs.writeFileSync(LFLOW, JSON.stringify({ updatedAt: Date.now(), daily: merged.filter(d => d.date >= cutoff) }));
-    } else if (c.daily.length) { // source empty/unreachable — stamp the attempt, keep data
-      fs.writeFileSync(LFLOW, JSON.stringify({ ...c, updatedAt: Date.now() }));
+    } else if (c.daily.length) { // source empty/unreachable — stamp the ATTEMPT only:
+      // updatedAt keeps meaning "data this fresh" so staleness stays visible and the
+      // hourly retry pacing below still fires (a restamped updatedAt used to mask both)
+      fs.writeFileSync(LFLOW, JSON.stringify({ ...c, attemptedAt: Date.now() }));
     }
   } catch (e) {} finally { lfRefreshing = false; }
 }
@@ -351,13 +353,13 @@ module.exports = {
       if (String(req.query.raw || '') === '1') { // full 13-month series — client-side windowing
         let c0 = lfRead();
         if (!c0.daily.length) { await louetFlowRefresh(); c0 = lfRead(); }
-        else if (Date.now() - c0.updatedAt > 6 * 3600e3) louetFlowRefresh();
+        else if (Date.now() - c0.updatedAt > 6 * 3600e3 && Date.now() - (c0.attemptedAt || 0) > 3600e3) louetFlowRefresh();
         return res.json({ unit: 'm³/s', updatedAt: c0.updatedAt, daily: c0.daily });
       }
       const days = Math.min(185, Math.max(7, parseInt(req.query.days, 10) || 30));
       let c = lfRead();
       if (!c.daily.length) { await louetFlowRefresh(); c = lfRead(); } // first ever call: block once
-      else if (Date.now() - c.updatedAt > 6 * 3600e3) louetFlowRefresh(); // stale: serve now, refresh behind
+      else if (Date.now() - c.updatedAt > 6 * 3600e3 && Date.now() - (c.attemptedAt || 0) > 3600e3) louetFlowRefresh(); // stale: serve now, refresh behind (attempt-paced)
       const today = new Date().toISOString().slice(0, 10);
       const from = new Date(Date.now() - days * 864e5).toISOString().slice(0, 10);
       const series = c.daily.filter(d => d.date >= from && d.date <= today);

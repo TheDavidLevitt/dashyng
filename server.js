@@ -2162,6 +2162,22 @@ const pluginCtx = () => ({
   loadSettings, saveSettings, enqueueRpc, hasLlm,
   registerRpc: (kind, fn) => { PLUGIN_RPC[String(kind)] = fn; },
 });
+// FORKS get a confined ctx: generated code must never see credential material or reach
+// sheets beyond this instance's own. config is redacted by key pattern (values still
+// USABLE via runLLM etc. — the closures hold the real keys; the fork just can't read
+// them), and store.values is wrapped to allow only this instance's sheet + the shared
+// family sheet. Base plugins (hand-written, trusted) keep the full ctx.
+const forkCtx = () => {
+  const base = pluginCtx();
+  const config = Object.fromEntries(Object.entries(CFG).map(([k, v]) =>
+    [k, (/key|secret|token|password/i.test(k) && typeof v === 'string') ? '' : v]));
+  const allowed = new Set([TODO_SHEET_ID, CFG.sharedSheetId, CFG.prefsSheetId].filter(Boolean));
+  const store2 = store ? { values: Object.fromEntries(['get', 'update', 'append', 'batchGet', 'batchUpdate', 'clear'].map(m =>
+    [m, (params, ...rest) => (params && allowed.has(params.spreadsheetId))
+      ? store.values[m](params, ...rest)
+      : Promise.reject(new Error('fork store: spreadsheet not allowed'))])) } : store;
+  return { ...base, config, store: store2 };
+};
 // Load order: plugins-forks/ FIRST, then plugins/. A fork (a per-instance rewrite of a
 // widget, produced by the owner-side forge from a trusted user's request) wins by key —
 // the base plugin with the same key is skipped entirely (data, routes, jobs, all hooks),
@@ -2178,21 +2194,23 @@ try {
   const seenKeys = new Set();
   for (const file of pluginFiles) {
     const f = path.basename(file);
+    const isFork = file.startsWith(forksDir + path.sep);
+    const ctx = isFork ? forkCtx : pluginCtx; // forks: redacted config + confined store
     try {
       const p = require(file);
       if (!p) continue;
       if (p.key && seenKeys.has(p.key)) continue; // base skipped where a fork owns the key
       if (p.key) seenKeys.add(p.key);
-      if (p.key && typeof p.data === 'function') PLUGINS[p.key] = p;
-      if (typeof p.routes === 'function') p.routes(app, pluginCtx());
+      if (p.key && typeof p.data === 'function') { p._fork = isFork; PLUGINS[p.key] = p; }
+      if (typeof p.routes === 'function') p.routes(app, ctx());
       for (const j of (Array.isArray(p.jobs) ? p.jobs : []))
         if (j && j.everyMs > 0 && typeof j.run === 'function')
-          setInterval(() => Promise.resolve(j.run(pluginCtx())).catch(e => console.error(`plugin job (${f}):`, e.message)), j.everyMs);
+          setInterval(() => Promise.resolve(j.run(ctx())).catch(e => console.error(`plugin job (${f}):`, e.message)), j.everyMs);
       for (const s of (Array.isArray(p.newsSources) ? p.newsSources : []))
-        if (s && s.title && typeof s.build === 'function') PLUGIN_NEWS_SOURCES.push({ ...s, _file: f });
+        if (s && s.title && typeof s.build === 'function') PLUGIN_NEWS_SOURCES.push({ ...s, _file: f, _fork: isFork });
       if (typeof p.healthRows === 'function') PLUGIN_HEALTH.push({ fn: p.healthRows, _file: f });
       if (typeof p.llm === 'function') PLUGIN_LLM.push({ fn: p.llm, _file: f }); // LLM router: return a string to answer, null to pass
-      if (typeof p.briefItems === 'function') PLUGIN_BRIEF.push({ fn: p.briefItems.bind(p), _file: f }); // salient weather/etc → Agent Brief
+      if (typeof p.briefItems === 'function') PLUGIN_BRIEF.push({ fn: p.briefItems.bind(p), _file: f, _fork: isFork }); // salient weather/etc → Agent Brief
     } catch (e) { console.error('plugin load failed:', f, e.message); }
   }
 } catch (e) {}
@@ -2201,7 +2219,7 @@ try {
 async function withPluginNews(data) {
   for (const s of PLUGIN_NEWS_SOURCES) {
     try {
-      const items = await s.build(pluginCtx());
+      const items = await s.build(s._fork ? forkCtx() : pluginCtx());
       if (Array.isArray(items) && items.length)
         data = { ...data, sections: [...(data.sections || []), { title: s.title, items: items.slice(0, 15) }] };
     } catch (e) { console.error(`plugin news source (${s._file}):`, e.message); }
@@ -2213,7 +2231,7 @@ app.get('/api/plugins', asyncRoute(async (req, res) =>
 app.get('/api/plugin/:key', asyncRoute(async (req, res) => {
   const p = PLUGINS[req.params.key];
   if (!p) return res.status(404).json({ error: 'no such plugin' });
-  try { res.json({ data: await p.data(pluginCtx()) }); } catch (e) { res.status(500).json({ error: e.message }); }
+  try { res.json({ data: await p.data(p._fork ? forkCtx() : pluginCtx()) }); } catch (e) { res.status(500).json({ error: e.message }); }
 }));
 app.post('/api/settings', asyncRoute(async (req, res) => {
   // Best-effort freshness: pull the cross-tier envelope only if the network answers fast.
@@ -3278,9 +3296,15 @@ Output ONLY the JSON. Request: ${JSON.stringify(String(request).slice(0, 500))}`
     const raw = await runClaude(prompt, { module: 'forge-triage', timeoutMs: 45000 });
     const m = String(raw || '').match(/\{[\s\S]*\}/);
     const j = m && JSON.parse(m[0]);
-    if (j && ['widget_change', 'widget_new', 'widget_revert'].includes(j.kind))
-      return { kind: j.kind, widget: String(j.widget || '').toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 30),
-        spec: String(j.spec || '').slice(0, 900) };
+    if (j && ['widget_change', 'widget_new', 'widget_revert'].includes(j.kind)) {
+      const widget = String(j.widget || '').toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 30);
+      let kind = j.kind;
+      // enforce against the live registry: change/revert only for widgets that exist;
+      // a "new" widget colliding with an existing key is really a change to that widget
+      if (kind === 'widget_new' && PLUGINS[widget]) kind = 'widget_change';
+      if ((kind === 'widget_change' || kind === 'widget_revert') && !PLUGINS[widget]) return { kind: 'none' };
+      return { kind, widget, spec: String(j.spec || '').slice(0, 900) };
+    }
   } catch (e) {}
   return { kind: 'none' };
 }
@@ -3293,10 +3317,13 @@ app.get('/api/forge/status', asyncRoute(async (req, res) => {
     if (!['widget_spec', 'widget_forge'].includes(r0.Kind)) continue;
     let p; try { p = JSON.parse(r0.Payload || '{}'); } catch (e) { continue; }
     const done = String(r0.Done || '').trim(), err = String(r0.Error || '').trim();
+    const claimAge = done.startsWith('claim ') ? Date.now() - (Number(done.split(' ')[2]) || 0) : 0;
     if (r0.Kind === 'widget_spec' && !done) items.push({ id: r0.ID, state: 'confirm', widget: p.widget, spec: p.spec || '' });
+    else if (r0.Kind === 'widget_forge' && claimAge > 45 * 60000) items.push({ id: r0.ID, state: 'failed', widget: p.widget }); // orphaned claim
     else if (r0.Kind === 'widget_forge' && !done.startsWith('done')) items.push({ id: r0.ID, state: 'building', widget: p.widget });
-    else if (r0.Kind === 'widget_forge' && err) items.push({ id: r0.ID, state: 'failed', widget: p.widget });
-    else if (r0.Kind === 'widget_forge' && done && Date.parse(done.slice(5)) > Date.now() - 86400000)
+    else if (r0.Kind === 'widget_forge' && err && Date.parse(done.slice(5)) > Date.now() - 48 * 3600000)
+      items.push({ id: r0.ID, state: 'failed', widget: p.widget });
+    else if (r0.Kind === 'widget_forge' && !err && done && Date.parse(done.slice(5)) > Date.now() - 86400000)
       items.push({ id: r0.ID, state: 'live', widget: p.widget });
   }
   res.json({ items: items.slice(-8) });
@@ -3308,12 +3335,17 @@ app.post('/api/forge/confirm', asyncRoute(async (req, res) => {
   const row = q.rows.find(r => r.ID === id && r.Kind === 'widget_spec' && !String(r.Done || '').trim());
   if (!row) return res.status(404).json({ error: 'not found' });
   const cell = name => `'${RPC_TAB}'!${colLetter(q.headers.indexOf(name))}${row._row}`;
+  // claim-then-enqueue: stamp the spec row first and verify the read-back so two racing
+  // confirms (phone + laptop) can't both enqueue a build
+  const stamp = (ok ? 'confirmed ' : 'cancelled ') + nowIso() + ' ' + crypto.randomUUID().slice(0, 8);
+  await store.values.update({ spreadsheetId: TODO_SHEET_ID, range: cell('Done'), valueInputOption: 'RAW',
+    requestBody: { values: [[stamp]] } });
+  const back = await store.values.get({ spreadsheetId: TODO_SHEET_ID, range: cell('Done') });
+  if ((((back.data.values || [[]])[0] || [])[0]) !== stamp) return res.json({ ok: true, queued: false });
   if (ok) {
     let p = {}; try { p = JSON.parse(row.Payload || '{}'); } catch (e) {}
     await enqueueRpc('widget_forge', { ...p, mode: 'new' });
   }
-  await store.values.update({ spreadsheetId: TODO_SHEET_ID, range: cell('Done'), valueInputOption: 'RAW',
-    requestBody: { values: [[(ok ? 'confirmed ' : 'cancelled ') + nowIso()]] } });
   res.json({ ok: true, queued: !!ok });
 }));
 

@@ -1176,6 +1176,8 @@ const I18N_PACKS = { fr: {
   'live ✓': 'en ligne ✓', 'build it': 'construire', 'cancel': 'annuler',
   'here is the plan — confirm below': 'voici le plan — confirme ci-dessous',
   'queued — the forge builds it within ~15 min': "c'est parti — en ligne d'ici ~15 min",
+  'sending…': 'envoi…', 'saved ✓': 'noté ✓', 'request failed — try again': 'échec — réessaie',
+  'not a layout change': 'pas un changement de mise en page', 'daily limit reached': 'limite du jour atteinte',
   'How would you like to change this dashboard?': 'Comment veux-tu changer ce tableau de bord ?',
   'Task Lists': 'Listes persistantes',
   'Links': 'Liens', 'Habits': 'Habitudes', 'Agent brief': 'Brief', 'Today': "Aujourd'hui",
@@ -2211,6 +2213,8 @@ setInterval(loadJLists, 90000); // pick up new journal headings without a reload
   const strip = document.createElement('div');
   document.querySelector('[data-sec="cinote"]').appendChild(strip);
   const stateTxt = { building: T('building — live in ~15 min'), failed: T('build failed — rephrase or ask again'), live: T('live ✓') };
+  let forgeTimer = null;
+  const watchedBuilding = new Set(); // build ids this page saw in-flight
   function renderForge(items) {
     strip.innerHTML = (items || []).map(it => it.state === 'confirm'
       ? `<div class="card" style="margin-top:6px;padding:6px 8px"><div class="tiny" style="white-space:pre-wrap">🔧 <b>${esc(it.widget)}</b> — ${esc(it.spec)}</div>
@@ -2219,16 +2223,27 @@ setInterval(loadJLists, 90000); // pick up new journal headings without a reload
       : `<div class="tiny muted" style="margin-top:4px">🔧 ${esc(it.widget)} — ${stateTxt[it.state] || esc(it.state)}</div>`).join('');
     strip.querySelectorAll('[data-forge-ok],[data-forge-no]').forEach(b => b.onclick = async () => {
       b.disabled = true;
-      await api('/api/forge/confirm', { method: 'POST', body: JSON.stringify({ id: b.dataset.forgeOk || b.dataset.forgeNo, ok: !!b.dataset.forgeOk }) });
+      await api('/api/forge/confirm', { method: 'POST', body: JSON.stringify({ id: b.dataset.forgeOk || b.dataset.forgeNo, ok: !!b.dataset.forgeOk }) }).catch(() => {});
       loadForge();
     });
+    // a build THIS page watched go from building to live means the rendered widget is
+    // stale — reload once so she actually sees the change land. A fresh page load that
+    // already includes a 'live' row never reloads (the page already has the fork).
+    for (const it of (items || [])) {
+      if (it.state === 'live' && watchedBuilding.has(it.id)) { location.reload(); return; }
+      if (it.state === 'building') watchedBuilding.add(it.id);
+    }
+    // poll only while something is pending — idle instances make zero extra requests
+    const active = (items || []).some(it => it.state === 'building' || it.state === 'confirm');
+    if (active && !forgeTimer) forgeTimer = setInterval(loadForge, 60000);
+    if (!active && forgeTimer) { clearInterval(forgeTimer); forgeTimer = null; }
   }
   const loadForge = () => api('/api/forge/status').then(r => renderForge(r && r.items)).catch(() => {});
   loadForge();
   const send = async () => {
-    const text = inp.value.trim(); if (!text) return;
-    btn.disabled = true; st.textContent = 'sending…';
-    const r = await api('/api/feedback', { method: 'POST', body: JSON.stringify({ kind: 'comment', context: text }) });
+    const text = inp.value.trim(); if (!text || btn.disabled) return; // in-flight guard (Cmd+Enter path)
+    btn.disabled = true; st.textContent = T('sending…');
+    const r = await api('/api/feedback', { method: 'POST', body: JSON.stringify({ kind: 'comment', context: text }) }).catch(() => null);
     btn.disabled = false;
     if (r && r.ok && r.applied) { // guest-CI instance: the change is already live
       inp.value = ''; st.textContent = T('applied — reloading…');
@@ -2239,9 +2254,9 @@ setInterval(loadJLists, 90000); // pick up new journal headings without a reload
       loadForge();
       setTimeout(() => { st.textContent = ''; }, 8000);
     } else if (r && r.ok) {
-      inp.value = ''; st.textContent = r.reason ? `${T('noted for the nightly pass')} (${r.reason})` : 'saved ✓';
+      inp.value = ''; st.textContent = r.reason ? `${T('noted for the nightly pass')} (${T(r.reason)})` : T('saved ✓');
       setTimeout(() => { st.textContent = ''; }, 4000);
-    } else { st.textContent = 'failed'; }
+    } else { st.textContent = T('request failed — try again'); }
   };
   btn.onclick = send;
   inp.onkeydown = e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); send(); } };
