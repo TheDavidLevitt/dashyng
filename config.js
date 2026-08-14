@@ -128,6 +128,11 @@ module.exports = {
   // immediately (whitelisted layout ops only), logged as an idea; capped per day.
   ciAutoApply: pick('ciAutoApply', 'DASHBOARD_CI_AUTO_APPLY', ''),
   ciApplyPerDay: Number(pick('ciApplyPerDay', 'DASHBOARD_CI_APPLY_PER_DAY', 20)) || 20,
+  // Widget forge: '1' = requests beyond layout (widget code changes, NEW widgets) queue as
+  // RPC rows for an owner-side forge worker that builds a per-instance plugin FORK and
+  // redeploys this tier only. Requires ciAutoApply-style trust in the instance's user.
+  widgetForge: pick('widgetForge', 'DASHBOARD_WIDGET_FORGE', ''),
+  forgePerDay: Number(pick('forgePerDay', 'DASHBOARD_FORGE_PER_DAY', 10)) || 10,
   // Google AI Studio FREE tier (rate-limited, may train on data → non-personal modules only)
   geminiFreeKey: pick('geminiFreeKey', 'GEMINI_API_KEY', ''),
   geminiFreeModel: pick('geminiFreeModel', 'GEMINI_FREE_MODEL', 'gemini-2.5-flash'),

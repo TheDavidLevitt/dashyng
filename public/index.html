@@ -1171,6 +1171,11 @@ const I18N_PACKS = { fr: {
   'reply…': 'répondre…',
   'Persistent lists': 'Listes persistantes', 'Ephemeral notes': 'Notes éphémères',
   'Request Improvement': 'Comment veux-tu changer ce tableau de bord ?',
+  'building — live in ~15 min': "en construction — en ligne d'ici ~15 min",
+  'build failed — rephrase or ask again': 'échec de la construction — reformule ta demande',
+  'live ✓': 'en ligne ✓', 'build it': 'construire', 'cancel': 'annuler',
+  'here is the plan — confirm below': 'voici le plan — confirme ci-dessous',
+  'queued — the forge builds it within ~15 min': "c'est parti — en ligne d'ici ~15 min",
   'How would you like to change this dashboard?': 'Comment veux-tu changer ce tableau de bord ?',
   'Task Lists': 'Listes persistantes',
   'Links': 'Liens', 'Habits': 'Habitudes', 'Agent brief': 'Brief', 'Today': "Aujourd'hui",
@@ -2201,6 +2206,25 @@ setInterval(loadJLists, 90000); // pick up new journal headings without a reload
 (() => {
   const inp = document.getElementById('cinote-in'), btn = document.getElementById('cinote-send'), st = document.getElementById('cinote-status');
   if (!inp || !btn) return;
+  // forge strip: spec-confirm cards + build status for widget requests (trusted-user
+  // instances only — /api/forge/status returns [] everywhere else, so this stays inert)
+  const strip = document.createElement('div');
+  document.querySelector('[data-sec="cinote"]').appendChild(strip);
+  const stateTxt = { building: T('building — live in ~15 min'), failed: T('build failed — rephrase or ask again'), live: T('live ✓') };
+  function renderForge(items) {
+    strip.innerHTML = (items || []).map(it => it.state === 'confirm'
+      ? `<div class="card" style="margin-top:6px;padding:6px 8px"><div class="tiny" style="white-space:pre-wrap">🔧 <b>${esc(it.widget)}</b> — ${esc(it.spec)}</div>
+         <div style="display:flex;gap:6px;margin-top:5px"><button class="q-btn" data-forge-ok="${esc(it.id)}">✓ ${T('build it')}</button>
+         <button class="q-btn" data-forge-no="${esc(it.id)}">✕ ${T('cancel')}</button></div></div>`
+      : `<div class="tiny muted" style="margin-top:4px">🔧 ${esc(it.widget)} — ${stateTxt[it.state] || esc(it.state)}</div>`).join('');
+    strip.querySelectorAll('[data-forge-ok],[data-forge-no]').forEach(b => b.onclick = async () => {
+      b.disabled = true;
+      await api('/api/forge/confirm', { method: 'POST', body: JSON.stringify({ id: b.dataset.forgeOk || b.dataset.forgeNo, ok: !!b.dataset.forgeOk }) });
+      loadForge();
+    });
+  }
+  const loadForge = () => api('/api/forge/status').then(r => renderForge(r && r.items)).catch(() => {});
+  loadForge();
   const send = async () => {
     const text = inp.value.trim(); if (!text) return;
     btn.disabled = true; st.textContent = 'sending…';
@@ -2209,6 +2233,11 @@ setInterval(loadJLists, 90000); // pick up new journal headings without a reload
     if (r && r.ok && r.applied) { // guest-CI instance: the change is already live
       inp.value = ''; st.textContent = T('applied — reloading…');
       setTimeout(() => location.reload(), 900);
+    } else if (r && r.ok && r.forge) { // widget request — queued for the forge, or awaiting spec-confirm
+      inp.value = '';
+      st.textContent = r.forge.state === 'confirm' ? T('here is the plan — confirm below') : T('queued — the forge builds it within ~15 min');
+      loadForge();
+      setTimeout(() => { st.textContent = ''; }, 8000);
     } else if (r && r.ok) {
       inp.value = ''; st.textContent = r.reason ? `${T('noted for the nightly pass')} (${r.reason})` : 'saved ✓';
       setTimeout(() => { st.textContent = ''; }, 4000);

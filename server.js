@@ -675,7 +675,7 @@ app.use((req, res, next) => {
     // receipts only PARK — the owner approves in ⚙ before anything applies
     if (req.method === 'POST' && req.path === '/api/share/receive') return next();
     // bare liveness for warm-up pings (Cloud Scheduler): no data, keeps the instance hot
-    if (req.method === 'GET' && req.path === '/healthz') return res.send('ok');
+    if (req.method === 'GET' && req.path === '/warm') return res.send('ok');
     return res.status(403).send('proxy only');
   }
   // one canonical host: www → apex, so the session cookie has a single home
@@ -690,6 +690,9 @@ app.use((req, res, next) => {
   // doer-complete, comment). The token IS the auth — checked inside the route; unknown
   // tokens 404 without touching anything else behind the gate.
   if (req.path.startsWith('/api/elists/ext/')) return next();
+  // health-data intake + write-back queue (phone exporter/Shortcut, no browser session):
+  // the X-Health-Key IS the auth — checked inside each route; no key configured → all 401.
+  if (['/api/htrack/intake', '/api/htrack/eat-pending', '/api/htrack/eat-ack'].includes(req.path)) return next();
   // Cross-instance share delivery: another dashboard POSTS an invite here. Nothing is
   // applied on receipt — invites park in ⚙ until the owner reviews the diff — so an
   // unauthenticated drop-box is acceptable; the resolve/apply routes stay behind the gate.
@@ -1072,7 +1075,7 @@ function colLetter(n) {
 async function readTab(spreadsheetId, tab, headerHint) {
   let r;
   try {
-    r = await store.values.get({ spreadsheetId, range: `'${tab}'!A1:Z` });
+    r = await store.values.get({ spreadsheetId, range: `'${tab}'!A1:AZ` }); // 52 cols — the health sheet has >26
     track('sheets_read', true, tab);
   } catch (e) { track('sheets_read', false, e.message); throw e; }
   const values = r.data.values || [];
@@ -2159,11 +2162,27 @@ const pluginCtx = () => ({
   loadSettings, saveSettings, enqueueRpc, hasLlm,
   registerRpc: (kind, fn) => { PLUGIN_RPC[String(kind)] = fn; },
 });
+// Load order: plugins-forks/ FIRST, then plugins/. A fork (a per-instance rewrite of a
+// widget, produced by the owner-side forge from a trusted user's request) wins by key —
+// the base plugin with the same key is skipped entirely (data, routes, jobs, all hooks),
+// so fork routes are never shadowed by base ones. Deleting the fork file reverts to base.
+// plugins-forks/ sits at the SAME depth as plugins/ so the universal plugin idioms —
+// path.join(__dirname, '..', 'data', …) and sidecar readFileSync(__dirname, …) — keep
+// resolving identically in a fork. Do not nest forks under plugins/.
 try {
-  for (const f of fs.readdirSync(path.join(__dirname, 'plugins')).filter(f => f.endsWith('.js'))) {
+  const pluginFiles = [];
+  const forksDir = path.join(__dirname, 'plugins-forks');
+  if (fs.existsSync(forksDir))
+    for (const f of fs.readdirSync(forksDir).filter(f => f.endsWith('.js'))) pluginFiles.push(path.join(forksDir, f));
+  for (const f of fs.readdirSync(path.join(__dirname, 'plugins')).filter(f => f.endsWith('.js'))) pluginFiles.push(path.join(__dirname, 'plugins', f));
+  const seenKeys = new Set();
+  for (const file of pluginFiles) {
+    const f = path.basename(file);
     try {
-      const p = require(path.join(__dirname, 'plugins', f));
+      const p = require(file);
       if (!p) continue;
+      if (p.key && seenKeys.has(p.key)) continue; // base skipped where a fork owns the key
+      if (p.key) seenKeys.add(p.key);
       if (p.key && typeof p.data === 'function') PLUGINS[p.key] = p;
       if (typeof p.routes === 'function') p.routes(app, pluginCtx());
       for (const j of (Array.isArray(p.jobs) ? p.jobs : []))
@@ -3240,15 +3259,87 @@ Request (may be in French): ${JSON.stringify(String(suggestion).slice(0, 400))}`
   return { applied: true, patch, n, perDay };
 }
 
+// ---- widget forge intake (CFG.widgetForge, on top of ciAutoApply trust) ----
+// A request the settings-patcher can't express (code change to a widget, a brand-new
+// widget, or undoing one) becomes an RPC row that an OWNER-SIDE forge worker drains:
+// it writes a per-instance plugin fork, gates it, and redeploys THIS tier only. New
+// widgets go through a spec-confirm loop — the plan is shown and must be confirmed in
+// the UI before a build row is queued. Nothing here executes code; this is triage only.
+async function forgeClassify(request) {
+  const keys = Object.keys(PLUGINS);
+  const prompt = `You triage a personal-dashboard change request. Forkable widgets on this instance: ${keys.join(', ') || '(none)'}.
+Decide what the request is (the request may be in any language; answer spec in the USER'S language):
+- a CODE/feature change to one of those widgets (add a button, change a chart, show extra data) → {"kind":"widget_change","widget":"<existing key>","spec":"<one-paragraph plan>"}
+- a brand-NEW widget/section that doesn't exist yet → {"kind":"widget_new","widget":"<short-new-kebab-case-key>","spec":"<one-paragraph plan: what it shows, where the data comes from>"}
+- UNDO a previous widget change/creation ("remets comme avant", "supprime le widget…") → {"kind":"widget_revert","widget":"<existing key>"}
+- anything else (layout/visibility — already handled —, content preferences, general feedback) → {"kind":"none"}
+Output ONLY the JSON. Request: ${JSON.stringify(String(request).slice(0, 500))}`;
+  try {
+    const raw = await runClaude(prompt, { module: 'forge-triage', timeoutMs: 45000 });
+    const m = String(raw || '').match(/\{[\s\S]*\}/);
+    const j = m && JSON.parse(m[0]);
+    if (j && ['widget_change', 'widget_new', 'widget_revert'].includes(j.kind))
+      return { kind: j.kind, widget: String(j.widget || '').toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 30),
+        spec: String(j.spec || '').slice(0, 900) };
+  } catch (e) {}
+  return { kind: 'none' };
+}
+// pending/in-flight forge work for the strip under the suggestion box
+app.get('/api/forge/status', asyncRoute(async (req, res) => {
+  if (!CFG.widgetForge) return res.json({ items: [] });
+  let q; try { q = await readTab(TODO_SHEET_ID, RPC_TAB, RPC_HEADERS); } catch (e) { return res.json({ items: [] }); }
+  const items = [];
+  for (const r0 of q.rows) {
+    if (!['widget_spec', 'widget_forge'].includes(r0.Kind)) continue;
+    let p; try { p = JSON.parse(r0.Payload || '{}'); } catch (e) { continue; }
+    const done = String(r0.Done || '').trim(), err = String(r0.Error || '').trim();
+    if (r0.Kind === 'widget_spec' && !done) items.push({ id: r0.ID, state: 'confirm', widget: p.widget, spec: p.spec || '' });
+    else if (r0.Kind === 'widget_forge' && !done.startsWith('done')) items.push({ id: r0.ID, state: 'building', widget: p.widget });
+    else if (r0.Kind === 'widget_forge' && err) items.push({ id: r0.ID, state: 'failed', widget: p.widget });
+    else if (r0.Kind === 'widget_forge' && done && Date.parse(done.slice(5)) > Date.now() - 86400000)
+      items.push({ id: r0.ID, state: 'live', widget: p.widget });
+  }
+  res.json({ items: items.slice(-8) });
+}));
+app.post('/api/forge/confirm', asyncRoute(async (req, res) => {
+  if (!CFG.widgetForge) return res.status(400).json({ error: 'forge disabled' });
+  const { id, ok } = req.body || {};
+  let q; try { q = await readTab(TODO_SHEET_ID, RPC_TAB, RPC_HEADERS); } catch (e) { return res.status(502).json({ error: 'queue unreachable' }); }
+  const row = q.rows.find(r => r.ID === id && r.Kind === 'widget_spec' && !String(r.Done || '').trim());
+  if (!row) return res.status(404).json({ error: 'not found' });
+  const cell = name => `'${RPC_TAB}'!${colLetter(q.headers.indexOf(name))}${row._row}`;
+  if (ok) {
+    let p = {}; try { p = JSON.parse(row.Payload || '{}'); } catch (e) {}
+    await enqueueRpc('widget_forge', { ...p, mode: 'new' });
+  }
+  await store.values.update({ spreadsheetId: TODO_SHEET_ID, range: cell('Done'), valueInputOption: 'RAW',
+    requestBody: { values: [[(ok ? 'confirmed ' : 'cancelled ') + nowIso()]] } });
+  res.json({ ok: true, queued: !!ok });
+}));
+
 app.post('/api/feedback', asyncRoute(async (req, res) => {
   const { kind, title, url, source, context, subjects, person, author } = req.body || {};
   if (!kind) return res.status(400).json({ error: 'kind required' });
   // guest-CI instance: a comment is a change request — apply it now, remember it as an idea
   if (kind === 'comment' && context && CFG.ciAutoApply) {
     const r = await ciTryApply(context);
+    let forge = null;
+    if (!r.applied && CFG.widgetForge) {
+      const c = await forgeClassify(context);
+      if (c.kind === 'widget_change' || c.kind === 'widget_revert') {
+        const id = await enqueueRpc('widget_forge', { mode: c.kind === 'widget_revert' ? 'revert' : 'change',
+          widget: c.widget, request: String(context).slice(0, 500), spec: c.spec || '' });
+        forge = { id, state: 'queued', widget: c.widget, spec: c.spec || '' };
+      } else if (c.kind === 'widget_new' && c.widget && c.spec) {
+        const id = await enqueueRpc('widget_spec', { mode: 'new', widget: c.widget,
+          request: String(context).slice(0, 500), spec: c.spec });
+        forge = { id, state: 'confirm', widget: c.widget, spec: c.spec };
+      }
+    }
     await writeFeedbackEntry({ at: nowIso(), kind: 'idea', signal: 1, title: '', source: 'ci', url: '',
-      subjects: [], person: '', author: '', context: String(context).slice(0, 500) + (r.applied ? ' [applied]' : '') }).catch(() => {});
-    return res.json({ ok: true, applied: !!r.applied, reason: r.reason || '', reload: !!r.applied });
+      subjects: [], person: '', author: '', context: String(context).slice(0, 500)
+        + (r.applied ? ' [applied]' : forge ? ` [forge:${forge.state}:${forge.widget}]` : '') }).catch(() => {});
+    return res.json({ ok: true, applied: !!r.applied, reason: r.reason || '', reload: !!r.applied, forge });
   }
   const entry = {
     at: nowIso(), kind, signal: SIGNAL_BY_KIND[kind] ?? 0,

@@ -49,3 +49,7 @@ data/urgent-state.json
 data/ephemeral-notes.json
 data/enotes/
 plugins/data/
+# per-instance widget forks (forge output; baked into the target instance only)
+plugins-forks/
+plugins/cha-forks/
+data/forge-ledger.jsonl

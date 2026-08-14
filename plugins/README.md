@@ -56,3 +56,12 @@ module.exports = {
 This hook surface is how instance-specific behavior stays out of the core: anything the
 public stub shouldn’t ship (a personal feed, a house integration, a provider routing rule)
 belongs in a plugin here, not in server.js.
+
+## Per-instance forks — `plugins-forks/` (2026-08-14)
+
+`plugins-forks/*.js` (repo root — SAME depth as plugins/, so `__dirname`-relative data and sidecar paths keep resolving) loads BEFORE `plugins/` and wins by `key`: the base plugin with the
+same key is skipped entirely (all hooks), so a fork fully replaces its widget on that
+instance. Delete the fork file and redeploy to revert to base. Forks are per-instance
+artifacts (gitignored), produced by an owner-side forge from a trusted user's request —
+see `bin/widget-forge.js` and `FORKS.md` on the owner machine. Promote a good fork by
+merging its diff into the base plugin with a normal commit.
