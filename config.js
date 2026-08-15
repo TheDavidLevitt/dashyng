@@ -85,6 +85,9 @@ module.exports = {
       .map(s => String(s).trim().toLowerCase()).filter(Boolean); })(),
   // Hampr donate checklist (/ranmali): guest emails allowed to sign in and see ONLY that
   // page + its API (comma-separated, or an array in config-local). Owner always has access.
+  // Shared-family-lists guests: emails allowed to sign in and see ONLY /guest
+  guestEmails: (() => { const v = pick('guestEmails', 'GUEST_EMAILS', '');
+    return (Array.isArray(v) ? v : String(v).split(',')).map(x => String(x).trim()).filter(Boolean); })(),
   ranmaliEmails: (() => { const v = pick('ranmaliEmails', 'RANMALI_EMAILS', '');
     return (Array.isArray(v) ? v : String(v).split(','))
       .map(s => String(s).trim().toLowerCase()).filter(Boolean); })(),

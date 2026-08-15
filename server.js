@@ -68,6 +68,9 @@ if (STORE_MODE === 'local') {
 }
 
 const app = express();
+// health backfills POST multi-MB payloads; the global parser's 100kb default 413s them.
+// Mounted BEFORE the global parser so it wins for this path (Cloud Run inbound cap: 32MB).
+app.use('/api/htrack/intake', express.json({ limit: '30mb' }));
 app.use(express.json());
 
 // ---------- auth: "Sign in with Google" (OpenID Connect) — no GCP org needed ----------
@@ -98,6 +101,11 @@ const isBioPath = p => p === BIO_ROUTE || p.startsWith(BIO_ROUTE + '/') || p.sta
 const RANMALI_ROUTE = '/ranmali';
 const RANMALI_GUEST_EMAILS = CFG.ranmaliEmails;
 const isRanmaliPath = p => p === RANMALI_ROUTE || p.startsWith(RANMALI_ROUTE + '/') || p.startsWith('/api/ranmali/');
+// Shared family lists (CFG.guestEmails): fourth instance of the scoped-guest shape.
+// Guest sees /guest — every active List Registry list, add/check/uncheck.
+const GUEST_ROUTE = '/guest';
+const GUEST_GUEST_EMAILS = CFG.guestEmails || [];
+const isGuestPath = p => p === GUEST_ROUTE || p.startsWith(GUEST_ROUTE + '/') || p.startsWith('/api/guest/');
 // Guest proxy routes (CFG.guestRoutes): another dashboard instance MOUNTED at a path.
 // /cha and everything under it forwards to that instance with a shared-secret header pair
 // (X-Proxy-Auth / X-Proxy-User), so one OAuth client + one hostname front N scoped
@@ -160,6 +168,7 @@ const emailAllowed = e => ALLOWED_EMAILS_N.includes(normEmail(e || ''));
 const GAME_GUEST_N = GAME_GUEST_EMAILS.map(normEmail);
 const BIO_GUEST_N = BIO_GUEST_EMAILS.map(normEmail);
 const RANMALI_GUEST_N = RANMALI_GUEST_EMAILS.map(normEmail);
+const GUEST_GUEST_N = GUEST_GUEST_EMAILS.map(normEmail);
 const SESSION_SECRET =process.env.SESSION_SECRET || process.env.DASHBOARD_PASSWORD || 'dev-only-secret';
 
 const b64url = s => Buffer.from(s).toString('base64url');
@@ -232,7 +241,7 @@ app.get('/auth/callback', asyncRoute(async (req, res) => {
   const rawEmail = (ticket.getPayload().email || '').toLowerCase();
   const email = normEmail(rawEmail);
   const isOwner = email === ALLOWED_EMAIL_N;
-  if (!isOwner && !emailAllowed(email) && !GAME_GUEST_N.includes(email) && !BIO_GUEST_N.includes(email) && !RANMALI_GUEST_N.includes(email) && !guestRouteOf(email)) return res.status(403).send(`Not authorized: ${rawEmail}`);
+  if (!isOwner && !emailAllowed(email) && !GAME_GUEST_N.includes(email) && !BIO_GUEST_N.includes(email) && !RANMALI_GUEST_N.includes(email) && !GUEST_GUEST_N.includes(email) && !guestRouteOf(email)) return res.status(403).send(`Not authorized: ${rawEmail}`);
   const secure = (req.headers['x-forwarded-proto'] === 'https') ? '; Secure' : '';
   res.set('Set-Cookie', `dash_session=${encodeURIComponent(signSession(email))}; HttpOnly${secure}; SameSite=Lax; Max-Age=${30 * 24 * 3600}; Path=/${cookieDomain(req)}`);
   const next = safeNext(String(req.query.state || '').startsWith('next:') ? String(req.query.state).slice(5) : '');
@@ -240,6 +249,7 @@ app.get('/auth/callback', asyncRoute(async (req, res) => {
   const nextPath = next.split('?')[0];
   if (BIO_GUEST_N.includes(email)) return res.redirect(isBioPath(nextPath) ? next : BIO_ROUTE);
   if (RANMALI_GUEST_N.includes(email)) return res.redirect(isRanmaliPath(nextPath) ? next : RANMALI_ROUTE);
+  if (GUEST_GUEST_N.includes(email)) return res.redirect(isGuestPath(nextPath) ? next : GUEST_ROUTE);
   { const gr = guestRouteOf(email); if (gr) return res.redirect(routeForPath(nextPath) ? next : gr.path); }
   res.redirect(isGamePath(nextPath) ? next : '/junglefarm/');
 }));
@@ -732,6 +742,7 @@ app.use((req, res, next) => {
         { on: GAME_GUEST_N.includes(email), owns: isGamePath(req.path), home: '/junglefarm/' },
         { on: BIO_GUEST_N.includes(email), owns: isBioPath(req.path), home: BIO_ROUTE },
         { on: RANMALI_GUEST_N.includes(email), owns: isRanmaliPath(req.path), home: RANMALI_ROUTE },
+        { on: GUEST_GUEST_N.includes(email), owns: isGuestPath(req.path), home: GUEST_ROUTE },
       ].filter(g => g.on);
       if (grants.length) {
         if (grants.some(g => g.owns)) return next();
@@ -5485,8 +5496,8 @@ async function elistsPayload() {
   // shared lists living on an external sheet (family datastore) join the payload —
   // unless promoted to a Task List (quadrants[k].share), which owns them instead
   const promoted = new Set(sharedBinds().map(b => b.slug));
-  for (const [slug, cfg] of Object.entries(loadSettings().listShares || {})) {
-    if (!cfg || !cfg.sheetId || promoted.has(slug)) continue;
+  for (const [slug, cfg] of Object.entries(allListShares())) {
+    if (!cfg || !cfg.sheetId || promoted.has(slug) || cfg.type === 'table') continue;
     try { out.push(await sharedListView(slug, cfg)); } catch (e) {}
   }
   return out;
@@ -5868,6 +5879,34 @@ app.get('/api/journal/scrape', asyncRoute(async (req, res) => {
   });
   res.json({ enabled: true, cfg, days });
 }));
+// promote a journal ephemeral list into the shared List Registry (owner decree 2026-08-15:
+// ephemeral and persistent lists are the same shape at heart — this is the missing hop.
+// elist -> registry checklist; from there settings.quadrants[key].share = slug makes it a
+// full Task List. The source elist column is annotated, never deleted.
+app.post('/api/journal-lists/promote', asyncRoute(async (req, res) => {
+  const heading = String((req.body || {}).heading || '').trim();
+  if (!heading) return res.status(400).json({ error: 'heading required' });
+  const lists = (await elistsPayload());
+  const l = lists.find(x => x.heading.toLowerCase() === heading.toLowerCase())
+    || lists.find(x => x.heading.toLowerCase().includes(heading.toLowerCase()));
+  if (!l) return res.status(404).json({ error: 'no active ephemeral list matches: ' + heading });
+  const reg = await store.values.get({ spreadsheetId: FAMILY_SHEET_ID, range: `'${LIST_REGISTRY_TAB}'!A2:G60` });
+  const rows = reg.data.values || [];
+  const dupe = rows.find(r => String(r[1] || '').trim().toLowerCase() === l.heading.toLowerCase());
+  if (dupe) return res.status(409).json({ error: `a shared list with that name already exists: #${dupe[0]} ${dupe[1]}` });
+  const n = rows.reduce((m, r) => Math.max(m, parseInt(r[0], 10) || 0), 0) + 1;
+  const slug = l.heading.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
+  const tab = 'list_' + slug.replace(/-/g, '_').slice(0, 30);
+  await store.spreadsheets.batchUpdate({ spreadsheetId: FAMILY_SHEET_ID, requestBody: { requests: [{ addSheet: { properties: { title: tab } } }] } })
+    .catch(e => { if (!/already exists/i.test(String(e.message))) throw e; });
+  await store.values.update({ spreadsheetId: FAMILY_SHEET_ID, range: `'${tab}'!A1`, valueInputOption: 'RAW',
+    requestBody: { values: [['Item', 'done', 'Photo', 'At', 'Item', 'From'], ...l.items.map(i => [i.text, i.done ? 'Y' : ''])] } });
+  await store.values.append({ spreadsheetId: FAMILY_SHEET_ID, range: `'${LIST_REGISTRY_TAB}'!A:G`, valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS',
+    requestBody: { values: [[String(n), l.heading, tab, slug, today(), 'active', 'checklist']] } });
+  await refreshRegistryShares();
+  res.json({ ok: true, number: n, slug, tab, items: l.items.length,
+    hint: `bind it as a Task List with settings.quadrants[<key>].share = "${slug}"` });
+}));
 app.get('/api/journal-lists', asyncRoute(async (req, res) => res.json({ lists: await elistsPayload() })));
 app.post('/api/journal-lists/scan', asyncRoute(async (req, res) => {
   if (!HAS_JOURNAL) return res.status(400).json({ error: 'journal scanning runs on the vault host' });
@@ -5996,7 +6035,33 @@ async function sharedListAddComment(sheetId, tab, item, from, text) {
   await store.values.update({ spreadsheetId: sheetId, range: `'${tab}'!D${row}:G${row}`, valueInputOption: 'RAW',
     requestBody: { values: [[nowIso(), item || '', from, text]] } });
 }
-const sharedCfgOf = slug => { const v = (loadSettings().listShares || {})[slug]; return v && v.sheetId ? v : null; };
+// ---- List Registry: numbered shared lists, auto-discovered (David 2026-08-15) ----
+// The family sheet's 'List Registry' tab (# | Name | Tab | Slug | Created | Status) is the
+// source of truth for lists shared between David's and Guest's surfaces and editable
+// by the family messenger agent's /list skill. Every active row materialises as a listShares-shaped entry,
+// so a list created from chat appears on both dashboards with no manual step. The number
+// is the dedup handle: fuzzy name matches resolve to it instead of spawning a twin.
+const FAMILY_SHEET_ID = '1ofjRVimqei3EFRcrXu0K601eSbisHtU2n51L42ZOmO8';
+const LIST_REGISTRY_TAB = 'List Registry';
+let regShares = {};
+async function refreshRegistryShares() {
+  try {
+    const r = await store.values.get({ spreadsheetId: FAMILY_SHEET_ID, range: `'${LIST_REGISTRY_TAB}'!A2:G60` });
+    const next = {};
+    for (const row of (r.data.values || [])) {
+      const [n, name, tab, slug, , status, type] = row.map(x => String(x || '').trim());
+      if (!n || !tab || !slug || !/^active$/i.test(status || 'active')) continue;
+      next[slug] = { sheetId: FAMILY_SHEET_ID, tab, label: `#${n} ${name}`, name: name || slug,
+        type: /^table$/i.test(type) ? 'table' : 'checklist',
+        token: 'reg-' + crypto.createHash('sha1').update('list-registry:' + slug).digest('hex').slice(0, 24) };
+    }
+    regShares = next;
+  } catch (e) { /* registry tab may not exist yet — keep last good */ }
+}
+refreshRegistryShares(); setInterval(refreshRegistryShares, 60 * 1000);
+// settings-file shares win on slug collision (owner overrides), registry fills the rest
+const allListShares = () => ({ ...regShares, ...(loadSettings().listShares || {}) });
+const sharedCfgOf = slug => { const v = allListShares()[slug]; return v && v.sheetId ? v : null; };
 
 // ---- a Task List backed by a shared tab ----
 // settings.quadrants[key].share = <listShares slug> promotes a shared list out of Ephemeral
@@ -6061,7 +6126,7 @@ async function sharedTasksAll() {
 // settings.listShares = { slug: { token, name } } (owner-managed). Contract: the external
 // side can READ, mark an item doer-complete ('D' — the owner still checks it off), or leave
 // a comment/question. It can never check items off, edit texts, or see anything else.
-const shareOf = token => Object.entries(loadSettings().listShares || {}).find(([, v]) => v && v.token === token);
+const shareOf = token => Object.entries(allListShares()).find(([, v]) => v && v.token === token);
 app.get('/api/elists/ext/:token', asyncRoute(async (req, res) => {
   const hit = shareOf(String(req.params.token || ''));
   if (!hit) return res.status(404).json({ error: 'unknown share' });
@@ -6161,6 +6226,94 @@ app.post('/api/journal-lists/:id/comment', asyncRoute(async (req, res) => {
   if (shared) await sharedListAddComment(shared.sheetId, shared.tab || slug, item, from, text);
   else await appendTabRow(ELIST_COMMENTS_TAB, ELIST_COMMENTS_HEADERS, [nowIso(), slug, item, from, text]);
   res.json({ ok: true, from });
+}));
+
+
+// ---- Guest: shared family lists page ----
+// Both of them are owners of these lists, so a check here is a full 'Y' (unlike the
+// ranmali doer contract). Items added get a uuid in J like every other writer.
+app.get(GUEST_ROUTE, (req, res) => res.sendFile(path.join(__dirname, 'public', 'guest.html')));
+// Flexible tables: a registry list typed 'table' is a plain grid — header row 1
+// (up to 99 columns), data rows below, no hidden system columns. Checklists keep
+// the sharedList A:J contract. One payload serves David's /lists and /guest.
+const FLEX_MAX_COLS = 99;
+async function flexGrid(cfg, slug) {
+  const r = await store.values.get({ spreadsheetId: cfg.sheetId, range: `'${cfg.tab || slug}'!A1:CU300` });
+  const grid = r.data.values || [];
+  const columns = (grid[0] || []).map(x => String(x || '')).slice(0, FLEX_MAX_COLS);
+  const width = Math.max(columns.length, 1);
+  const rows = grid.slice(1).map(row => Array.from({ length: width }, (_, i) => String((row || [])[i] ?? '')))
+    .filter(row => row.some(c => c.trim()));
+  return { columns, rows };
+}
+app.get('/api/guest/lists', asyncRoute(async (req, res) => {
+  const lists = [];
+  for (const [slug, cfg] of Object.entries(allListShares())) {
+    if (!cfg || !cfg.sheetId || !String(cfg.token || '').startsWith('reg-')) continue; // registry lists only
+    if (cfg.type === 'table') {
+      const { columns, rows } = await flexGrid(cfg, slug);
+      lists.push({ slug, label: cfg.label || cfg.name || slug, type: 'table', columns, rows });
+    } else {
+      const { items } = await sharedListRead(cfg.sheetId, cfg.tab || slug);
+      lists.push({ slug, label: cfg.label || cfg.name || slug, type: 'checklist',
+        items: items.map(i => ({ text: i.text, done: i.mark === 'Y', photo: i.photo || '' })) });
+    }
+  }
+  lists.sort((a, b) => String(a.label).localeCompare(String(b.label)));
+  res.json({ lists });
+}));
+app.post('/api/guest/cell', asyncRoute(async (req, res) => {
+  const { slug, row, col, value } = req.body || {};
+  const cfg = allListShares()[String(slug || '')];
+  if (!cfg || !cfg.sheetId || cfg.type !== 'table') return res.status(404).json({ error: 'unknown table' });
+  const r = Number(row), c = Number(col);   // 1-based DATA row, 1-based column
+  if (!(r >= 1 && r <= 300 && c >= 1 && c <= FLEX_MAX_COLS)) return res.status(400).json({ error: 'bad cell' });
+  const colA = c <= 26 ? String.fromCharCode(64 + c) : String.fromCharCode(64 + Math.floor((c - 1) / 26)) + String.fromCharCode(65 + ((c - 1) % 26));
+  await store.values.update({ spreadsheetId: cfg.sheetId, range: `'${cfg.tab || slug}'!${colA}${r + 1}`,
+    valueInputOption: 'RAW', requestBody: { values: [[String(value ?? '').slice(0, 2000)]] } });
+  res.json({ ok: true });
+}));
+app.post('/api/guest/row', asyncRoute(async (req, res) => {
+  const { slug, values } = req.body || {};
+  const cfg = allListShares()[String(slug || '')];
+  if (!cfg || !cfg.sheetId || cfg.type !== 'table') return res.status(404).json({ error: 'unknown table' });
+  const vals = (Array.isArray(values) ? values : []).map(v => String(v ?? '').slice(0, 2000)).slice(0, FLEX_MAX_COLS);
+  if (!vals.some(v => v.trim())) return res.status(400).json({ error: 'empty row' });
+  const grid = await store.values.get({ spreadsheetId: cfg.sheetId, range: `'${cfg.tab || slug}'!A1:CU300` });
+  const nextRow = ((grid.data.values || []).length || 1) + 1;
+  await store.values.update({ spreadsheetId: cfg.sheetId, range: `'${cfg.tab || slug}'!A${nextRow}`,
+    valueInputOption: 'RAW', requestBody: { values: [vals] } });
+  res.json({ ok: true });
+}));
+// same page for the owner at a sensible URL
+app.get('/lists', (req, res) => res.sendFile(path.join(__dirname, 'public', 'guest.html')));
+app.post('/api/guest/toggle', asyncRoute(async (req, res) => {
+  const { slug, text, done } = req.body || {};
+  const cfg = allListShares()[String(slug || '')];
+  if (!cfg || !cfg.sheetId) return res.status(404).json({ error: 'unknown list' });
+  const { items } = await sharedListRead(cfg.sheetId, cfg.tab || slug);
+  const it = items.find(i => i.text === text);
+  if (!it) return res.status(404).json({ error: 'item not found' });
+  await sharedListSetMark(cfg.sheetId, cfg.tab || slug, it.row, done ? 'Y' : '');
+  res.json({ ok: true });
+}));
+app.post('/api/guest/add', asyncRoute(async (req, res) => {
+  const { slug, text } = req.body || {};
+  const cfg = allListShares()[String(slug || '')];
+  const clean = String(text || '').trim().slice(0, 300);
+  if (!cfg || !cfg.sheetId) return res.status(404).json({ error: 'unknown list' });
+  if (!clean) return res.status(400).json({ error: 'empty item' });
+  const { items } = await sharedListRead(cfg.sheetId, cfg.tab || slug);
+  if (items.some(i => i.text.trim().toLowerCase() === clean.toLowerCase()))
+    return res.status(409).json({ error: 'already on the list' });
+  // explicit row write: values:append table-detection drops rows into column D
+  // when a header cell is empty (live 2026-08-15) — never trust it for these tabs
+  const grid = await store.values.get({ spreadsheetId: cfg.sheetId, range: `'${cfg.tab || slug}'!A1:J300` });
+  const nextRow = ((grid.data.values || []).length || 1) + 1;
+  await store.values.update({ spreadsheetId: cfg.sheetId, range: `'${cfg.tab || slug}'!A${nextRow}:J${nextRow}`,
+    valueInputOption: 'RAW',
+    requestBody: { values: [[clean, '', '', '', '', '', '', '', '', crypto.randomUUID()]] } });
+  res.json({ ok: true });
 }));
 
 // ---- Ranmali task checklist: session-authed view of lists shared to "Ranmali" ----

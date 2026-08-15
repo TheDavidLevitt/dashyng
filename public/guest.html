@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Shared family lists — David + Guest. Bilingual chrome (fr · en); item text
+     shows exactly as typed (en/fr are both on-list languages, never cross-translated). -->
+<title>Nos listes · Our lists</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; margin: 0; }
+  body { font: 16px/1.45 -apple-system, system-ui, sans-serif; max-width: 640px;
+         margin: 0 auto; padding: 1rem 1rem 4rem; background: Canvas; color: CanvasText; }
+  h1 { font-size: 1.3rem; margin: .4rem 0 1rem; }
+  .list { border: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
+          border-radius: 14px; padding: .9rem 1rem; margin-bottom: 1.1rem; }
+  .list h2 { font-size: 1.05rem; margin-bottom: .55rem; }
+  .item { display: flex; align-items: flex-start; gap: .6rem; padding: .32rem 0; }
+  .item input[type=checkbox] { width: 1.25rem; height: 1.25rem; margin-top: .1rem; }
+  .item.done span { opacity: .45; text-decoration: line-through; }
+  .item img { display: block; max-width: 180px; border-radius: 8px; margin-top: .3rem; }
+  form { display: flex; gap: .5rem; margin-top: .6rem; }
+  form input[type=text] { flex: 1; padding: .5rem .7rem; border-radius: 9px;
+    border: 1px solid color-mix(in srgb, CanvasText 25%, transparent); background: transparent; color: inherit; font: inherit; }
+  form button { padding: .5rem .9rem; border-radius: 9px; border: 0; background: #2f6fdd; color: #fff; font: inherit; }
+  .empty { opacity: .6; font-style: italic; }
+  #err { color: #c33; margin: .6rem 0; min-height: 1.2em; }
+  .list.table { resize: vertical; overflow: auto; min-height: 120px; max-height: 70vh; }
+  table { border-collapse: collapse; width: 100%; font-size: .92em; }
+  th, td { border: 1px solid color-mix(in srgb, CanvasText 15%, transparent);
+           padding: .3rem .5rem; text-align: left; vertical-align: top; }
+  th { cursor: pointer; user-select: none; white-space: nowrap; position: sticky; top: 0; background: Canvas; }
+  th .col-toggle { opacity: .45; margin-left: .3rem; cursor: pointer; }
+  th.collapsed, td.collapsed { max-width: 1.6rem; width: 1.6rem; overflow: hidden;
+    white-space: nowrap; text-overflow: clip; color: transparent; padding: .3rem .15rem; }
+  th.collapsed { color: CanvasText; font-size: .7em; }
+  td[contenteditable] { min-width: 3rem; }
+  td[contenteditable]:focus { outline: 2px solid #2f6fdd; background: color-mix(in srgb, #2f6fdd 8%, Canvas); }
+  .addrow td input { width: 100%; border: 0; background: transparent; color: inherit; font: inherit; }
+</style>
+</head>
+<body>
+<h1>📝 Nos listes <span style="opacity:.55">· Our lists</span></h1>
+<div id="err"></div>
+<div id="lists"><p class="empty">Chargement… · Loading…</p></div>
+<script>
+const err = (m) => { document.getElementById('err').textContent = m || ''; };
+async function api(p, body) {
+  const r = await fetch(p, body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {});
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.status);
+  return r.json();
+}
+async function render() {
+  try {
+    const { lists } = await api('/api/guest/lists');
+    const root = document.getElementById('lists');
+    root.innerHTML = '';
+    if (!lists.length) { root.innerHTML = '<p class="empty">Aucune liste · No lists yet</p>'; return; }
+    for (const l of lists) {
+      if (l.type === 'table') { root.appendChild(renderTable(l)); continue; }
+      const box = document.createElement('div'); box.className = 'list';
+      const h = document.createElement('h2'); h.textContent = l.label; box.appendChild(h);
+      for (const it of l.items) {
+        const row = document.createElement('label'); row.className = 'item' + (it.done ? ' done' : '');
+        const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = it.done;
+        cb.addEventListener('change', async () => {
+          try { err(); await api('/api/guest/toggle', { slug: l.slug, text: it.text, done: cb.checked }); render(); }
+          catch (e) { err('Échec · Failed: ' + e.message); cb.checked = !cb.checked; }
+        });
+        const span = document.createElement('span'); span.textContent = it.text;
+        row.append(cb, span);
+        if (it.photo) { const img = document.createElement('img'); img.src = it.photo; img.loading = 'lazy'; span.appendChild(img); }
+        box.appendChild(row);
+      }
+      const form = document.createElement('form');
+      const inp = document.createElement('input'); inp.type = 'text'; inp.placeholder = 'Ajouter · Add…';
+      const btn = document.createElement('button'); btn.textContent = '+';
+      form.append(inp, btn);
+      form.addEventListener('submit', async (ev) => {
+        ev.preventDefault();
+        if (!inp.value.trim()) return;
+        try { err(); await api('/api/guest/add', { slug: l.slug, text: inp.value }); inp.value = ''; render(); }
+        catch (e) { err('Échec · Failed: ' + e.message); }
+      });
+      box.appendChild(form);
+      root.appendChild(box);
+    }
+  } catch (e) { err('Échec de chargement · Load failed: ' + e.message); }
+}
+// ---- flexible tables: sortable (click header), collapsible (▸/▾ per column,
+// remembered per list in localStorage), inline cell edit, add-row, resizable box
+const collapsedKey = (slug) => 'flex-collapsed:' + slug;
+function renderTable(l) {
+  const box = document.createElement('div'); box.className = 'list table';
+  const h = document.createElement('h2'); h.textContent = l.label; box.appendChild(h);
+  // default-collapsed columns (owner decree 2026-08-15): a header wrapped in parentheses,
+  // e.g. "(Notes)", starts collapsed on every device until the viewer expands it — the
+  // localStorage override then wins for that device.
+  const stored = localStorage.getItem(collapsedKey(l.slug));
+  const collapsed = new Set(stored ? JSON.parse(stored)
+    : (l.columns || []).map((c, i) => /^\(.*\)$/.test(String(c).trim()) ? i : -1).filter(i => i >= 0));
+  let sortCol = null, sortDir = 1;
+  const tbl = document.createElement('table');
+  const draw = () => {
+    tbl.innerHTML = '';
+    const thr = document.createElement('tr');
+    l.columns.forEach((c, ci) => {
+      const th = document.createElement('th');
+      th.textContent = collapsed.has(ci) ? '…' : (c || String.fromCharCode(65 + ci));
+      if (collapsed.has(ci)) th.classList.add('collapsed');
+      th.title = c;
+      const tog = document.createElement('span'); tog.className = 'col-toggle';
+      tog.textContent = collapsed.has(ci) ? '▸' : '▾';
+      tog.addEventListener('click', (ev) => { ev.stopPropagation();
+        collapsed.has(ci) ? collapsed.delete(ci) : collapsed.add(ci);
+        localStorage.setItem(collapsedKey(l.slug), JSON.stringify([...collapsed])); draw(); });
+      th.appendChild(tog);
+      th.addEventListener('click', () => { sortDir = sortCol === ci ? -sortDir : 1; sortCol = ci; draw(); });
+      thr.appendChild(th);
+    });
+    tbl.appendChild(thr);
+    // rows carry their ORIGINAL sheet row index so edits land regardless of sort
+    const rows = l.rows.map((r, i) => ({ r, sheetRow: i + 1 }));
+    if (sortCol !== null) rows.sort((a, b) => {
+      const av = a.r[sortCol] || '', bv = b.r[sortCol] || '';
+      const an = parseFloat(av), bn = parseFloat(bv);
+      const cmp = (!isNaN(an) && !isNaN(bn)) ? an - bn : av.localeCompare(bv);
+      return cmp * sortDir;
+    });
+    for (const { r, sheetRow } of rows) {
+      const tr = document.createElement('tr');
+      l.columns.forEach((_, ci) => {
+        const td = document.createElement('td');
+        td.textContent = r[ci] || '';
+        if (collapsed.has(ci)) { td.classList.add('collapsed'); tr.appendChild(td); return; }
+        td.contentEditable = 'plaintext-only';
+        td.addEventListener('blur', async () => {
+          const v = td.textContent.trim();
+          if (v === (r[ci] || '').trim()) return;
+          try { err(); await api('/api/guest/cell', { slug: l.slug, row: sheetRow, col: ci + 1, value: v }); r[ci] = v; }
+          catch (e) { err('Échec · Failed: ' + e.message); td.textContent = r[ci] || ''; }
+        });
+        tr.appendChild(td);
+      });
+      tbl.appendChild(tr);
+    }
+    // add-row line
+    const ar = document.createElement('tr'); ar.className = 'addrow';
+    const inputs = l.columns.map((c, ci) => {
+      const td = document.createElement('td');
+      if (collapsed.has(ci)) { td.classList.add('collapsed'); return { td, inp: null }; }
+      const inp = document.createElement('input'); inp.placeholder = c || '';
+      inp.addEventListener('keydown', async (ev) => {
+        if (ev.key !== 'Enter') return;
+        ev.preventDefault();
+        const values = inputs.map(x => x.inp ? x.inp.value : '');
+        if (!values.some(v => v.trim())) return;
+        try { err(); await api('/api/guest/row', { slug: l.slug, values }); render(); }
+        catch (e) { err('Échec · Failed: ' + e.message); }
+      });
+      td.appendChild(inp);
+      return { td, inp };
+    });
+    inputs.forEach(x => ar.appendChild(x.td));
+    tbl.appendChild(ar);
+  };
+  draw();
+  box.appendChild(tbl);
+  return box;
+}
+
+render();
+setInterval(render, 45000); // both sides edit — stay fresh without being chatty
+</script>
+</body>
+</html>
