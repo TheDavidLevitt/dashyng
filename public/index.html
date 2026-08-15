@@ -45,6 +45,9 @@ a:hover { text-decoration: underline; }
 .jl-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 6px; margin-top: 4px; }
 .jl-box { border: 1px solid var(--border); border-left: 3px solid var(--violet); border-radius: 7px; background: var(--card); padding: 6px 8px; position: relative; }
 .jl-box h3 { margin: 0 22px 4px 0; font-size: 12.5px; font-weight: 650; }
+.jl-wgrip { position: absolute; right: 0; bottom: 0; width: 14px; height: 14px; cursor: ew-resize; opacity: .3; }
+.jl-wgrip::after { content: '⇲'; font-size: 10px; position: absolute; right: 2px; bottom: 0; }
+.jl-wgrip:hover { opacity: .9; }
 .jl-box .jl-x { position: absolute; top: 4px; right: 5px; opacity: .45; cursor: pointer; font-size: 12px; line-height: 1; background: none; border: 0; color: var(--text2); }
 .jl-box .jl-x:hover { opacity: 1; }
 .jl-box .jl-pinned { border-style: solid !important; border-color: var(--violet) !important; }
@@ -2146,6 +2149,7 @@ function loadENotes() { return api('/api/enotes').then(d => { if (d && Array.isA
   setInterval(loadENotes, 120000);
 })();
 let jlists = [];
+const jlSort = {}; // per-table sort state (column, direction)
 function renderJList() {
   const el = document.getElementById('jlists'); if (!el) return;
   const meta = document.getElementById('jlists-meta');
@@ -2155,17 +2159,100 @@ function renderJList() {
   }
   renderENotes(); // combined 'N notes · M lists' meta
   const pinned = jlists.filter(l => l.persistent || l.shared), eph = jlists.filter(l => !l.persistent && !l.shared);
-  const boxHtml = l => `<div class="jl-box${l.persistent || l.shared ? ' jl-pinned' : ''}" data-id="${esc(l.id)}">
+  const wOf = l => { const w = (appSettings.jlWidths || {})[l.id]; return w ? `style="grid-column:1/-1;max-width:${w}px"` : ''; };
+  // compact flex-table box: click header to sort, (parenthesized) headers start collapsed
+  // (same localStorage key as the /lists page), click a cell to edit in place
+  const tableHtml = l => {
+    const collKey = 'flex-collapsed:' + l.slug;
+    const stored = localStorage.getItem(collKey);
+    const coll = new Set(stored ? JSON.parse(stored) : l.columns.map((c, i) => /^\(.*\)$/.test(String(c).trim()) ? i : -1).filter(i => i >= 0));
+    const st = jlSort[l.id] || null;
+    const rows = st ? [...l.rows].sort((a, b) => String(a[st.c]).localeCompare(String(b[st.c]), undefined, { numeric: true }) * st.d) : l.rows;
+    return `<div class="jl-box jl-pinned" data-id="${esc(l.id)}" data-slug="${esc(l.slug)}" ${wOf(l)}>
+    <button class="jl-x" title="Retire this list (hides on every dashboard; never deletes the tab)">✕</button>
+    <h3>${esc(l.heading)} <span class="jl-src">table · shared</span></h3>
+    <div style="overflow-x:auto"><table class="jl-tbl" style="border-collapse:collapse;font-size:12px;width:100%">
+      <tr>${l.columns.map((c, ci) => `<th data-c="${ci}" style="cursor:pointer;text-align:left;padding:2px 5px;border-bottom:1px solid var(--border);${coll.has(ci) ? 'max-width:1.4rem;overflow:hidden;white-space:nowrap' : ''}" title="click to sort · alt-click to collapse/expand">${coll.has(ci) ? '…' : esc(c)}${st && st.c === ci ? (st.d > 0 ? ' ▲' : ' ▼') : ''}</th>`).join('')}</tr>
+      ${rows.map(r => `<tr>${r.map((v, ci) => `<td data-r="${l.rows.indexOf(r)}" data-c="${ci}" style="padding:2px 5px;border-bottom:1px solid color-mix(in srgb,var(--border) 40%,transparent);${coll.has(ci) ? 'max-width:1.4rem;overflow:hidden;white-space:nowrap' : ''};cursor:text">${esc(v)}</td>`).join('')}</tr>`).join('')}
+    </table></div>
+    <div class="jl-add"><button class="jl-row-go ib" title="Add a row">＋ row</button></div>
+    <div class="jl-wgrip" title="drag to set width"></div></div>`;
+  };
+  const boxHtml = l => l.type === 'table' ? tableHtml(l) : `<div class="jl-box${l.persistent || l.shared ? ' jl-pinned' : ''}" data-id="${esc(l.id)}" ${wOf(l)}>
     <button class="jl-x" title="Done — remove this list">✕</button>
     <h3>${esc(l.heading)} ${l.persistent ? '<span class="jl-pin" title="persistent — never auto-completes">📌</span>' : ''}<span class="jl-src">${esc(l.date || '')}</span></h3>
     ${(l.items || []).map((it, i) => `<div class="jl-item${it.done ? ' done' : ''}" data-i="${i}"><input type="checkbox" class="jl-chk"${it.done ? ' checked' : ''}><span>${esc(it.text)}${it.doer ? ' <span class="jl-doer" title="helper reports this complete — check to confirm">✋ reported done</span>' : ''}</span>${(it.comments || []).map(c => `<div class="tiny jl-cmt">💬 <b>${esc(c.from)}</b>: ${esc(c.text)}</div>`).join('')}</div>`).join('')}
     <div class="jl-add"><input class="jl-add-in" placeholder="＋ add item…"><button class="jl-add-go ib">＋</button></div>
+    <div class="jl-wgrip" title="drag to set width"></div>
   </div>`;
   el.innerHTML =
     (pinned.length ? '<div class="jl-subhead">📌 Pinned / shared</div><div class="jl-grid">' + pinned.map(boxHtml).join('') + '</div>' : '')
     + (eph.length ? (pinned.length ? '<div class="jl-subhead">Ephemeral</div>' : '') + '<div class="jl-grid">' + eph.map(boxHtml).join('') + '</div>' : '');
   el.querySelectorAll('.jl-box').forEach(box => {
     const list = jlists.find(l => l.id === box.dataset.id); if (!list) return;
+    // width drag (owner decree 2026-08-16): grip on the corner, px stored in settings
+    const grip = box.querySelector('.jl-wgrip');
+    if (grip) grip.onmousedown = e => {
+      e.preventDefault();
+      const x0 = e.clientX, w0 = box.getBoundingClientRect().width;
+      const mv = ev => { box.style.gridColumn = '1/-1'; box.style.maxWidth = Math.max(180, w0 + ev.clientX - x0) + 'px'; };
+      const up = ev => {
+        document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up);
+        const w = Math.round(Math.max(180, w0 + ev.clientX - x0));
+        appSettings.jlWidths = { ...(appSettings.jlWidths || {}), [list.id]: w };
+        api('/api/settings', { method: 'POST', body: JSON.stringify({ settings: { jlWidths: { [list.id]: w } } }) });
+      };
+      document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up);
+    };
+    if (list.type === 'table') {
+      box.querySelectorAll('th').forEach(th => th.onclick = e => {
+        const ci = +th.dataset.c;
+        if (e.altKey) { // collapse toggle, shared key with the /lists page
+          const k = 'flex-collapsed:' + list.slug;
+          const cur = new Set(JSON.parse(localStorage.getItem(k) || '[]'));
+          cur.has(ci) ? cur.delete(ci) : cur.add(ci);
+          localStorage.setItem(k, JSON.stringify([...cur])); renderJList(); return;
+        }
+        const st = jlSort[list.id];
+        jlSort[list.id] = st && st.c === ci ? { c: ci, d: -st.d } : { c: ci, d: 1 };
+        renderJList();
+      });
+      box.querySelectorAll('td').forEach(td => td.onclick = () => {
+        if (td.querySelector('input')) return;
+        const r = +td.dataset.r, c = +td.dataset.c, old = td.textContent;
+        const inp = document.createElement('input'); inp.className = 'q-input'; inp.value = old; inp.style.width = '95%';
+        td.textContent = ''; td.appendChild(inp); inp.focus();
+        let doneE = false;
+        const fin = async save => {
+          if (doneE) return; doneE = true;
+          const v = inp.value;
+          td.textContent = save ? v : old;
+          if (save && v !== old) {
+            const rr = await api('/api/guest/cell', { method: 'POST', body: JSON.stringify({ slug: list.slug, r: r + 1, c: c + 1, value: v }) }).catch(() => null);
+            if (!rr || rr.error) { showErr((rr && rr.error) || 'cell save failed'); td.textContent = old; }
+          }
+        };
+        inp.onkeydown = ev => { if (ev.key === 'Enter') fin(true); if (ev.key === 'Escape') fin(false); ev.stopPropagation(); };
+        inp.onblur = () => fin(true);
+      });
+      const rgo = box.querySelector('.jl-row-go');
+      if (rgo) rgo.onclick = async () => {
+        const vals = prompt('New row — values separated by | (' + list.columns.join(' | ') + ')');
+        if (vals === null) return;
+        const rr = await api('/api/guest/row', { method: 'POST', body: JSON.stringify({ slug: list.slug, values: vals.split('|').map(x => x.trim()) }) }).catch(() => null);
+        if (!rr || rr.error) { showErr((rr && rr.error) || 'row add failed'); return; }
+        loadJLists();
+      };
+      const x = box.querySelector('.jl-x');
+      if (x) x.onclick = async () => {
+        if (!confirm(`Retire "${list.heading}" from every dashboard? (the sheet tab survives)`)) return;
+        const rr = await api('/api/lists/' + encodeURIComponent(list.slug) + '/retire', { method: 'POST', body: '{}' }).catch(() => null);
+        if (!rr || rr.error) { showErr((rr && rr.error) || 'retire failed'); return; }
+        loadJLists();
+      };
+      return; // table boxes skip the checklist wiring below
+    }
+    if (list.shared && list.slug !== undefined) { /* registry checklists: ✕ retires too */ }
     const addIn = box.querySelector('.jl-add-in'), addGo = box.querySelector('.jl-add-go');
     const addItem = async () => {
       const text = addIn.value.trim(); if (!text) return;

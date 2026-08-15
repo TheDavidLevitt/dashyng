@@ -2254,6 +2254,10 @@ app.post('/api/settings', asyncRoute(async (req, res) => {
   if (!s || typeof s !== 'object') return res.status(400).json({ error: 'settings object required' });
   const next = { ...cur };
   if (s.sections && typeof s.sections === 'object') next.sections = s.sections;
+  if (s.jlWidths && typeof s.jlWidths === 'object') { // ephemeral-list drag widths: per-key merge, null deletes
+    next.jlWidths = { ...(next.jlWidths || {}) };
+    for (const [k, v] of Object.entries(s.jlWidths)) { if (v === null) delete next.jlWidths[k]; else next.jlWidths[k] = Math.max(180, Math.min(2000, +v || 0)); }
+  }
   if (s.journal && typeof s.journal === 'object') { // journal widget config — validated shape, full replace
     next.journal = { enabled: !!s.journal.enabled,
       fields: (Array.isArray(s.journal.fields) ? s.journal.fields : []).filter(f => f && f.key).slice(0, 12)
@@ -5497,8 +5501,13 @@ async function elistsPayload() {
   // unless promoted to a Task List (quadrants[k].share), which owns them instead
   const promoted = new Set(sharedBinds().map(b => b.slug));
   for (const [slug, cfg] of Object.entries(allListShares())) {
-    if (!cfg || !cfg.sheetId || promoted.has(slug) || cfg.type === 'table') continue;
-    try { out.push(await sharedListView(slug, cfg)); } catch (e) {}
+    if (!cfg || !cfg.sheetId || promoted.has(slug)) continue;
+    try {
+      if (cfg.type === 'table') { // tables render as grid boxes in the same section (owner, 2026-08-16)
+        const g = await flexGrid(cfg, slug);
+        out.push({ id: 'fx:' + slug, slug, heading: cfg.name || slug, shared: true, type: 'table', columns: g.columns, rows: g.rows });
+      } else out.push(await sharedListView(slug, cfg));
+    } catch (e) {}
   }
   return out;
 }
@@ -6046,11 +6055,15 @@ const LIST_REGISTRY_TAB = 'List Registry';
 let regShares = {};
 async function refreshRegistryShares() {
   try {
-    const r = await store.values.get({ spreadsheetId: FAMILY_SHEET_ID, range: `'${LIST_REGISTRY_TAB}'!A2:G60` });
+    const r = await store.values.get({ spreadsheetId: FAMILY_SHEET_ID, range: `'${LIST_REGISTRY_TAB}'!A2:H60` });
     const next = {};
+    const me = String(CFG.owner || 'david').trim().toLowerCase(); // cha instance sets DASHBOARD_OWNER
     for (const row of (r.data.values || [])) {
-      const [n, name, tab, slug, , status, type] = row.map(x => String(x || '').trim());
+      const [n, name, tab, slug, , status, type, scope] = row.map(x => String(x || '').trim());
       if (!n || !tab || !slug || !/^active$/i.test(status || 'active')) continue;
+      // Scope (owner decree 2026-08-16): '' / 'shared' = both dashboards; a name = that
+      // owner's PERSONAL list — same registry, same shapes, just not mutually visible
+      if (scope && !/^shared$/i.test(scope) && scope.toLowerCase() !== me) continue;
       next[slug] = { sheetId: FAMILY_SHEET_ID, tab, label: `#${n} ${name}`, name: name || slug,
         type: /^table$/i.test(type) ? 'table' : 'checklist',
         token: 'reg-' + crypto.createHash('sha1').update('list-registry:' + slug).digest('hex').slice(0, 24) };
@@ -6246,6 +6259,17 @@ async function flexGrid(cfg, slug) {
     .filter(row => row.some(c => c.trim()));
   return { columns, rows };
 }
+// the ephemeral-style ✕ for registry lists: one click retires (hides everywhere), never deletes
+app.post('/api/lists/:slug/retire', asyncRoute(async (req, res) => {
+  const r = await store.values.get({ spreadsheetId: FAMILY_SHEET_ID, range: `'${LIST_REGISTRY_TAB}'!A2:H60` });
+  const rows = r.data.values || [];
+  const i = rows.findIndex(row => String(row[3] || '').trim() === req.params.slug);
+  if (i === -1) return res.status(404).json({ error: 'no registry list: ' + req.params.slug });
+  await store.values.update({ spreadsheetId: FAMILY_SHEET_ID, range: `'${LIST_REGISTRY_TAB}'!F${i + 2}`,
+    valueInputOption: 'RAW', requestBody: { values: [['retired']] } });
+  await refreshRegistryShares();
+  res.json({ ok: true });
+}));
 app.get('/api/guest/lists', asyncRoute(async (req, res) => {
   const lists = [];
   for (const [slug, cfg] of Object.entries(allListShares())) {
