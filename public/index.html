@@ -2158,21 +2158,27 @@ function renderJList() {
     renderENotes(); return;
   }
   renderENotes(); // combined 'N notes · M lists' meta
-  const pinned = jlists.filter(l => l.persistent || l.shared), eph = jlists.filter(l => !l.persistent && !l.shared);
+  const jlOrd = appSettings.jlOrder || {};
+  const byOrd = (a, b) => (jlOrd[a.id] ?? 999) - (jlOrd[b.id] ?? 999);
+  const pinned = jlists.filter(l => l.persistent || l.shared).sort(byOrd), eph = jlists.filter(l => !l.persistent && !l.shared).sort(byOrd);
   const wOf = l => { const w = (appSettings.jlWidths || {})[l.id]; return w ? `style="grid-column:1/-1;max-width:${w}px"` : ''; };
   // compact flex-table box: click header to sort, (parenthesized) headers start collapsed
   // (same localStorage key as the /lists page), click a cell to edit in place
   const tableHtml = l => {
     const collKey = 'flex-collapsed:' + l.slug;
     const stored = localStorage.getItem(collKey);
-    const coll = new Set(stored ? JSON.parse(stored) : l.columns.map((c, i) => /^\(.*\)$/.test(String(c).trim()) ? i : -1).filter(i => i >= 0));
+    const cfgColl = (l.listCfg && l.listCfg.collapsed) || null; // registry defaults (⚙) beat the () convention
+    const coll = new Set(stored ? JSON.parse(stored)
+      : cfgColl || l.columns.map((c, i) => /^\(.*\)$/.test(String(c).trim()) ? i : -1).filter(i => i >= 0));
+    const cw = (l.listCfg && l.listCfg.colWidths) || {};
+    const wSty = ci => cw[ci] && !coll.has(ci) ? `width:${cw[ci]}px;max-width:${cw[ci]}px;overflow:hidden;` : '';
     const st = jlSort[l.id] || null;
     const rows = st ? [...l.rows].sort((a, b) => String(a[st.c]).localeCompare(String(b[st.c]), undefined, { numeric: true }) * st.d) : l.rows;
     return `<div class="jl-box jl-pinned" data-id="${esc(l.id)}" data-slug="${esc(l.slug)}" ${wOf(l)}>
     <button class="jl-x" title="Retire this list (hides on every dashboard; never deletes the tab)">✕</button>
-    <h3>${esc(l.heading)} <span class="jl-src">table · shared</span></h3>
+    <h3>${esc(l.heading)} <button class="ib jl-cfg" title="Columns: default collapse & width">⚙</button> <span class="jl-src">table · shared</span></h3>
     <div style="overflow-x:auto"><table class="jl-tbl" style="border-collapse:collapse;font-size:12px;width:100%">
-      <tr>${l.columns.map((c, ci) => `<th data-c="${ci}" style="cursor:pointer;text-align:left;padding:2px 5px;border-bottom:1px solid var(--border);${coll.has(ci) ? 'max-width:1.4rem;overflow:hidden;white-space:nowrap' : ''}" title="click to sort · alt-click to collapse/expand">${coll.has(ci) ? '…' : esc(c)}${st && st.c === ci ? (st.d > 0 ? ' ▲' : ' ▼') : ''}</th>`).join('')}</tr>
+      <tr>${l.columns.map((c, ci) => `<th data-c="${ci}" style="cursor:pointer;text-align:left;padding:2px 5px;border-bottom:1px solid var(--border);${coll.has(ci) ? 'max-width:1.4rem;overflow:hidden;white-space:nowrap' : wSty(ci)}" title="click to sort · alt-click to collapse/expand">${coll.has(ci) ? '…' : esc(c)}${st && st.c === ci ? (st.d > 0 ? ' ▲' : ' ▼') : ''}</th>`).join('')}</tr>
       ${rows.map(r => `<tr>${r.map((v, ci) => `<td data-r="${l.rows.indexOf(r)}" data-c="${ci}" style="padding:2px 5px;border-bottom:1px solid color-mix(in srgb,var(--border) 40%,transparent);${coll.has(ci) ? 'max-width:1.4rem;overflow:hidden;white-space:nowrap' : ''};cursor:text">${esc(v)}</td>`).join('')}</tr>`).join('')}
     </table></div>
     <div class="jl-add"><button class="jl-row-go ib" title="Add a row">＋ row</button></div>
@@ -2190,7 +2196,46 @@ function renderJList() {
     + (eph.length ? (pinned.length ? '<div class="jl-subhead">Ephemeral</div>' : '') + '<div class="jl-grid">' + eph.map(boxHtml).join('') + '</div>' : '');
   el.querySelectorAll('.jl-box').forEach(box => {
     const list = jlists.find(l => l.id === box.dataset.id); if (!list) return;
-    // width drag (owner decree 2026-08-16): grip on the corner, px stored in settings
+    // drag-reorder (owner decree 2026-08-16): boxes move like persistent lists;
+    // order persists in settings.jlOrder
+    box.setAttribute('draggable', 'true');
+    box.ondragstart = e => { e.dataTransfer.setData('text/jl', list.id); e.dataTransfer.effectAllowed = 'move'; };
+    box.ondragover = e => { if (e.dataTransfer.types.includes('text/jl')) e.preventDefault(); };
+    box.ondrop = e => {
+      const src = e.dataTransfer.getData('text/jl'); if (!src || src === list.id) return;
+      e.preventDefault();
+      const group = (list.persistent || list.shared) ? jlists.filter(x => x.persistent || x.shared) : jlists.filter(x => !x.persistent && !x.shared);
+      const ord = appSettings.jlOrder || {};
+      const seq = group.sort((a, b) => (ord[a.id] ?? 999) - (ord[b.id] ?? 999)).map(x => x.id).filter(id => id !== src);
+      seq.splice(seq.indexOf(list.id), 0, src);
+      appSettings.jlOrder = { ...ord }; const upd = {};
+      seq.forEach((id, i) => { appSettings.jlOrder[id] = i; upd[id] = i; });
+      renderJList();
+      api('/api/settings', { method: 'POST', body: JSON.stringify({ settings: { jlOrder: upd } }) });
+    };
+    const cfgBtn = box.querySelector('.jl-cfg');
+    if (cfgBtn) cfgBtn.onclick = e => {
+      e.stopPropagation();
+      let pan = box.querySelector('.jl-cfg-pan');
+      if (pan) { pan.remove(); return; }
+      pan = document.createElement('div'); pan.className = 'jl-cfg-pan tiny';
+      pan.style.cssText = 'border:1px solid var(--border);border-radius:5px;padding:5px;margin:4px 0';
+      const cur = list.listCfg || { collapsed: [], colWidths: {} };
+      pan.innerHTML = '<b>Column defaults</b> <span class="muted">(applies to everyone; your own alt-click toggles still win on this device)</span>'
+        + list.columns.map((c, ci) => `<div style="display:flex;gap:6px;align-items:center;margin-top:2px">
+            <label style="flex:1"><input type="checkbox" class="jc-coll" data-c="${ci}" ${(cur.collapsed || []).includes(ci) ? 'checked' : ''}> ${esc(c || String.fromCharCode(65 + ci))}</label>
+            <input class="jc-w q-input" data-c="${ci}" type="number" min="24" max="1200" placeholder="width px" value="${(cur.colWidths || {})[ci] || ''}" style="width:78px"></div>`).join('')
+        + '<button class="ib jc-save" style="margin-top:4px">Save defaults</button>';
+      box.appendChild(pan);
+      pan.querySelector('.jc-save').onclick = async () => {
+        const collapsed = [...pan.querySelectorAll('.jc-coll')].filter(x => x.checked).map(x => +x.dataset.c);
+        const colWidths = {}; [...pan.querySelectorAll('.jc-w')].forEach(x => { if (x.value) colWidths[x.dataset.c] = +x.value; });
+        const r = await api('/api/lists/' + encodeURIComponent(list.slug) + '/config', { method: 'POST', body: JSON.stringify({ collapsed, colWidths }) }).catch(() => null);
+        if (!r || r.error) { showErr((r && r.error) || 'config save failed'); return; }
+        localStorage.removeItem('flex-collapsed:' + list.slug); // let the new default show here too
+        loadJLists();
+      };
+    };
     const grip = box.querySelector('.jl-wgrip');
     if (grip) grip.onmousedown = e => {
       e.preventDefault();

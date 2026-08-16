@@ -2254,6 +2254,10 @@ app.post('/api/settings', asyncRoute(async (req, res) => {
   if (!s || typeof s !== 'object') return res.status(400).json({ error: 'settings object required' });
   const next = { ...cur };
   if (s.sections && typeof s.sections === 'object') next.sections = s.sections;
+  if (s.jlOrder && typeof s.jlOrder === 'object') { // ephemeral-list drag order: per-key merge
+    next.jlOrder = { ...(next.jlOrder || {}) };
+    for (const [k, v] of Object.entries(s.jlOrder)) { if (v === null) delete next.jlOrder[k]; else next.jlOrder[k] = +v || 0; }
+  }
   if (s.jlWidths && typeof s.jlWidths === 'object') { // ephemeral-list drag widths: per-key merge, null deletes
     next.jlWidths = { ...(next.jlWidths || {}) };
     for (const [k, v] of Object.entries(s.jlWidths)) { if (v === null) delete next.jlWidths[k]; else next.jlWidths[k] = Math.max(180, Math.min(2000, +v || 0)); }
@@ -5505,7 +5509,7 @@ async function elistsPayload() {
     try {
       if (cfg.type === 'table') { // tables render as grid boxes in the same section (owner, 2026-08-16)
         const g = await flexGrid(cfg, slug);
-        out.push({ id: 'fx:' + slug, slug, heading: cfg.name || slug, shared: true, type: 'table', columns: g.columns, rows: g.rows });
+        out.push({ id: 'fx:' + slug, slug, heading: cfg.name || slug, shared: true, type: 'table', columns: g.columns, rows: g.rows, listCfg: cfg.listCfg || null });
       } else out.push(await sharedListView(slug, cfg));
     } catch (e) {}
   }
@@ -6055,16 +6059,17 @@ const LIST_REGISTRY_TAB = 'List Registry';
 let regShares = {};
 async function refreshRegistryShares() {
   try {
-    const r = await store.values.get({ spreadsheetId: FAMILY_SHEET_ID, range: `'${LIST_REGISTRY_TAB}'!A2:H60` });
+    const r = await store.values.get({ spreadsheetId: FAMILY_SHEET_ID, range: `'${LIST_REGISTRY_TAB}'!A2:I60` });
     const next = {};
     const me = String(CFG.owner || 'david').trim().toLowerCase(); // cha instance sets DASHBOARD_OWNER
     for (const row of (r.data.values || [])) {
-      const [n, name, tab, slug, , status, type, scope] = row.map(x => String(x || '').trim());
+      const [n, name, tab, slug, , status, type, scope, cfgJson] = row.map(x => String(x || '').trim());
       if (!n || !tab || !slug || !/^active$/i.test(status || 'active')) continue;
       // Scope (owner decree 2026-08-16): '' / 'shared' = both dashboards; a name = that
       // owner's PERSONAL list — same registry, same shapes, just not mutually visible
       if (scope && !/^shared$/i.test(scope) && scope.toLowerCase() !== me) continue;
-      next[slug] = { sheetId: FAMILY_SHEET_ID, tab, label: `#${n} ${name}`, name: name || slug,
+      let listCfg = null; try { listCfg = cfgJson ? JSON.parse(cfgJson) : null; } catch (e) {}
+      next[slug] = { sheetId: FAMILY_SHEET_ID, tab, label: `#${n} ${name}`, name: name || slug, listCfg,
         type: /^table$/i.test(type) ? 'table' : 'checklist',
         token: 'reg-' + crypto.createHash('sha1').update('list-registry:' + slug).digest('hex').slice(0, 24) };
     }
@@ -6259,6 +6264,21 @@ async function flexGrid(cfg, slug) {
     .filter(row => row.some(c => c.trim()));
   return { columns, rows };
 }
+// per-list column defaults (owner decree 2026-08-16): the ⚙ on a table box writes
+// {collapsed:[colIdx], colWidths:{colIdx:px}} into the registry's Config column — a
+// cross-user DEFAULT (each device's own toggles still override locally).
+app.post('/api/lists/:slug/config', asyncRoute(async (req, res) => {
+  const b = req.body || {};
+  const cfg = { collapsed: (Array.isArray(b.collapsed) ? b.collapsed : []).map(Number).filter(n => n >= 0 && n < 99),
+    colWidths: Object.fromEntries(Object.entries(b.colWidths || {}).map(([k, v]) => [k, Math.max(24, Math.min(1200, +v || 0))]).filter(([, v]) => v)) };
+  const r = await store.values.get({ spreadsheetId: FAMILY_SHEET_ID, range: `'${LIST_REGISTRY_TAB}'!A2:H60` });
+  const i = (r.data.values || []).findIndex(row => String(row[3] || '').trim() === req.params.slug);
+  if (i === -1) return res.status(404).json({ error: 'no registry list: ' + req.params.slug });
+  await store.values.update({ spreadsheetId: FAMILY_SHEET_ID, range: `'${LIST_REGISTRY_TAB}'!I${i + 2}`,
+    valueInputOption: 'RAW', requestBody: { values: [[JSON.stringify(cfg)]] } });
+  await refreshRegistryShares();
+  res.json({ ok: true, cfg });
+}));
 // the ephemeral-style ✕ for registry lists: one click retires (hides everywhere), never deletes
 app.post('/api/lists/:slug/retire', asyncRoute(async (req, res) => {
   const r = await store.values.get({ spreadsheetId: FAMILY_SHEET_ID, range: `'${LIST_REGISTRY_TAB}'!A2:H60` });
