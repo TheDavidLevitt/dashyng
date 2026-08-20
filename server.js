@@ -5135,6 +5135,7 @@ async function runClaude(prompt, { tools, timeoutMs, module, model, served } = {
   // Studio free tier ($0, rate-limited). Any failure — rate limit, empty, no key — falls
   // straight through to the paid chain, so this can only ever save money, never block work.
   if (!tools) {
+    require('./server-log-usage').set(logUsage);
     const pv = require('./providers');
     if (pv.geminiFreeAllowed(module)) {
       try {
@@ -8154,6 +8155,72 @@ app.get('/api/apa/benchmarks', asyncRoute(async (req, res) => {
 app.post('/api/apa/benchmarks', asyncRoute(async (req, res) => {
   if (!HAS_CLAUDE) return res.status(503).json({ error: 'compile runs on the Mac/VM agent tier' });
   res.json({ started: true }); runApaBenchmarks().catch(e => console.error('apa bench:', e.message));
+}));
+// ---- rail-aware model pick (owner rule 2026-08-20) ----
+// "There is no case where a fallback to a PAID rail keeps the model that was chosen
+// because it was free." A headless script whose subscription rung dies asks here at
+// fallback time; the answer is the cheapest board model that (a) clears the role's
+// benchmark floor and (b) is actually listed on the paid rail — priced by the RAIL'S
+// OWN live pricing, not the board's generic price. An explicit role winner is honored
+// when it's listed on the rail. Falls back to nothing — callers keep their default.
+let orListCache = { at: 0, models: [] };
+async function openrouterModels() {
+  if (Date.now() - orListCache.at < 6 * 3600e3 && orListCache.models.length) return orListCache.models;
+  try {
+    const r = await fetch('https://openrouter.ai/api/v1/models', { signal: AbortSignal.timeout(10000) });
+    const j = await r.json();
+    const models = (j.data || []).map(m => ({ id: m.id, outPerM: (parseFloat(m.pricing?.completion) || 0) * 1e6 }))
+      .filter(m => m.id && m.outPerM > 0); // free-tier rows are rate-limited bait — paid rail only
+    if (models.length) orListCache = { at: Date.now(), models };
+  } catch (e) {}
+  return orListCache.models;
+}
+const normModelId = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+app.get('/api/apa/pick', asyncRoute(async (req, res) => {
+  const roleName = String(req.query.role || 'steeldust').slice(0, 40);
+  const roles = loadApaRoles();
+  const role = (roles.roles || {})[roleName];
+  if (!role) return res.status(404).json({ error: 'no such role' });
+  const min = role.min ?? ((apaState().cutoffs || {})[roleName] || {}).min;
+  const primary = role.primary || 'AA Intelligence';
+  let board = []; try { board = (await readTabCached(STABLE_SHEET_ID, APA_MODELS_TAB, APA_MODELS_HEADERS, 300000)).rows; } catch (e) {}
+  const or = await openrouterModels();
+  if (!or.length) return res.status(503).json({ error: 'rail listing unavailable' });
+  const norm = s => String(s || '').toLowerCase().replace(/\(.*?\)/g, '').trim();
+  const sameBench = (a, b) => { const x = norm(a), y = norm(b); return !!x && !!y && (x.startsWith(y) || y.startsWith(x)); };
+  const onRail = model => { // board id ↔ rail slug tail, fuzzy both directions
+    const n = normModelId(model);
+    // ':' ids are rail variants (:batch/:free/:extended) — not interactive endpoints
+    const plain = or.filter(m => !m.id.includes(':'));
+    const exact = plain.filter(m => normModelId(m.id.split('/').pop()) === n);
+    if (exact.length) return exact.sort((a, b) => a.outPerM - b.outPerM)[0];
+    // prefix matches are ambiguous (gpt-5-5 would match openai/gpt-5) — require the LONGER
+    // string to extend the shorter by a version-ish tail only when no exact id exists,
+    // and take the LONGEST tail (closest name), cheapest among ties
+    const fuzzy = plain.filter(m => { const t = normModelId(m.id.split('/').pop()); return t.startsWith(n) || n.startsWith(t); })
+      .sort((a, b) => normModelId(b.id.split('/').pop()).length - normModelId(a.id.split('/').pop()).length || a.outPerM - b.outPerM);
+    return fuzzy[0] || null;
+  };
+  // NOTE deliberately NO winner precedence here: a role winner is typically adopted while
+  // riding the subscription rail, where its marginal cost is zero — that rationale does
+  // not transfer to a paid rail (owner rule 2026-08-20). Cheapest-qualified only; the
+  // winner competes on price like everything else. Winner-only fallback survives solely
+  // for roles with no benchmark floor at all.
+  if (min == null) {
+    const hit = role.winner && onRail(role.winner);
+    if (hit) return res.json({ role: roleName, model: role.winner, slug: hit.id, outPerM: +hit.outPerM.toFixed(2), via: 'role winner (no floor defined)' });
+    return res.status(503).json({ error: 'role has no benchmark floor and no rail-listed winner' });
+  }
+  const candidates = board.map(r => { let b = {}; try { b = JSON.parse(r.Benchmarks || '{}'); } catch (e) {} return { model: r.Model, benchmarks: b }; })
+    .map(m => { const k = Object.keys(m.benchmarks).find(k2 => sameBench(k2, primary)); return { model: m.model, score: k ? m.benchmarks[k] : null }; })
+    .filter(m => m.score != null && m.score >= min)
+    .map(m => ({ ...m, rail: onRail(m.model) }))
+    .filter(m => m.rail)
+    .sort((a, b) => a.rail.outPerM - b.rail.outPerM);
+  if (!candidates.length) return res.status(503).json({ error: 'no rail-listed model clears the floor' });
+  const w = candidates[0];
+  res.json({ role: roleName, model: w.model, slug: w.rail.id, outPerM: +w.rail.outPerM.toFixed(2), score: w.score, min, benchmark: primary,
+    runnersUp: candidates.slice(1, 4).map(c => ({ model: c.model, slug: c.rail.id, outPerM: +c.rail.outPerM.toFixed(2), score: c.score })) });
 }));
 // Auto-scan runs on the Mac only (HAS_JOURNAL) — single scanner avoids double decisions across
 // tiers; the 20h lastScan guard + apaBusy dedup handle restarts. VM can still scan on-demand.

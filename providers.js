@@ -335,6 +335,13 @@ async function openrouterText(prompt, model) {
   const j = await r.json();
   const text = j.choices?.[0]?.message?.content;
   if (!text) throw new Error('openrouter empty response');
+  // paid path — must never be invisible: the 2026-08-19 spend hunt found this
+  // branch billing real money with no Usage row at all
+  const u = j.usage || {};
+  try {
+    require('./server-log-usage')({ module: 'openrouter-text', model: j.model || model || 'anthropic/claude-haiku-4.5',
+      input: u.prompt_tokens || 0, output: u.completion_tokens || 0, costUsd: '', note: 'openrouter (paid key)' });
+  } catch (e) { /* logging helper optional */ }
   return text;
 }
 

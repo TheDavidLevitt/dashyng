@@ -222,8 +222,14 @@ async function louetCheck(ctx) {
       const pct = ((cur - ref) / ref) * 100;
       const ctxTxt = `${ref.toFixed(2)}→${cur.toFixed(2)} m³/s` + (avg7 ? ` (moy 7j ${avg7.toFixed(2)})` : '');
       // Neutral, factual labels only (owner rule 2026-08-09): data + % change, no alarm words.
-      if (pct >= 100)
+      if (avg7 && cur < avg7 && h.lastHighFlow) { h.lastHighFlow = 0; } // event over — ladder resets
+      if (pct >= 100 && (!avg7 || cur > avg7) && cur >= 2 * (h.lastHighFlow || 0)) {
+        // high = doubling that ALSO clears the 7-day baseline; the next high needs a further
+        // doubling from this alerted level, so N messages ⇒ ~2^N the original flow
+        h.lastHighFlow = cur;
         fire('flow-high', 'high', `Louet: flow ${pct >= 150 ? 'x' + (1 + pct / 100).toFixed(1) : 'doubled'} in 24h (${ctxTxt}) — check conditions`, { pct, cur, ref, refSrc, avg7 });
+      } else if (pct >= 100)
+        fire('flow-up', 'medium', `Louet: flow +${Math.round(pct)}% (24h, still ≤ moy 7j) — ${ctxTxt}`, { pct, cur, ref, refSrc, avg7 });
       else if (Math.abs(pct) > 50)
         fire(pct > 0 ? 'flow-up' : 'flow-down', 'medium', `Louet: flow ${pct > 0 ? '+' : ''}${Math.round(pct)}% (24h) — ${ctxTxt}`, { pct, cur, ref, refSrc, avg7 });
     }
@@ -254,7 +260,7 @@ async function louetCheck(ctx) {
       const sid = ctx.config.todoSheetId;
       const id = Math.random().toString(36).slice(2, 10);
       await ctx.store.values.append({ spreadsheetId: sid, range: "'Urgent Queue'!A1", valueInputOption: 'RAW',
-        requestBody: { values: [[new Date().toISOString(), 'Louet flood watch', a.text, 'high', 'nature-weather', '', id]] } });
+        requestBody: { values: [[new Date().toISOString(), 'Louet flow watch', a.text, 'high', 'nature-weather', '', id]] } });
     } catch (e) { lesc({ key: a.key, level: 'error', text: 'Urgent Queue append failed: ' + e.message }); }
   }
   return { alerts };
